@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { CoreProcess } from '../../core-process';
-import { McpServerManager } from '../mcp/McpServerManager';
+import { ChatUpdatePayload } from '../../protocol/coreMessages';
+import { SessionMetadata, SessionService } from '../session/SessionService';
 
 interface ToolCall {
     id: string;
@@ -19,16 +20,19 @@ interface ChatMessage {
 }
 
 export class AgentService {
-    private activeSessionId: string | null = null;
-    private processedToolCallIds: Set<string> = new Set();
+    public activeSessionId: string | null = null;
 
     constructor(
-        private readonly context: vscode.ExtensionContext,
         private readonly core: CoreProcess,
-        private readonly postMessage: (message: any) => void
+        private readonly postMessage: (message: any) => void,
+        private readonly sessionService: SessionService,
+        private readonly onSessionMetadataChanged?: (metadata: SessionMetadata) => void
     ) {
-        // Listen to core stream
-        this.core.onMessage('chat_update', (payload: any) => this.handleChatUpdate(payload));
+        this.core.onMessage('plan_updated', async () => {
+            // Fetch fresh tasks and broadcast to UI
+            const tasks = await this.core.send('get_tasks', {});
+            this.postMessage({ type: 'tasks_updated', payload: tasks });
+        });
     }
 
     public async handleMessage(message: any) {
@@ -40,53 +44,112 @@ export class AgentService {
             case 'cancel_generation': // Alias from webview
                 await this.cancelSession();
                 break;
+            case 'create_task_ui':
+                await this.core.send('create_task', message.payload);
+                break;
+            case 'move_task_column':
+                await this.core.send('set_column', message.payload);
+                break;
+            case 'delete_task_ui':
+                await this.core.send('delete_task', message.payload);
+                break;
+            case 'add_subtask_ui':
+                await this.core.send('add_subtask', message.payload);
+                break;
+            case 'complete_task_ui':
+                await this.core.send('complete_task', message.payload);
+                break;
+            case 'get_tasks':
+                const tasks = await this.core.send('get_tasks', {});
+                this.postMessage({ type: 'tasks_updated', payload: tasks });
+                break;
         }
     }
 
-    private async startSession(payload?: { prompt: string }) {
-        // Generate new Session ID
-        this.activeSessionId = crypto.randomUUID();
-        this.processedToolCallIds.clear();
+    private async startSession(payload?: { prompt: string; model?: string; provider?: string; session_id?: string }) {
+        const workspaceDir = vscode.workspace.workspaceFolders?.[0].uri.fsPath || '';
+        const existingSessionId = payload?.session_id;
+        this.activeSessionId = existingSessionId || await this.sessionService.createSession(workspaceDir, payload?.prompt || "Start autonomous task.");
+
         let prompt = payload?.prompt || "Start autonomous task.";
 
-        // Notify frontend
-        this.postMessage({
-            type: 'session_created',
-            sessionId: this.activeSessionId
-        });
+        if (existingSessionId) {
+            if (payload?.prompt) {
+                const metadata = await this.sessionService.updateSessionTitle(existingSessionId, payload.prompt);
+                if (metadata) {
+                    this.notifySessionMetadata(metadata);
+                }
+            }
+            try {
+                const sessionData = await this.sessionService.loadSession(existingSessionId);
+                await this.core.send('hydrate_session', {
+                    session_id: existingSessionId,
+                    messages: sessionData?.messages || []
+                });
+            } catch (e) {
+                console.error('[AgentService] Failed to hydrate existing session:', e);
+            }
+        } else {
+            this.postMessage({
+                type: 'session_created',
+                payload: { id: this.activeSessionId, sessionId: this.activeSessionId }
+            });
+            await this.notifyActiveSessionMetadata();
+
+            // 1. Hydrate Backend to ensure session exists
+            try {
+                await this.core.send('create_session', {
+                    session_id: this.activeSessionId,
+                    model_id: payload?.model,
+                    provider_id: payload?.provider
+                });
+            } catch (e) {
+                console.error('[AgentService] Failed to create session:', e);
+                // Fallback to hydration if create_session isn't supported as expected
+                await this.core.send('hydrate_session', {
+                    session_id: this.activeSessionId,
+                    messages: []
+                }).catch(ce => console.error('[AgentService] Hydration fallback failed:', ce));
+            }
+        }
 
         // Notify start
         this.postMessage({ type: 'api_req_started' });
 
-        // Phase 10: Inject Tools
-        const mcpHub = await McpServerManager.getInstance(this.context);
-        const servers = mcpHub.getServers();
-        const tools = servers.flatMap(s => s.tools || []);
 
-        const systemPrompt = `You are an autonomous AI agent. You have access to the following tools:\n` +
-            tools.map(t => `- ${t.name}: ${t.description} (Args: ${JSON.stringify(t.inputSchema)})`).join('\n') +
-            `\n\nWhen you need to use a tool, output a JSON block with "toolCalls": [{ "name": "...", "id": "uuid", "arguments": { ... } }]. ` +
-            `Wait for the result in the next message using the same ID. verify your changes.`;
 
-        // Send initial Prompt to Core
-        await this.core.send('chat_message', {
-            session_id: this.activeSessionId,
-            content: `${systemPrompt}\n\nTask: ${prompt}`,
-            role: 'user'
-        });
+        try {
+            // Send initial Prompt to Core
+            // The core already handles tool definitions and system prompt internally.
+            // Sending it here as part of user message is redundant and clutters the UI.
+            await this.core.send('chat_message', {
+                session_id: this.activeSessionId,
+                content: prompt,
+                role: 'user'
+            });
+
+            // The Go backend runs the autonomous loop internally.
+            // When this promise resolves, the session loop has concluded in Go.
+            this.postMessage({ type: 'ask_completion_result' });
+        } catch (err: any) {
+            console.error('[AgentService] Session failed:', err);
+            this.postMessage({ type: 'process_error', payload: { message: err.message || 'Session failed' } });
+            this.postMessage({ type: 'ask_completion_result' });
+        }
     }
 
-    private async handleChatUpdate(payload: { message: ChatMessage; session_id?: string }) {
-        // Ignroe updates not for this agent session
+    public async onChatUpdate(payload: ChatUpdatePayload) {
+        // Ignore updates not for this agent session
         if (payload.session_id !== this.activeSessionId) return;
 
         const msg = payload.message;
+        if (!msg) return;
 
         // Forward to UI to show progress (streaming text)
         // The AgentView should eventually display the conversation
-        // For now, we rely on 'say_text' for status updates in the mocked UI, 
+        // For now, we rely on 'say_text' for status updates in the mocked UI,
         // but let's also send the raw update so we can maybe render it later.
-        // this.postMessage({ type: 'chat_update', payload }); 
+        // this.postMessage({ type: 'chat_update', payload });
 
         // If we have text content, show it as 'say_text'
         if (msg.content && msg.isStreaming) {
@@ -96,86 +159,41 @@ export class AgentService {
             });
         }
 
-        // Check for Tool Calls
-        if (msg.toolCalls && msg.toolCalls.length > 0) {
-            for (const tool of msg.toolCalls) {
-                // Only execute if not processed and ready (assuming 'pending' means ready to execute)
-                // In some systems, 'pending' means waiting for approval.
-                if (tool.status === 'pending' && !this.processedToolCallIds.has(tool.id)) {
-                    await this.executeTool(tool);
-                }
-            }
-        }
-
         // Detect Completion (Stop)
         if (!msg.isStreaming && (!msg.toolCalls || msg.toolCalls.length === 0)) {
             this.postMessage({ type: 'ask_completion_result' }); // Marks as done in UI
         }
     }
 
-    private async executeTool(tool: ToolCall) {
-        this.processedToolCallIds.add(tool.id);
+    private async cancelSession() {
+        if (this.activeSessionId) {
+            const sid = this.activeSessionId;
+            console.log('[AgentService] Cancelling session:', sid);
 
-        try {
-            // Notify UI we are waiting/executing
-            this.postMessage({
-                type: 'ask_tool',
-                payload: { toolId: tool.id, name: tool.name, args: tool.arguments, partial: false }
-            });
+            // Mark as null immediately to ignore incoming messages for this ID
+            this.activeSessionId = null;
 
-            // Auto-Approve & Execute (Phase 10 goal)
-            const mcpHub = await McpServerManager.getInstance(this.context);
-
-            // Assume tool name format "server_name:tool_name" or just "tool_name"
-            // For now, simple lookup or pass to hub. 
-            // If the tool name relies on a specific server not encoded in the name, we might need logic.
-            // But McpServerManager usually needs serverName. 
-            // Let's assume the LLM generates "server__tool" or we search.
-            // actually mcpHub.callTool needs (serverName, toolName, args).
-
-            // HACK: We need to find which server has this tool.
-            // We'll iterate all servers.
-            const servers = mcpHub.getServers();
-            let foundServer = '';
-            let realToolName = tool.name;
-
-            for (const s of servers) {
-                if (s.tools?.find(t => t.name === tool.name)) {
-                    foundServer = s.name;
-                    break;
-                }
+            // Send abort signal to Core
+            try {
+                await this.core.send('abort_chat', { session_id: sid });
+            } catch (e) {
+                console.error('[AgentService] Failed to send abort_chat:', e);
             }
 
-            if (!foundServer) {
-                throw new Error(`Tool ${tool.name} not found in any connected MCP server.`);
-            }
-
-            const result = await mcpHub.callTool(foundServer, realToolName, tool.arguments);
-
-            // Send Result back to Core
-            await this.core.send('chat_message', {
-                session_id: this.activeSessionId,
-                content: `Tool '${tool.name}' Output:\n${JSON.stringify(result, null, 2)}`,
-                role: 'user' // Masquerade as user providing the result
-            });
-
-        } catch (error: any) {
-            console.error('Agent Tool Execution Failed:', error);
-            // Report error back to Core
-            await this.core.send('chat_message', {
-                session_id: this.activeSessionId,
-                content: `Tool '${tool.name}' Failed: ${error.message}`,
-                role: 'user'
-            });
+            // Notify UI that generation has stopped
+            this.postMessage({ type: 'generation_cancelled' });
         }
     }
 
-    private async cancelSession() {
-        if (this.activeSessionId) {
-            console.log('[AgentService] Cancelling session:', this.activeSessionId);
-            // Send abort signal to Core
-            await this.core.send('abort_chat', { session_id: this.activeSessionId });
-            this.activeSessionId = null;
+    private async notifyActiveSessionMetadata(): Promise<void> {
+        if (!this.activeSessionId) return;
+        const metadata = await this.sessionService.getSessionMetadata(this.activeSessionId);
+        if (metadata) {
+            this.notifySessionMetadata(metadata);
         }
+    }
+
+    private notifySessionMetadata(metadata: SessionMetadata): void {
+        this.onSessionMetadataChanged?.(metadata);
     }
 }

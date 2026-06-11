@@ -1,31 +1,410 @@
-import { useRef, useEffect, KeyboardEvent, useState } from 'react';
-import { Send, Mic, Square, ChevronDown, FileCode, Plus, StopCircle } from 'lucide-react';
+import { useRef, useEffect, KeyboardEvent, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type ReactNode } from 'react';
+import { Send, Mic, Square, ChevronDown, FileCode, StopCircle, X, Plus, Bot, Hand, ShieldCheck, ShieldAlert, CheckCircle2, Play, Info, Gauge, Paperclip, Image as ImageIcon, type LucideIcon } from 'lucide-react';
+import { AffectedFilesList } from './AffectedFilesList';
 import { useAudioRecorder } from '../../hooks/useAudioRecorder';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
 import { FileSearchResult } from '../../hooks/useChat';
+import { ContextFilePayload, ContextStatus, UsageSnapshot } from '../../types/protocol';
 import { ModelPickerModal } from './ModelPickerModal';
 import { EtherStatus } from './EtherPanel';
+import { NetworkDisplayStatus } from '../../hooks/useNetworkHealth';
+import { NetworkStatusPill } from './NetworkStatusPill';
 
 interface ChatInputProps {
     value: string;
     onChange: (value: string) => void;
-    onSend: (value?: string) => void;
+    onSend: (value?: string, contextFiles?: ContextFilePayload[]) => void;
+    onStartAgent?: (value?: string, contextFiles?: ContextFilePayload[]) => void;
     onCancel?: () => void;
     isLoading?: boolean;
+    isStopping?: boolean;
     placeholder?: string;
-    currentMode?: string;
-    onModeChange?: (mode: string) => void;
+    currentMode: 'plan' | 'act' | 'mission';
+    onModeChange: (mode: 'plan' | 'act' | 'mission') => void;
     onOpenSettings?: () => void;
     fileResults?: FileSearchResult[];
     searchFiles?: (query: string) => void;
     liveStatus?: EtherStatus;
     onToggleLiveMode?: () => void;
+    currentModel: { id: string; name: string; provider: string };
+    onModelChange: (model: { id: string; name: string; provider: string }) => void;
+    recentlyEditedFiles?: { path: string, name: string }[];
+    pendingEdits?: any[];
+    pendingChoice?: ChoiceRequest | null;
+    onChoiceResponse?: (id: string, answer: string) => void;
+    contextStatus?: ContextStatus | null;
+    usageSnapshot?: UsageSnapshot | null;
+    networkStatus?: NetworkDisplayStatus;
+    missionStatus?: ReactNode;
+    sessionId?: string;
 }
 
+export const MAX_CHAT_ATTACHMENTS = 8;
+export const MAX_CHAT_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 
+export function isReadyContextFile(file: ContextFilePayload): boolean {
+    return file.status !== 'staging' && file.status !== 'error';
+}
 
-// Placeholder - will be replaced by first available model from providers
-const DEFAULT_MODEL = { id: '', name: 'Loading...', provider: '' };
+export function buildContextMessage(value: string, contextFiles: ContextFilePayload[]): string {
+    const sendableFiles = contextFiles.filter(isReadyContextFile);
+    if (sendableFiles.length === 0) return value;
+    return `${value}\n\nContext Files:\n${sendableFiles.map(file => `@${file.stagedPath || file.path}`).join('\n')}`;
+}
+
+export function attachmentLimitError(fileCount: number, existingCount: number): string | null {
+    if (fileCount + existingCount <= MAX_CHAT_ATTACHMENTS) return null;
+    return `Attach up to ${MAX_CHAT_ATTACHMENTS} files per turn.`;
+}
+
+export function attachmentSizeError(size: number): string | null {
+    if (size <= MAX_CHAT_ATTACHMENT_BYTES) return null;
+    return `File is larger than ${Math.round(MAX_CHAT_ATTACHMENT_BYTES / 1024 / 1024)} MB.`;
+}
+
+const IMAGE_EXTENSION_PATTERN = /\.(avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)$/i;
+
+export function isImageContextFile(file: Pick<ContextFilePayload, 'mime' | 'name' | 'path'>): boolean {
+    const mime = file.mime || '';
+    if (mime.toLowerCase().startsWith('image/')) return true;
+    return IMAGE_EXTENSION_PATTERN.test(file.name || file.path || '');
+}
+
+export function formatAttachmentSize(size?: number): string {
+    if (!size || size <= 0) return '';
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+    return `${(size / 1024 / 1024).toFixed(size >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+}
+
+function attachmentDisplayName(file: ContextFilePayload): string {
+    return file.name || file.path.split('/').pop() || file.path || 'attachment';
+}
+
+function attachmentMetaLabel(file: ContextFilePayload): string {
+    if (file.status === 'staging') return 'Staging';
+    if (file.status === 'error') return file.error || 'Failed';
+    const size = formatAttachmentSize(file.size);
+    const mime = file.mime?.split(';')[0];
+    if (size && mime) return `${mime} · ${size}`;
+    return size || mime || (file.source === 'workspace' ? 'Workspace file' : 'Attachment');
+}
+
+function createAttachmentPreviewUrl(file: File): string | undefined {
+    if (!isImageContextFile({ mime: file.type, name: file.name, path: file.name })) return undefined;
+    try {
+        return URL.createObjectURL(file);
+    } catch {
+        return undefined;
+    }
+}
+
+function revokeAttachmentPreview(file?: Pick<ContextFilePayload, 'previewUrl'>) {
+    if (!file?.previewUrl?.startsWith('blob:')) return;
+    try {
+        URL.revokeObjectURL(file.previewUrl);
+    } catch {
+        // Best-effort cleanup; the preview is only a local webview object URL.
+    }
+}
+
+export const DEFAULT_MODEL = { id: '', name: 'Loading...', provider: '' };
+
+export function shouldRenderInputStatusStrip(
+    networkStatus?: NetworkDisplayStatus,
+    contextStatus?: ContextStatus | null,
+    usageSnapshot?: UsageSnapshot | null,
+    hasMissionStatus?: boolean
+): boolean {
+    return Boolean(networkStatus || contextStatus || usageSnapshot || hasMissionStatus);
+}
+
+export function getPlanFirstToggleState(currentMode: 'plan' | 'act' | 'mission') {
+    return {
+        active: currentMode === 'plan',
+        nextMode: currentMode === 'plan' ? 'act' as const : 'plan' as const,
+    };
+}
+
+function formatTokens(tokens?: number): string {
+    const value = tokens || 0;
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+    if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k`;
+    return String(value);
+}
+
+function formatCost(cost?: number): string {
+    const value = cost || 0;
+    if (value === 0) return '$0.00';
+    if (value < 0.01) return `$${value.toFixed(4)}`;
+    return `$${value.toFixed(2)}`;
+}
+
+function usageSourceLabel(source?: string): string {
+    if (source === 'actual') return 'actual';
+    if (source === 'unconfirmed') return 'unconfirmed';
+    return 'est';
+}
+
+function UsageBadge({
+    contextStatus,
+    usageSnapshot,
+    isActive,
+    isOpen,
+    onToggle,
+}: {
+    contextStatus?: ContextStatus | null;
+    usageSnapshot?: UsageSnapshot | null;
+    isActive?: boolean;
+    isOpen: boolean;
+    onToggle: () => void;
+}) {
+    const contextTokens = usageSnapshot?.contextTokens || contextStatus?.tokens_used || 0;
+    const contextWindow = usageSnapshot?.contextWindow || contextStatus?.tokens_max || 0;
+    const contextPercent = contextWindow > 0 ? Math.round((contextTokens / contextWindow) * 100) : Math.round(contextStatus?.percentage || 0);
+    const source = usageSourceLabel(usageSnapshot?.source);
+    const models = usageSnapshot?.models || [];
+    const contextReport = contextStatus?.report;
+    const contextWarnings = contextStatus?.warnings || contextReport?.warnings || [];
+    const contextSuggestions = contextStatus?.suggestions || contextReport?.suggestions || [];
+    const topContributors = contextReport?.top_contributors || [];
+    const compression = contextReport?.compression;
+    const compressedFragments = compression?.fragments || [];
+    const hasUsageTotals = Boolean(usageSnapshot && (usageSnapshot.requestCount > 0 || usageSnapshot.inputTokens > 0 || usageSnapshot.outputTokens > 0 || usageSnapshot.estimatedCostUsd > 0));
+
+    return (
+        <div className="relative shrink-0">
+            <button
+                type="button"
+                onClick={onToggle}
+                className="inline-flex h-6 max-w-full items-center gap-1.5 rounded-md border border-vscode-border/70 bg-vscode-editor-background/80 px-2 text-vscode-fg/55 transition-colors hover:bg-vscode-list-hoverBackground hover:text-vscode-fg/85"
+                title="Session usage"
+            >
+                <Gauge className="h-3.5 w-3.5" />
+                <span className="text-[11px] font-medium leading-none">
+                    {contextWindow > 0 ? `${formatTokens(contextTokens)}/${formatTokens(contextWindow)}` : formatTokens((usageSnapshot?.inputTokens || 0) + (usageSnapshot?.outputTokens || 0))}
+                </span>
+                <span className="hidden sm:inline text-[10px] leading-none text-vscode-fg/35">ctx</span>
+                <span className="hidden md:inline text-[10px] leading-none text-vscode-fg/35">
+                    {contextPercent > 0 ? `· ${contextPercent}%` : hasUsageTotals ? `· ${formatCost(usageSnapshot?.estimatedCostUsd)} ${source}` : isActive ? '· pending' : ''}
+                </span>
+            </button>
+
+            {isOpen && (
+                <div className="absolute bottom-full right-0 mb-2 w-80 max-w-[calc(100vw-32px)] rounded-md border border-vscode-border bg-vscode-input-bg shadow-lg z-[9999] overflow-hidden animate-in fade-in slide-in-from-bottom-2">
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-vscode-border bg-vscode-editor-background">
+                        <span className="text-[10px] font-medium text-vscode-fg/60">Usage</span>
+                        <span className="text-[10px] text-vscode-fg/40">
+                            {hasUsageTotals ? (source === 'actual' ? 'Provider reported' : 'Estimated') : isActive ? 'Waiting for provider usage' : 'No model usage yet'}
+                        </span>
+                    </div>
+                    <div className="p-3 space-y-3">
+                        <div>
+                            <div className="mb-1 flex items-center justify-between text-[10px] text-vscode-fg/45">
+                                <span>Context</span>
+                                <span>{contextPercent || 0}%</span>
+                            </div>
+                            <div className="h-1.5 rounded bg-vscode-editor-background overflow-hidden">
+                                <div className="h-full bg-vscode-button-bg" style={{ width: `${Math.min(100, Math.max(0, contextPercent || 0))}%` }} />
+                            </div>
+                            <div className="mt-1 text-[10px] text-vscode-fg/40">{formatTokens(contextTokens)} of {contextWindow ? formatTokens(contextWindow) : 'unknown'} tokens in current context</div>
+                        </div>
+
+                        {(contextWarnings.length > 0 || contextSuggestions.length > 0) && (
+                            <div className="space-y-1 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                                <div className="text-[10px] font-medium text-vscode-fg/55">Context health</div>
+                                {contextWarnings.slice(0, 2).map((warning, index) => (
+                                    <div key={`context-warning-${index}`} className="text-[10px] leading-snug text-vscode-fg/55">{warning}</div>
+                                ))}
+                                {contextSuggestions.slice(0, 2).map((suggestion, index) => (
+                                    <div key={`context-suggestion-${index}`} className="text-[9px] leading-snug text-vscode-fg/35">{suggestion}</div>
+                                ))}
+                            </div>
+                        )}
+
+                        {compression?.saved_tokens ? (
+                            <div className="space-y-1 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                                <div className="flex items-center justify-between gap-2">
+                                    <div className="text-[10px] font-medium text-vscode-fg/55">Context compression</div>
+                                    <div className="text-[10px] text-vscode-fg/45">
+                                        {formatTokens(compression.original_tokens)} → {formatTokens(compression.compressed_tokens)}
+                                    </div>
+                                </div>
+                                <div className="text-[9px] text-vscode-fg/35">
+                                    Saved {formatTokens(compression.saved_tokens)} across {compressedFragments.length} fragment{compressedFragments.length === 1 ? '' : 's'}.
+                                </div>
+                                {compressedFragments.slice(0, 3).map((fragment) => (
+                                    <div key={`${fragment.hash}-${fragment.id}`} className="flex items-center justify-between gap-2 text-[9px] text-vscode-fg/40">
+                                        <span className="min-w-0 truncate">{fragment.type} · {fragment.id}</span>
+                                        <span className="shrink-0">{formatTokens(fragment.saved_tokens)} saved</span>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : null}
+
+                        {topContributors.length > 0 && (
+                            <div className="space-y-1.5">
+                                <div className="text-[10px] text-vscode-fg/45">Largest context contributors</div>
+                                {topContributors.slice(0, 5).map((item) => (
+                                    <div key={`${item.id}-${item.type}`} className="flex items-center justify-between gap-2 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                                        <div className="min-w-0">
+                                            <div className="truncate text-[10px] text-vscode-fg/70">{item.id}</div>
+                                            <div className="text-[9px] text-vscode-fg/35">{item.type}{item.source ? ` · ${item.source}` : ''}</div>
+                                        </div>
+                                        <div className="shrink-0 text-[10px] text-vscode-fg/45">{formatTokens(item.tokens)}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        <div className="grid grid-cols-3 gap-2">
+                            <div className="rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                                <div className="text-[9px] text-vscode-fg/40">Input</div>
+                                <div className="text-[11px] font-medium text-vscode-fg/80">{formatTokens(usageSnapshot?.inputTokens)}</div>
+                            </div>
+                            <div className="rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                                <div className="text-[9px] text-vscode-fg/40">Output</div>
+                                <div className="text-[11px] font-medium text-vscode-fg/80">{formatTokens(usageSnapshot?.outputTokens)}</div>
+                            </div>
+                            <div className="rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                                <div className="text-[9px] text-vscode-fg/40">Cost</div>
+                                <div className="text-[11px] font-medium text-vscode-fg/80">{hasUsageTotals ? formatCost(usageSnapshot?.estimatedCostUsd) : 'pending'}</div>
+                            </div>
+                        </div>
+
+                        {(usageSnapshot?.cachedInputTokens || usageSnapshot?.reasoningOutputTokens) ? (
+                            <div className="flex flex-wrap gap-2 text-[10px] text-vscode-fg/45">
+                                {!!usageSnapshot.cachedInputTokens && <span>Cached input {formatTokens(usageSnapshot.cachedInputTokens)}</span>}
+                                {!!usageSnapshot.reasoningOutputTokens && <span>Reasoning {formatTokens(usageSnapshot.reasoningOutputTokens)}</span>}
+                            </div>
+                        ) : null}
+
+                        <div className="space-y-1.5">
+                            <div className="text-[10px] text-vscode-fg/45">Models used</div>
+                            {models.length === 0 ? (
+                                <div className="text-[10px] text-vscode-fg/35">No completed model usage yet.</div>
+                            ) : models.map(model => (
+                                <div key={`${model.provider}-${model.model}-${model.keySource || 'none'}`} className="flex items-center justify-between gap-2 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                                    <div className="min-w-0">
+                                        <div className="truncate text-[11px] text-vscode-fg/80">{model.model}</div>
+                                        <div className="text-[9px] text-vscode-fg/40">{model.provider} · {model.keySource === 'user' ? 'Your key' : model.keySource === 'server' ? 'Server key' : 'No key'} · {usageSourceLabel(model.source)}</div>
+                                    </div>
+                                    <div className="shrink-0 text-right text-[10px] text-vscode-fg/45">
+                                        <div>{formatTokens(model.inputTokens)} / {formatTokens(model.outputTokens)}</div>
+                                        <div>{formatCost(model.estimatedCostUsd)}</div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="text-[9px] leading-relaxed text-vscode-fg/35">
+                            Transparency meter only. Estimated rows use Ricochet token approximation when a provider does not return usage.
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+interface ChoiceRequest {
+    id: string;
+    question: string;
+    choices?: string[];
+    choiceMetadata?: ChoiceOptionMetadata[];
+}
+
+interface ChoiceOptionMetadata {
+    value: string;
+    label?: string;
+    description?: string;
+    recommended?: boolean;
+    danger?: boolean;
+}
+
+type ApprovalMode = 'ask' | 'auto' | 'full';
+
+interface AutoApprovalSettings {
+    enabled?: boolean;
+    read_files?: boolean;
+    read_files_external?: boolean;
+    edit_files?: boolean;
+    edit_files_external?: boolean;
+    delete_files?: boolean;
+    delete_files_external?: boolean;
+    execute_safe_commands?: boolean;
+    execute_all_commands?: boolean;
+    use_browser?: boolean;
+    use_mcp?: boolean;
+    enable_notifications?: boolean;
+}
+
+const APPROVAL_PRESETS: Record<ApprovalMode, AutoApprovalSettings> = {
+    ask: {
+        enabled: false,
+        read_files: false,
+        read_files_external: false,
+        edit_files: false,
+        edit_files_external: false,
+        delete_files: false,
+        delete_files_external: false,
+        execute_safe_commands: false,
+        execute_all_commands: false,
+        use_browser: false,
+        use_mcp: false,
+        enable_notifications: false,
+    },
+    auto: {
+        enabled: true,
+        read_files: true,
+        read_files_external: false,
+        edit_files: false,
+        edit_files_external: false,
+        delete_files: false,
+        delete_files_external: false,
+        execute_safe_commands: true,
+        execute_all_commands: false,
+        use_browser: false,
+        use_mcp: true,
+        enable_notifications: false,
+    },
+    full: {
+        enabled: true,
+        read_files: true,
+        read_files_external: true,
+        edit_files: true,
+        edit_files_external: true,
+        delete_files: true,
+        delete_files_external: true,
+        execute_safe_commands: true,
+        execute_all_commands: true,
+        use_browser: true,
+        use_mcp: true,
+        enable_notifications: false,
+    },
+};
+
+const APPROVAL_OPTIONS: Array<{ id: ApprovalMode; label: string; description: string; icon: LucideIcon }> = [
+    { id: 'ask', label: 'Ask approval', description: 'Ask before writes, commands, and external access.', icon: Hand },
+    { id: 'auto', label: 'Auto safe', description: 'Auto-approve reads and safe commands only.', icon: ShieldCheck },
+    { id: 'full', label: 'Full access', description: 'Allow edits, commands, browser, and MCP actions.', icon: ShieldAlert },
+];
+
+function approvalModeFromSettings(settings?: AutoApprovalSettings): ApprovalMode {
+    if (!settings?.enabled) return 'ask';
+    if (
+        settings.execute_all_commands ||
+        settings.edit_files ||
+        settings.edit_files_external ||
+        settings.delete_files ||
+        settings.delete_files_external ||
+        settings.read_files_external ||
+        settings.use_browser
+    ) {
+        return 'full';
+    }
+    return 'auto';
+}
 
 const DEFAULT_COMMANDS = [
     { command: '/clear', description: 'Clear chat history' },
@@ -35,172 +414,211 @@ const DEFAULT_COMMANDS = [
     { command: '/mode ask', description: 'Switch to Ask mode' },
 ];
 
+const DEFAULT_PLAN_CHOICE_DESCRIPTIONS: Record<string, string> = {
+    proceed: 'Start implementation using the approved plan.',
+    'revise plan': 'Keep planning and ask the agent to update the proposal.',
+    'save only': 'Leave the plan as a document and stop the task.',
+    cancel: 'Stop without starting implementation.',
+};
+
+function normalizeChoiceOption(choice: string, index: number, metadata?: ChoiceOptionMetadata) {
+    const value = metadata?.value || choice;
+    const rawLabel = metadata?.label || choice;
+    const normalized = rawLabel.trim().toLowerCase();
+    const description = metadata?.description
+        || DEFAULT_PLAN_CHOICE_DESCRIPTIONS[normalized]
+        || (normalized.includes('task') ? 'Create trackable tasks without starting execution.' : 'Send this decision to the agent.');
+
+    return {
+        value,
+        label: rawLabel,
+        description,
+        recommended: metadata?.recommended || index === 0,
+        danger: metadata?.danger || /cancel|stop|reject|deny/i.test(rawLabel),
+    };
+}
+
 function VoiceIcon({ className }: { className?: string }) {
     return (
         <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
             <path d="M17 7C17 6.44772 16.5523 6 16 6C15.4477 6 15 6.44772 15 7V25C15 25.5523 15.4477 26 16 26C16.5523 26 17 25.5523 17 25V7Z" fill="currentColor" />
-            <path d="M21 10C21 9.44772 20.5523 9 20 9C19.4477 9 19 9.44772 19 10V22C19 22.5523 19.4477 23 20 23C20.5523 23 21 22.5523 21 22V10Z" fill="currentColor" />
-            <path d="M13 10C13 9.44772 12.5523 9 12 9C11.4477 9 11 10C11 10V22C11 22.5523 11.4477 23 12 23C12.5523 23 13 22.5523 13 22V10C13 10 13 10 13 10Z" fill="currentColor" />
-            <path d="M25 14C25 13.4477 24.5523 13 24 13C23.4477 13 23 13.4477 23 14V18C23 18.5523 23.4477 19 24 19C24.5523 19 25 18.5523 25 18V14Z" fill="currentColor" />
-            <path d="M9 14C9 13.4477 8.55228 13 8 13C7.44772 13 7 13.4477 7 14V18C7 18.5523 7.44772 19 8 19C8.55228 19 9 18.5523 9 18V14Z" fill="currentColor" />
+            <path d="M21 10C21 9.44772 20.5523 9 20 9C19.4477 9 19 10V22C19 22.5523 20 23 21 22V10Z" fill="currentColor" />
+            <path d="M13 10C13 9.44772 12 10 12 10V22C12 22.5523 13 22 13 22V10Z" fill="currentColor" />
+            <path d="M25 14C25 13.4477 24 13 24 13C23 13 23 14 23 14V18C23 18.5523 24 19 25 18V14Z" fill="currentColor" />
+            <path d="M9 14C9 13.4477 8 13 8 13C7 13 7 14 7 14V18C7 18.5523 8 19 9 18V14Z" fill="currentColor" />
         </svg>
     );
 }
 
-/**
- * Chat input with integrated bottom toolbar — competitor-style layout.
- * Matches Roo-Code pattern: Mode + Provider selectors under input.
- */
 export function ChatInput(props: ChatInputProps) {
     const {
         value,
         onChange,
         onSend,
+        onStartAgent,
         onCancel,
         isLoading = false,
-        placeholder = 'Type your message...',
-        // currentMode = 'code', // Unused
-        // onModeChange, // Unused
-        // onOpenSettings, // Unused
+        isStopping = false,
+        placeholder = 'Ask anything or use /commands...',
         fileResults = [],
         searchFiles,
         liveStatus,
-        onToggleLiveMode
+        onToggleLiveMode,
+        currentMode,
+        onModeChange,
+        currentModel: propCurrentModel,
+        onModelChange,
+        recentlyEditedFiles,
+        pendingEdits,
+        pendingChoice,
+        onChoiceResponse,
+        contextStatus,
+        usageSnapshot,
+        networkStatus,
+        missionStatus,
+        sessionId
     } = props;
 
-    // Derived state for Ether
     const isLiveMode = liveStatus?.enabled ?? false;
     const isRemoteProcessing = isLiveMode && (liveStatus?.stage === 'processing' || liveStatus?.stage === 'receiving');
-    const isRemoteControl = isLiveMode && liveStatus?.stage !== 'idle';
+    const hasUsageStatus = Boolean(contextStatus || usageSnapshot);
+    const hasMissionStatus = Boolean(missionStatus);
+    const hasInputStatusStrip = shouldRenderInputStatusStrip(networkStatus, contextStatus, usageSnapshot, hasMissionStatus);
+    const planFirstToggle = getPlanFirstToggleState(currentMode);
 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
     const { isRecording, toggleRecording } = useAudioRecorder();
 
     const [showModelMenu, setShowModelMenu] = useState(false);
-    const [currentModel, setCurrentModel] = useState(DEFAULT_MODEL);
-    const [images, setImages] = useState<string[]>([]); // Base64 strings
-    const [isPlanMode, setIsPlanMode] = useState(false); // Plan/Act toggle
+    const [showContextMenu, setShowContextMenu] = useState(false);
+    const [showUsageMenu, setShowUsageMenu] = useState(false);
+    const [showApprovalMenu, setShowApprovalMenu] = useState(false);
+    const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
+    const [currentModel, setCurrentModel] = useState(propCurrentModel ?? DEFAULT_MODEL);
+    const [agentDraftEnabled, setAgentDraftEnabled] = useState(false);
+    const [dragActive, setDragActive] = useState(false);
+
+    const [contextFiles, setContextFiles] = useState<ContextFilePayload[]>([]);
+    const contextFilesRef = useRef<ContextFilePayload[]>([]);
+    const [showFileMenu, setShowFileMenu] = useState(false);
+    const [showCommandMenu, setShowCommandMenu] = useState(false);
+    const [filteredCommands, setFilteredCommands] = useState(DEFAULT_COMMANDS);
+    const [availableCommands] = useState(DEFAULT_COMMANDS);
+    const { postMessage, onMessage } = useVSCodeApi();
+
+    useEffect(() => {
+        contextFilesRef.current = contextFiles;
+    }, [contextFiles]);
+
+    useEffect(() => {
+        return () => {
+            contextFilesRef.current.forEach(revokeAttachmentPreview);
+        };
+    }, []);
 
     const closeAllMenus = () => {
         setShowModelMenu(false);
-        setShowModelMenu(false);
+        setShowContextMenu(false);
+        setShowUsageMenu(false);
+        setShowApprovalMenu(false);
         setShowFileMenu(false);
         setShowCommandMenu(false);
     };
 
-    // Context System State
-    const [contextFiles, setContextFiles] = useState<FileSearchResult[]>([]);
-    const [showFileMenu, setShowFileMenu] = useState(false);
+    useEffect(() => {
+        if (
+            propCurrentModel?.id !== currentModel.id ||
+            propCurrentModel?.provider !== currentModel.provider ||
+            propCurrentModel?.name !== currentModel.name
+        ) {
+            setCurrentModel(propCurrentModel ?? DEFAULT_MODEL);
+        }
+    }, [propCurrentModel, currentModel.id, currentModel.name, currentModel.provider]);
 
-    // Slash Command State
-    const [showCommandMenu, setShowCommandMenu] = useState(false);
-    const [filteredCommands, setFilteredCommands] = useState(DEFAULT_COMMANDS);
-    const [availableCommands, setAvailableCommands] = useState(DEFAULT_COMMANDS);
-    const { postMessage, onMessage } = useVSCodeApi();
-
-    // Fetch models AND settings on mount
     useEffect(() => {
         postMessage({ type: 'get_models' });
         postMessage({ type: 'get_settings' });
     }, [postMessage]);
 
-    // Listen for settings and models - SYNC with backend saved settings
     useEffect(() => {
         const unsubscribe = onMessage((msg: any) => {
             if (msg.type === 'settings_loaded') {
                 const settings = msg.payload;
                 if (settings?.provider && settings?.model) {
-                    // Use saved provider/model from backend
-                    setCurrentModel({
-                        id: settings.model,
-                        name: settings.model, // Will be updated when models arrive
-                        provider: settings.provider
-                    });
+                    const nextModel = { id: settings.model, name: settings.model, provider: settings.provider };
+                    setCurrentModel(nextModel);
+                    onModelChange(nextModel);
                 }
+                setApprovalMode(approvalModeFromSettings(settings?.auto_approval));
             }
             if (msg.type === 'models') {
                 const providers = msg.payload?.providers || [];
-                // Update model name if we already have a model selected
                 if (currentModel.id && currentModel.provider) {
                     const provider = providers.find((p: any) => p.id === currentModel.provider);
                     const model = provider?.models?.find((m: any) => m.id === currentModel.id);
                     if (model) {
-                        setCurrentModel(prev => ({ ...prev, name: model.name }));
+                        const nextModel = { ...currentModel, name: model.name };
+                        setCurrentModel(nextModel);
+                        onModelChange(nextModel);
                     }
                 } else if (currentModel.id === '') {
-                    // Only use first available if no saved settings
                     for (const provider of providers) {
-                        if (provider.models && provider.models.length > 0) {
-                            const firstModel = provider.models[0];
-                            setCurrentModel({
-                                id: firstModel.id,
-                                name: firstModel.name,
-                                provider: provider.id
-                            });
+                        if (provider.models?.length > 0) {
+                            const nextModel = { id: provider.models[0].id, name: provider.models[0].name, provider: provider.id };
+                            setCurrentModel(nextModel);
+                            onModelChange(nextModel);
                             break;
                         }
                     }
                 }
             }
-        });
-        return () => { unsubscribe(); };
-    }, [onMessage, currentModel.id, currentModel.provider]);
-
-    // Sync Plan/Act mode with auto-approve settings
-    // ACT mode = auto-approve file edits, PLAN mode = require approval
-    useEffect(() => {
-        // When switching to ACT mode, enable auto-approve for edits
-        // When switching to PLAN mode, require approval
-        postMessage({
-            type: 'auto_approve_settings',
-            payload: {
-                enabled: !isPlanMode, // ACT mode enables auto-approve
-                editFiles: !isPlanMode,
-                readFiles: true, // Always auto-approve reads
-                executeSafeCommands: true,
-                executeAllCommands: false,
-                useBrowser: true,
-                useMcp: true
-            }
-        });
-    }, [isPlanMode, postMessage]);
-
-    // Fetch dynamic workflows
-    useEffect(() => {
-        // Request workflows
-        postMessage({ type: 'get_workflows' });
-
-        const unsubscribe = onMessage((msg: any) => {
-            if (msg.type === 'workflows_list') {
-                const workflows = msg.payload?.workflows || [];
-                const newCommands = workflows.map((w: any) => ({
-                    command: w.command,
-                    description: w.description
+            if (msg.type === 'attachments_staged') {
+                const ready = new Map<string, ContextFilePayload>();
+                const errors = new Map<string, string>();
+                (msg.payload?.attachments || []).forEach((file: any) => {
+                    if (!file?.id) return;
+                    ready.set(String(file.id), {
+                        id: String(file.id),
+                        path: String(file.path || file.stagedPath || ''),
+                        stagedPath: String(file.stagedPath || file.path || ''),
+                        name: file.name ? String(file.name) : undefined,
+                        kind: 'attachment',
+                        source: 'attachment',
+                        status: 'ready',
+                        size: typeof file.size === 'number' ? file.size : undefined,
+                        mime: file.mime ? String(file.mime) : undefined,
+                    });
+                });
+                (msg.payload?.errors || []).forEach((error: any) => {
+                    if (error?.id) errors.set(String(error.id), String(error.error || 'Failed to stage attachment'));
+                });
+                if (ready.size === 0 && errors.size === 0) return;
+                setContextFiles(prev => prev.map(file => {
+                    if (!file.id || file.source !== 'attachment') return file;
+                    const staged = ready.get(file.id);
+                    if (staged) return { ...file, ...staged, previewUrl: file.previewUrl };
+                    const error = errors.get(file.id);
+                    if (error) return { ...file, status: 'error', error };
+                    return file;
                 }));
-                // Merge distinct
-                setAvailableCommands([...DEFAULT_COMMANDS, ...newCommands]);
             }
         });
         return () => { unsubscribe(); };
-    }, [onMessage, postMessage]);
+    }, [onMessage, currentModel.id, currentModel.name, currentModel.provider, onModelChange]);
 
-    // Auto-resize textarea on value change
     useEffect(() => {
         const textarea = textareaRef.current;
         if (textarea) {
             textarea.style.height = 'auto';
-            const newHeight = Math.min(textarea.scrollHeight, 200);
-            textarea.style.height = `${newHeight} px`;
+            textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
         }
     }, [value]);
 
-    /* Regex for detecting @mentions at end of word */
     const MENTION_REGEX = /@([\w\-\.\/]*)$/;
 
     const handleInputChange = (newValue: string) => {
         onChange(newValue);
-
-        // Slash Command Trigger
         if (newValue.startsWith('/')) {
             const query = newValue.substring(1).toLowerCase();
             const matches = availableCommands.filter(c => c.command.startsWith('/' + query));
@@ -209,157 +627,281 @@ export function ChatInput(props: ChatInputProps) {
                 setShowCommandMenu(true);
                 setShowFileMenu(false);
                 return;
-            } else {
-                setShowCommandMenu(false);
             }
-        } else {
-            setShowCommandMenu(false);
         }
-
-        // Context Menu Trigger Logic
+        setShowCommandMenu(false);
         const match = newValue.match(MENTION_REGEX);
         if (match && searchFiles) {
-            const query = match[1];
-            searchFiles(query);
+            searchFiles(match[1]);
             setShowFileMenu(true);
         } else {
             setShowFileMenu(false);
         }
     };
 
+    const activeAttachmentCount = contextFiles.filter(file => file.status !== 'error').length;
 
     const addContextFile = (file: FileSearchResult) => {
-        // Replace @query with nothing or file name? 
-        // Competitors usually replace the whole match with a pill, OR just add to context list and clear the query.
-        // We will add to context list and remove the @query text.
-
         const match = value.match(MENTION_REGEX);
         if (match) {
             const matchIndex = match.index!;
-            const newValue = value.substring(0, matchIndex) + value.substring(matchIndex + match[0].length);
-            onChange(newValue);
+            onChange(value.substring(0, matchIndex) + value.substring(matchIndex + match[0].length));
         }
-
+        if (activeAttachmentCount >= MAX_CHAT_ATTACHMENTS) {
+            setContextFiles(prev => [...prev, {
+                id: `limit-${Date.now()}`,
+                path: file.path,
+                name: file.name || file.path,
+                kind: 'file',
+                source: 'workspace',
+                status: 'error',
+                error: attachmentLimitError(1, activeAttachmentCount) || 'Attachment limit reached.',
+            }]);
+            setShowFileMenu(false);
+            textareaRef.current?.focus();
+            return;
+        }
         if (!contextFiles.find(f => f.path === file.path)) {
-            setContextFiles(prev => [...prev, file]);
+            setContextFiles(prev => [...prev, {
+                path: file.path,
+                name: file.name,
+                kind: 'file',
+                source: 'workspace',
+                status: 'ready',
+                size: (file as any).size,
+            }]);
         }
         setShowFileMenu(false);
         textareaRef.current?.focus();
     };
 
-    const selectCommand = (command: string) => {
-        onChange(command);
-        setShowCommandMenu(false);
-        textareaRef.current?.focus();
+    const readFileAsBase64 = (file: File): Promise<string> => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = String(reader.result || '');
+            const comma = result.indexOf(',');
+            resolve(comma >= 0 ? result.slice(comma + 1) : result);
+        };
+        reader.onerror = () => reject(reader.error || new Error(`Failed to read ${file.name}`));
+        reader.readAsDataURL(file);
+    });
+
+    const stageFiles = async (files: File[]) => {
+        if (!files.length) return;
+        closeAllMenus();
+        const limitError = attachmentLimitError(files.length, activeAttachmentCount);
+        const requestId = `attach-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const accepted: { id: string; file: File }[] = [];
+        const rejected: ContextFilePayload[] = [];
+
+        files.forEach((file, index) => {
+            const id = `${requestId}-${index}`;
+            const sizeError = attachmentSizeError(file.size);
+            if (limitError || sizeError) {
+                rejected.push({
+                    id,
+                    requestId,
+                    path: file.name || `attachment-${index + 1}`,
+                    name: file.name || `attachment-${index + 1}`,
+                    kind: 'attachment',
+                    source: 'attachment',
+                    status: 'error',
+                    size: file.size,
+                    mime: file.type || undefined,
+                    error: limitError || sizeError || 'Attachment rejected.',
+                });
+                return;
+            }
+            accepted.push({ id, file });
+        });
+
+        if (rejected.length > 0) {
+            setContextFiles(prev => [...prev, ...rejected]);
+        }
+
+        if (accepted.length === 0) {
+            textareaRef.current?.focus();
+            return;
+        }
+
+        const placeholders: ContextFilePayload[] = accepted.map(({ id, file }) => ({
+            id,
+            requestId,
+            path: `staging://${id}`,
+            name: file.name || 'attachment',
+            kind: 'attachment',
+            source: 'attachment',
+            status: 'staging',
+            size: file.size,
+            mime: file.type || undefined,
+            previewUrl: createAttachmentPreviewUrl(file),
+        }));
+        setContextFiles(prev => [...prev, ...placeholders]);
+
+        try {
+            const payloadFiles = await Promise.all(accepted.map(async ({ id, file }) => ({
+                id,
+                name: file.name || 'attachment',
+                size: file.size,
+                mime: file.type || '',
+                data: await readFileAsBase64(file),
+            })));
+            postMessage({
+                type: 'stage_attachments',
+                payload: {
+                    request_id: requestId,
+                    session_id: sessionId || 'default',
+                    files: payloadFiles,
+                },
+            });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            setContextFiles(prev => prev.map(file => file.requestId === requestId && file.status === 'staging'
+                ? { ...file, status: 'error', error: message }
+                : file
+            ));
+        } finally {
+            textareaRef.current?.focus();
+        }
     };
 
-    const removeContextFile = (path: string) => {
-        setContextFiles(prev => prev.filter(f => f.path !== path));
+    const stageFileList = (files?: FileList | File[] | null) => {
+        const nextFiles = Array.from(files || []);
+        if (nextFiles.length === 0) return;
+        void stageFiles(nextFiles);
+    };
+
+    const handlePaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+        const files = Array.from(e.clipboardData?.files || []);
+        if (files.length === 0) return;
+        e.preventDefault();
+        stageFileList(files);
+    };
+
+    const handleDrop = (e: DragEvent<HTMLDivElement>) => {
+        const files = Array.from(e.dataTransfer?.files || []);
+        if (files.length === 0) return;
+        e.preventDefault();
+        setDragActive(false);
+        stageFileList(files);
+    };
+
+    const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+        if (Array.from(e.dataTransfer?.items || []).some(item => item.kind === 'file')) {
+            e.preventDefault();
+            setDragActive(true);
+        }
+    };
+
+    const handleDragLeave = () => {
+        setDragActive(false);
+    };
+
+    const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
+        stageFileList(e.target.files);
+        e.target.value = '';
     };
 
     const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             if (showCommandMenu && filteredCommands.length > 0) {
                 e.preventDefault();
-                selectCommand(filteredCommands[0].command);
+                onChange(filteredCommands[0].command);
+                setShowCommandMenu(false);
                 return;
             }
-            if (showFileMenu && fileResults && fileResults.length > 0) {
+            if (showFileMenu && fileResults?.length > 0) {
                 e.preventDefault();
                 addContextFile(fileResults[0]);
                 return;
             }
-
             e.preventDefault();
-            if (!isLoading && (value.trim() || images.length > 0 || contextFiles.length > 0)) {
-                let messageToSend = value;
-
-                if (contextFiles.length > 0) {
-                    const contextString = '\n\nContext Files:\n' + contextFiles.map(f => `@${f.path} `).join('\n');
-                    messageToSend += contextString;
-                    // Update UI to show what was sent? 
-                    // Or just clear? 
-                    onChange(messageToSend);
-                }
-
-                // TODO: Pass images to onSend logic (requires protocol update)
-                onSend(messageToSend);
-
-                setImages([]);
-                setContextFiles([]);
-            }
+            handleSend();
         }
     };
+
+    const buildMessageToSend = () => {
+        return buildContextMessage(value, contextFiles);
+    };
+
+    const clearAttachments = () => {
+        setContextFiles(prev => {
+            prev.forEach(revokeAttachmentPreview);
+            return [];
+        });
+    };
+
+    const removeContextFile = (index: number) => {
+        setContextFiles(prev => {
+            const removed = prev[index];
+            revokeAttachmentPreview(removed);
+            return prev.filter((_, idx) => idx !== index);
+        });
+    };
+
+    const sendableContextFiles = contextFiles.filter(isReadyContextFile);
+    const canSubmit = Boolean(value.trim() || sendableContextFiles.length > 0);
 
     const handleSend = () => {
-        if (!isLoading && (value.trim() || images.length > 0 || contextFiles.length > 0)) {
-            let messageToSend = value;
-
-            // Prepend Plan Mode tag
-            if (isPlanMode) {
-                messageToSend = `[PLAN MODE] ${messageToSend} `;
-            }
-
-            if (contextFiles.length > 0) {
-                const contextString = '\n\nContext Files:\n' + contextFiles.map(f => `@${f.path} `).join('\n');
-                messageToSend += contextString;
-                onChange(messageToSend);
-            }
-            onSend(messageToSend);
-            setImages([]);
-            setContextFiles([]);
+        if (!isLoading && canSubmit) {
+            const messageToSend = buildMessageToSend();
+            onSend(messageToSend, sendableContextFiles);
+            clearAttachments();
+            setAgentDraftEnabled(false);
         }
     };
 
-    // Image handling
-    const handlePaste = (e: React.ClipboardEvent) => {
-        const items = e.clipboardData.items;
-        for (const item of items) {
-            if (item.type.indexOf('image') === 0) {
-                const blob = item.getAsFile();
-                if (blob) {
-                    const reader = new FileReader();
-                    reader.onload = (event) => {
-                        if (event.target?.result) {
-                            setImages(prev => [...prev, event.target!.result as string]);
-                        }
-                    };
-                    reader.readAsDataURL(blob);
-                }
-            }
+    const handleStartAgent = () => {
+        if (!isLoading && canSubmit && onStartAgent) {
+            const messageToSend = buildMessageToSend();
+            onStartAgent(messageToSend, sendableContextFiles);
+            clearAttachments();
+            setAgentDraftEnabled(false);
+            closeAllMenus();
         }
     };
 
-    const handleDrop = (e: React.DragEvent) => {
-        e.preventDefault();
-        const files = e.dataTransfer.files;
-        for (const file of files) {
-            if (file.type.startsWith('image/')) {
-                const reader = new FileReader();
-                reader.onload = (event) => {
-                    if (event.target?.result) {
-                        setImages(prev => [...prev, event.target!.result as string]);
-                    }
-                };
-                reader.readAsDataURL(file);
-            }
-        }
+    const handlePrepareAgent = () => {
+        setAgentDraftEnabled(true);
+        closeAllMenus();
+        textareaRef.current?.focus();
     };
 
-    const removeImage = (index: number) => {
-        setImages(prev => prev.filter((_, i) => i !== index));
+    const handleApprovalModeChange = (mode: ApprovalMode) => {
+        setApprovalMode(mode);
+        setShowApprovalMenu(false);
+        postMessage({ type: 'auto_approve_settings', payload: APPROVAL_PRESETS[mode] });
     };
 
+    const selectedApproval = APPROVAL_OPTIONS.find(option => option.id === approvalMode) ?? APPROVAL_OPTIONS[0];
+    const SelectedApprovalIcon = selectedApproval.icon;
 
+    const handleRequestContext = () => {
+        setShowContextMenu(false);
+        const nextValue = value.endsWith('@') ? value : `${value}${value && !value.endsWith(' ') ? ' ' : ''}@`;
+        onChange(nextValue);
+        searchFiles?.('');
+        setShowFileMenu(true);
+        textareaRef.current?.focus();
+    };
+
+    const handleAcceptAll = () => {
+        postMessage({ type: 'execute_command', payload: { command: '/accept-all' } });
+    };
+
+    const handleRejectAll = () => {
+        postMessage({ type: 'execute_command', payload: { command: '/reject-all' } });
+    };
+
+    const choiceOptions = (pendingChoice?.choices || []).map((choice, index) => {
+        const metadata = pendingChoice?.choiceMetadata?.find(item => item.value === choice) || pendingChoice?.choiceMetadata?.[index];
+        return normalizeChoiceOption(choice, index, metadata);
+    });
 
     return (
         <div className="w-full relative">
-            {/* Overlays / Modals (MUST BE FIRST FOR Z-INDEX) */}
-            {(showModelMenu || showCommandMenu || showFileMenu) && (
-                <div
-                    className="fixed inset-0 z-[9998] bg-black/20 backdrop-blur-[2px]"
-                    onClick={closeAllMenus}
-                />
+            {(showModelMenu || showContextMenu || showApprovalMenu || showCommandMenu || showFileMenu) && (
+                <div className="fixed inset-0 z-[9998]" onClick={closeAllMenus} />
             )}
 
             {showModelMenu && (
@@ -369,218 +911,478 @@ export function ChatInput(props: ChatInputProps) {
                     currentModel={currentModel}
                     onSelectModel={(model) => {
                         setCurrentModel(model);
+                        onModelChange(model);
                         setShowModelMenu(false);
-                        // CRITICAL: Send model selection to backend to update provider
-                        postMessage({
-                            type: 'save_settings',
-                            payload: {
-                                provider: model.provider,
-                                model: model.id
-                            }
-                        });
+                        postMessage({ type: 'save_settings', payload: { provider: model.provider, model: model.id } });
                     }}
-                    currentMode={isPlanMode ? 'plan' : 'act'}
-                    onModeChange={(mode) => setIsPlanMode(mode === 'plan')}
                 />
             )}
 
-            {/* Context/Image Chips */}
-            {(images.length > 0 || contextFiles.length > 0) && (
-                <div className="flex gap-2 overflow-x-auto pb-2 px-1">
-                    {contextFiles.map((file) => (
-                        <div key={file.path} className="flex items-center gap-1.5 px-2 py-1 bg-vscode-badge-background text-vscode-badge-foreground rounded text-[10px] whitespace-nowrap border border-vscode-border/50 shrink-0 uppercase font-black">
-                            <span className="opacity-40">[F]</span>
-                            <span className="max-w-[120px] truncate" title={file.path}>{file.name}</span>
-                            <button onClick={() => removeContextFile(file.path)} className="hover:bg-black/10 rounded px-1 ml-1 opacity-40 hover:opacity-100">
-                                X
+            {/* Chips Container */}
+            {(contextFiles.length > 0 || agentDraftEnabled) && (
+                <div className="flex gap-2 px-1 py-2 overflow-x-auto custom-scrollbar no-scrollbar scroll-smooth">
+                    {agentDraftEnabled && (
+                        <div className="flex items-center gap-2 px-2.5 py-1 bg-vscode-button-bg text-vscode-button-fg rounded-md text-[11px] border border-vscode-button-bg shrink-0">
+                            <Bot className="h-3.5 w-3.5" />
+                            <span className="font-medium">Agent mission prepared</span>
+                            <button
+                                onClick={() => setAgentDraftEnabled(false)}
+                                className="ml-1 rounded p-0.5 opacity-75 hover:opacity-100 hover:bg-black/15 transition-colors"
+                                title="Cancel agent mission"
+                            >
+                                <X className="w-3 h-3" />
                             </button>
                         </div>
-                    ))}
-                    {images.map((img, index) => (
-                        <div key={index} className="relative group shrink-0">
-                            <img src={img} alt="Preview" className="h-12 w-12 object-cover rounded-md border border-vscode-border/50" />
-                            <button onClick={() => removeImage(index)} className="absolute -top-1.5 -right-1.5 bg-vscode-input-background text-vscode-fg rounded-full px-1 text-[8px] font-black border border-vscode-border shadow-sm">
-                                X
-                            </button>
+                    )}
+                    {contextFiles.map((file, i) => {
+                        const status = file.status || 'ready';
+                        const errored = status === 'error';
+                        const staging = status === 'staging';
+                        const imageAttachment = isImageContextFile(file);
+                        const displayName = attachmentDisplayName(file);
+                        const metaLabel = attachmentMetaLabel(file);
+                        return (
+                        <div
+                            key={`ctx-${file.path}-${i}`}
+                            title={file.error || file.stagedPath || file.path}
+                            className={`group shrink-0 overflow-hidden rounded-md border text-[11px] transition-colors ${
+                                errored
+                                    ? 'bg-rose-500/10 text-rose-300/85 border-rose-500/25'
+                                    : staging
+                                        ? 'bg-vscode-input-bg text-vscode-fg/45 border-vscode-border'
+                                        : 'bg-vscode-input-bg text-vscode-fg/70 border-vscode-border hover:bg-vscode-list-hoverBackground hover:text-vscode-fg'
+                            } ${imageAttachment ? 'w-40' : 'flex min-w-[190px] max-w-[260px] items-center gap-2 px-2.5 py-2'}`}
+                        >
+                            {imageAttachment ? (
+                                <>
+                                    <div className="relative h-20 bg-vscode-editor-background">
+                                        {file.previewUrl ? (
+                                            <img
+                                                src={file.previewUrl}
+                                                alt={displayName}
+                                                className="h-full w-full object-cover"
+                                            />
+                                        ) : (
+                                            <div className="flex h-full w-full items-center justify-center text-vscode-fg/35">
+                                                <ImageIcon className="h-6 w-6" />
+                                            </div>
+                                        )}
+                                        {staging && (
+                                            <div className="absolute inset-0 flex items-center justify-center bg-vscode-editor-background/70">
+                                                <span className="codicon codicon-loading codicon-modifier-spin text-[14px] text-vscode-fg/55" />
+                                            </div>
+                                        )}
+                                        <button
+                                            onClick={() => removeContextFile(i)}
+                                            className="absolute right-1 top-1 rounded bg-vscode-editor-background/85 p-1 text-vscode-fg/55 opacity-0 shadow-sm transition-opacity hover:text-vscode-fg group-hover:opacity-100"
+                                            title="Remove attachment"
+                                        >
+                                            <X className="h-3 w-3" />
+                                        </button>
+                                    </div>
+                                    <div className="flex min-w-0 items-center gap-2 px-2 py-1.5">
+                                        <ImageIcon className={`h-3.5 w-3.5 shrink-0 ${errored ? 'text-rose-300/70' : 'text-vscode-fg/45'}`} />
+                                        <span className="min-w-0 flex-1">
+                                            <span className="block truncate font-medium">{displayName}</span>
+                                            <span className={`block truncate text-[10px] ${errored ? 'text-rose-300/70' : 'text-vscode-fg/40'}`}>{metaLabel}</span>
+                                        </span>
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-vscode-editor-background text-vscode-fg/45">
+                                        {staging ? (
+                                            <span className="codicon codicon-loading codicon-modifier-spin text-[13px]" />
+                                        ) : file.source === 'attachment' ? (
+                                            <Paperclip className={`h-4 w-4 ${errored ? 'text-rose-300/70' : ''}`} />
+                                        ) : (
+                                            <FileCode className={`h-4 w-4 ${errored ? 'text-rose-300/70' : ''}`} />
+                                        )}
+                                    </span>
+                                    <span className="min-w-0 flex-1">
+                                        <span className="block truncate font-medium">{displayName}</span>
+                                        <span className={`block truncate text-[10px] ${errored ? 'text-rose-300/70' : 'text-vscode-fg/40'}`}>{metaLabel}</span>
+                                    </span>
+                                    <button
+                                        onClick={() => removeContextFile(i)}
+                                        className="rounded p-0.5 opacity-0 transition-opacity hover:bg-vscode-list-hoverBackground group-hover:opacity-100"
+                                        title="Remove attachment"
+                                    >
+                                        <X className="h-3 w-3" />
+                                    </button>
+                                </>
+                            )}
                         </div>
-                    ))}
+                    );})}
                 </div>
             )}
 
-            {/* Menus (Command/File) */}
-            {showCommandMenu && filteredCommands.length > 0 && (
-                <div className="absolute bottom-full left-0 mb-2 w-full max-h-[200px] bg-[#1e1e1e] border border-white/10 rounded-xl shadow-[0_10px_30px_rgba(0,0,0,0.5)] overflow-hidden z-[9999]">
-                    <div className="px-2 py-1.5 text-[10px] uppercase text-white/30 font-bold bg-white/5 border-b border-white/5">Commands</div>
-                    <div className="overflow-y-auto max-h-[160px]">
-                        {filteredCommands.map((cmd) => (
+            {recentlyEditedFiles && recentlyEditedFiles.length > 0 && (
+                <div className="px-1">
+                    <AffectedFilesList files={recentlyEditedFiles as any} />
+                </div>
+            )}
+
+            {/* Pending Edits Bar */}
+            {pendingEdits && pendingEdits.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 px-3 py-2 mb-2 bg-vscode-input-bg border border-vscode-border rounded-md animate-in fade-in slide-in-from-bottom-1">
+                    <div className="flex min-w-0 flex-1 items-center gap-3 overflow-x-auto no-scrollbar">
+                        <span className="flex items-center gap-1.5 text-[10px] font-medium text-vscode-fg/65 shrink-0">
+                            <FileCode className="h-3 w-3" />
+                            {pendingEdits.length} edited {pendingEdits.length === 1 ? 'file' : 'files'}
+                        </span>
+                        <div className="flex gap-2">
+                            {pendingEdits.map((edit, i) => (
+                                <button
+                                    key={`pending-${i}`}
+                                    onClick={() => postMessage({ type: 'open_file', payload: { path: edit.filePath } })}
+                                    title={edit.conflictReason || edit.filePath}
+                                    className={`flex items-center gap-2 px-2.5 py-1 rounded text-[10px] font-medium transition-colors shrink-0 border ${
+                                        edit.status === 'conflicted'
+                                            ? 'bg-rose-500/10 hover:bg-rose-500/15 text-rose-300 border-rose-500/20'
+                                            : 'bg-vscode-editor-background hover:bg-vscode-list-hoverBackground text-vscode-fg/70 border-vscode-border'
+                                    }`}
+                                >
+                                    <span className="opacity-60">{edit.filePath.split('/').pop()}</span>
+                                    {edit.status === 'conflicted' && (
+                                        <span className="text-[9px] text-rose-300/70">conflict</span>
+                                    )}
+                                    {edit.status === 'reviewing' && (
+                                        <span className="text-[9px] text-vscode-fg/45">diff</span>
+                                    )}
+                                    <div className="flex items-center gap-1 font-mono text-[9px]">
+                                        {edit.additions > 0 && <span className="text-emerald-500">+{edit.additions}</span>}
+                                        {edit.deletions > 0 && <span className="text-rose-500">-{edit.deletions}</span>}
+                                        {edit.additions === 0 && edit.deletions === 0 && <span className="text-blue-500/50">unchanged</span>}
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                    <div className="ml-auto flex shrink-0 items-center gap-2">
+                        <button
+                            onClick={handleRejectAll}
+                            className="px-3 py-1 text-[10px] font-medium text-vscode-fg/50 hover:text-vscode-fg/80 transition-colors hover:bg-vscode-list-hoverBackground rounded"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={handleAcceptAll}
+                            className="px-3 py-1 bg-vscode-button-bg text-vscode-button-fg text-[10px] font-medium rounded hover:bg-vscode-button-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                            disabled={pendingEdits.some(edit => edit.status === 'conflicted')}
+                            title={pendingEdits.some(edit => edit.status === 'conflicted') ? 'Resolve conflicted files before proceeding' : 'Proceed with all pending Ricochet edits'}
+                        >
+                            Proceed
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {pendingChoice && choiceOptions.length > 0 && (
+                <div className="mb-2 rounded-md border border-vscode-border bg-vscode-input-bg animate-in fade-in slide-in-from-bottom-1">
+                    <div className="flex items-center justify-between gap-3 border-b border-vscode-border px-3 py-2">
+                        <div className="min-w-0">
+                            <div className="text-[11px] font-medium text-vscode-fg/80">Choose next step</div>
+                            <div className="truncate text-[10px] text-vscode-fg/45">{pendingChoice.question}</div>
+                        </div>
+                    </div>
+                    <div className="grid gap-1 p-2">
+                        {choiceOptions.map((option, index) => (
                             <button
-                                key={cmd.command}
-                                onClick={() => selectCommand(cmd.command)}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm hover:bg-white/5 text-white/80 transition-colors"
+                                key={`${pendingChoice.id}-${option.value}`}
+                                onClick={() => onChoiceResponse?.(pendingChoice.id, option.value)}
+                                className={`group flex items-start gap-2 rounded border px-2.5 py-2 text-left transition-colors ${
+                                    option.danger
+                                        ? 'border-rose-500/20 bg-rose-500/5 hover:bg-rose-500/10'
+                                        : option.recommended
+                                            ? 'border-vscode-button-bg/35 bg-vscode-button-bg/10 hover:bg-vscode-button-bg/15'
+                                            : 'border-vscode-border bg-vscode-editor-background hover:bg-vscode-list-hoverBackground'
+                                }`}
                             >
-                                <span className="font-mono font-bold text-blue-400">{cmd.command}</span>
-                                <span className="truncate text-xs opacity-50 flex-1 text-right">{cmd.description}</span>
+                                <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-medium ${
+                                    option.recommended
+                                        ? 'bg-vscode-button-bg text-vscode-button-fg'
+                                        : 'bg-vscode-input-bg text-vscode-fg/55 border border-vscode-border'
+                                }`}>
+                                    {index + 1}
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                    <span className="flex items-center gap-1.5 text-[12px] font-medium text-vscode-fg/85">
+                                        {option.label}
+                                        {option.recommended && <span className="text-[9px] text-vscode-fg/45">Recommended</span>}
+                                    </span>
+                                    <span className="mt-0.5 block text-[10px] leading-relaxed text-vscode-fg/50">{option.description}</span>
+                                </span>
+                                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-vscode-fg/35" />
                             </button>
                         ))}
                     </div>
                 </div>
             )}
 
-            {showFileMenu && fileResults && fileResults.length > 0 && (
-                <div className="absolute bottom-full left-0 mb-2 w-full max-h-[200px] bg-[#1e1e1e] border border-white/10 rounded-xl shadow-[0_10px_30px_rgba(0,0,0,0.5)] overflow-hidden z-[9999]">
-                    <div className="px-2 py-1.5 text-[10px] uppercase text-white/30 font-bold bg-white/5 border-b border-white/5">Suggested Files</div>
-                    <div className="overflow-y-auto max-h-[160px]">
-                        {fileResults.map((file) => (
-                            <button
-                                key={file.path}
-                                onClick={() => addContextFile(file)}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm hover:bg-white/5 text-white/80 transition-colors"
-                            >
-                                <FileCode className="w-4 h-4 opacity-70 shrink-0" />
-                                <div className="flex flex-col min-w-0">
-                                    <span className="truncate font-medium">{file.name}</span>
-                                    <span className="truncate text-xs opacity-50">{file.path}</span>
-                                </div>
-                            </button>
-                        ))}
+            {hasInputStatusStrip && (
+                <div className="flex flex-wrap items-center justify-between gap-1.5 px-1 pb-1.5">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                        {missionStatus}
+                    </div>
+                    <div className="ml-auto flex items-center justify-end gap-1.5">
+                        {networkStatus && <NetworkStatusPill status={networkStatus} />}
+                        {hasUsageStatus && (
+                            <UsageBadge
+                                contextStatus={contextStatus}
+                                usageSnapshot={usageSnapshot}
+                                isActive={isLoading || isRemoteProcessing}
+                                isOpen={showUsageMenu}
+                                onToggle={() => {
+                                    setShowUsageMenu(prev => !prev);
+                                    setShowContextMenu(false);
+                                    setShowApprovalMenu(false);
+                                    setShowModelMenu(false);
+                                }}
+                            />
+                        )}
                     </div>
                 </div>
             )}
 
-            {/* Main Input Area */}
-            <div
-                className={`
-                    relative group flex flex-col rounded-xl transition-all duration-300
-                    ${isLiveMode ? 'ether-active animate-ether-glow' : 'bg-white/[0.03]'}
-                    ${isPlanMode ? 'ring-1 ring-orange-500/20' : ''}
-                    ${isRemoteControl ? 'border-blue-400/50 shadow-[0_0_10px_rgba(59,130,246,0.1)]' : ''}
-                    hover:bg-white/[0.05] focus-within:bg-white/[0.05]
-                `}
+            {/* Input Frame */}
+            <div className={`
+                relative flex flex-col rounded-md transition-colors duration-200 overflow-visible
+                ${isLiveMode ? 'ether-active animate-ether-glow' : dragActive ? 'bg-vscode-input-bg border border-vscode-button-bg' : 'bg-vscode-input-bg border border-vscode-border'}
+                hover:border-vscode-fg/25 focus-within:border-vscode-button-bg
+            `}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
             >
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={handleFileInputChange}
+                />
                 <textarea
                     ref={textareaRef}
                     value={value}
                     onChange={(e) => handleInputChange(e.target.value)}
                     onKeyDown={handleKeyDown}
                     onPaste={handlePaste}
-                    onDrop={handleDrop}
-                    placeholder={isRecording ? '🎙️ Listening...' : (isLiveMode ? 'Message remote agent...' : placeholder)}
-                    disabled={isLoading && !isLiveMode}
+                    placeholder={isRecording ? 'Listening...' : placeholder}
                     rows={1}
-                    className={`
-                        w-full resize-none py-3 px-3 rounded-t-xl
-                        text-vscode-input-foreground text-sm
-                        focus:outline-none 
-                        bg-transparent
-                        placeholder:text-vscode-fg/20
-                        disabled:opacity-50 transition-colors
-                        min-h-[60px] max-h-[200px]
-                        ${isLoading ? 'cursor-not-allowed opacity-50' : ''}
-                    `}
+                    className="w-full resize-none py-3 px-3 bg-transparent text-vscode-input-fg text-sm focus:outline-none placeholder:text-vscode-fg/35 min-h-[52px] max-h-[240px]"
                 />
+                {dragActive && (
+                    <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-md bg-vscode-button-bg/10 text-[12px] font-medium text-vscode-fg/75">
+                        Drop files to attach
+                    </div>
+                )}
 
-                <div className="flex items-center justify-between gap-2 px-2 pb-2 mt-auto">
-                    <div className="flex items-center gap-0.5">
-                        <button
-                            onClick={() => {
-                                const input = document.createElement('input');
-                                input.type = 'file';
-                                input.multiple = true;
-                                input.onchange = (e) => {
-                                    const files = (e.target as HTMLInputElement).files;
-                                    if (files) {
-                                        Array.from(files).forEach(file => {
-                                            if (file.type.startsWith('image/')) {
-                                                const reader = new FileReader();
-                                                reader.onload = () => setImages(prev => [...prev, reader.result as string]);
-                                                reader.readAsDataURL(file);
-                                            } else {
-                                                const reader = new FileReader();
-                                                reader.onload = (ev) => {
-                                                    const content = ev.target?.result as string;
-                                                    const textBlock = `\n\n[FILE: ${file.name}]\n\`\`\`\n${content}\n\`\`\`\n`;
-                                                    onChange(value + textBlock);
-                                                };
-                                                reader.readAsText(file);
-                                            }
-                                        });
-                                    }
-                                };
-                                input.click();
-                            }}
-                            className="p-1.5 text-vscode-fg/30 hover:text-white/80 hover:bg-white/5 rounded-md transition-all active:scale-95"
-                            title="Attach files"
-                        >
-                            <Plus className="w-4 h-4" />
-                        </button >
-
-                        <div className="flex items-center gap-1 relative">
-
-
+                <div className="flex flex-wrap items-end gap-2 px-2.5 pb-2.5">
+                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                        <div className="relative shrink-0">
                             <button
-                                onClick={() => setShowModelMenu(!showModelMenu)}
-                                className="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-vscode-fg/30 hover:text-white/80 hover:bg-white/5 rounded-md transition-all max-w-[140px]"
+                                onClick={() => {
+                                    setShowContextMenu(prev => !prev);
+                                    setShowApprovalMenu(false);
+                                    setShowModelMenu(false);
+                                    setShowUsageMenu(false);
+                                }}
+                                className="p-1.5 rounded text-vscode-fg/50 hover:text-vscode-fg/85 hover:bg-vscode-list-hoverBackground transition-colors"
+                                title="Add context or start an agent"
                             >
-                                <span className="truncate text-[10px]">{currentModel.name}</span>
-                                <ChevronDown className="w-3 h-3 opacity-30 ml-auto" />
+                                <Plus className="w-4 h-4" />
                             </button>
 
-                            <div className="flex items-center bg-white/[0.03] rounded-lg overflow-hidden ml-1 p-0.5 border border-white/5">
-                                <button
-                                    onClick={() => setIsPlanMode(true)}
-                                    className={`px-2.5 py-1 text-[9px] font-bold uppercase tracking-widest transition-all rounded-md ${isPlanMode ? 'bg-[#cc7832] text-white' : 'text-vscode-fg/30 hover:text-vscode-fg/50'}`}
-                                >
-                                    Plan
-                                </button>
-                                <button
-                                    onClick={() => setIsPlanMode(false)}
-                                    className={`px-2.5 py-1 text-[9px] font-bold uppercase tracking-widest transition-all rounded-md ${!isPlanMode ? 'bg-[#0e639c] text-white' : 'text-vscode-fg/30 hover:text-vscode-fg/50'}`}
-                                >
-                                    Act
-                                </button>
-                            </div>
+                            {showContextMenu && (
+                                <div className="absolute bottom-full left-0 mb-2 w-64 overflow-hidden rounded-md border border-vscode-border bg-vscode-input-bg shadow-lg z-[9999] animate-in fade-in slide-in-from-bottom-2">
+                                    <button
+                                        onClick={handleRequestContext}
+                                        className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
+                                    >
+                                        <FileCode className="mt-0.5 h-4 w-4 text-vscode-fg/55" />
+                                        <span className="min-w-0">
+                                            <span className="block text-[12px] font-medium text-vscode-fg/85">Add workspace files</span>
+                                            <span className="block text-[10px] text-vscode-fg/45">Attach indexed project files to this turn.</span>
+                                        </span>
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setShowContextMenu(false);
+                                            fileInputRef.current?.click();
+                                        }}
+                                        className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
+                                    >
+                                        <Paperclip className="mt-0.5 h-4 w-4 text-vscode-fg/55" />
+                                        <span className="min-w-0">
+                                            <span className="block text-[12px] font-medium text-vscode-fg/85">Attach local files</span>
+                                            <span className="block text-[10px] text-vscode-fg/45">Paste, drop, or choose files for this turn.</span>
+                                        </span>
+                                    </button>
+                                    <button
+                                        onClick={handlePrepareAgent}
+                                        disabled={isLoading}
+                                        className={`w-full flex items-start gap-3 px-3 py-2.5 text-left transition-colors disabled:opacity-45 disabled:cursor-not-allowed ${
+                                            agentDraftEnabled ? 'bg-vscode-list-hoverBackground' : 'hover:bg-vscode-list-hoverBackground'
+                                        }`}
+                                    >
+                                        <Bot className={`mt-0.5 h-4 w-4 ${agentDraftEnabled ? 'text-vscode-button-bg' : 'text-vscode-fg/55'}`} />
+                                        <span className="min-w-0">
+                                            <span className="block text-[12px] font-medium text-vscode-fg/85">Prepare agent mission</span>
+                                            <span className="block text-[10px] text-vscode-fg/45">Show confirmation before autonomous launch.</span>
+                                        </span>
+                                        {agentDraftEnabled && <CheckCircle2 className="mt-0.5 ml-auto h-4 w-4 text-vscode-button-bg" />}
+                                    </button>
+                                    <div className="mx-3 border-t border-vscode-border/70" />
+                                    <button
+                                        onClick={() => onModeChange(planFirstToggle.nextMode)}
+                                        className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
+                                        title="Plan first: read and reason before edits or commands"
+                                    >
+                                        <CheckCircle2 className={`h-4 w-4 ${planFirstToggle.active ? 'text-vscode-button-bg' : 'text-vscode-fg/45'}`} />
+                                        <span className="min-w-0 flex-1">
+                                            <span className="block text-[12px] font-medium text-vscode-fg/85">Plan first</span>
+                                            <span className="block text-[10px] text-vscode-fg/45">Ask the agent to reason before edits or commands.</span>
+                                        </span>
+                                        <span className={`relative h-5 w-9 rounded-full transition-colors ${planFirstToggle.active ? 'bg-vscode-button-bg' : 'bg-vscode-border'}`}>
+                                            <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${planFirstToggle.active ? 'translate-x-[18px]' : 'translate-x-0.5'}`} />
+                                        </span>
+                                    </button>
+                                </div>
+                            )}
                         </div>
-                    </div >
 
-                    <div className="flex items-center gap-0.5">
+                        <div className="relative shrink-0">
+                            <button
+                                onClick={() => {
+                                    setShowApprovalMenu(prev => !prev);
+                                    setShowContextMenu(false);
+                                    setShowModelMenu(false);
+                                    setShowUsageMenu(false);
+                                }}
+                                className="flex items-center gap-1.5 px-2 py-1.5 rounded border border-vscode-border bg-vscode-editor-background text-vscode-fg/65 hover:text-vscode-fg/90 hover:bg-vscode-list-hoverBackground transition-colors"
+                                title="Approval policy"
+                            >
+                                <SelectedApprovalIcon className="w-3.5 h-3.5" />
+                                <span className="hidden sm:inline text-[10px] font-medium">{selectedApproval.label}</span>
+                                <span className="sm:hidden text-[10px] font-medium">{approvalMode === 'ask' ? 'Ask' : approvalMode === 'auto' ? 'Auto' : 'Full'}</span>
+                                <ChevronDown className="w-3 h-3 opacity-40" />
+                            </button>
+
+                            {showApprovalMenu && (
+                                <div className="absolute bottom-full left-0 mb-2 w-72 overflow-hidden rounded-md border border-vscode-border bg-vscode-input-bg shadow-lg z-[9999] animate-in fade-in slide-in-from-bottom-2">
+                                    <div className="px-3 py-2 border-b border-vscode-border bg-vscode-editor-background text-[10px] font-medium text-vscode-fg/55">Approval policy</div>
+                                    {APPROVAL_OPTIONS.map(option => {
+                                        const Icon = option.icon;
+                                        const isSelected = option.id === approvalMode;
+                                        return (
+                                            <button
+                                                key={option.id}
+                                                onClick={() => handleApprovalModeChange(option.id)}
+                                                className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
+                                            >
+                                                <Icon className={`mt-0.5 h-4 w-4 ${isSelected ? 'text-vscode-button-bg' : 'text-vscode-fg/45'}`} />
+                                                <span className="min-w-0 flex-1">
+                                                    <span className="block text-[12px] font-medium text-vscode-fg/85">{option.label}</span>
+                                                    <span className="block text-[10px] text-vscode-fg/45">{option.description}</span>
+                                                </span>
+                                                {isSelected && <CheckCircle2 className="mt-0.5 h-4 w-4 text-vscode-button-bg" />}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+
                         <button
                             onClick={() => {
-                                onToggleLiveMode?.();
+                                setShowModelMenu(true);
+                                setShowContextMenu(false);
+                                setShowApprovalMenu(false);
+                                setShowUsageMenu(false);
                             }}
-                            className={`p-1.5 rounded-md transition-all ${isLiveMode ? 'bg-blue-600 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)] scale-110' : 'text-vscode-fg/30 hover:text-white/80 hover:bg-white/5'} active:scale-95`}
-                            title="Live Mode / Messenger Pairing"
+                            className="flex min-w-0 max-w-full items-center gap-2 px-2 py-1.5 rounded hover:bg-vscode-list-hoverBackground transition-colors text-vscode-fg/55 hover:text-vscode-fg/85"
                         >
-                            <VoiceIcon className={`w-4 h-4 ${isLiveMode ? 'animate-pulse' : ''}`} />
+                            <span className="truncate text-[10px] font-medium max-w-[min(36vw,120px)]">{currentModel.name}</span>
+                            <ChevronDown className="w-3 h-3 shrink-0 opacity-30" />
                         </button>
-                        <button
-                            onClick={toggleRecording}
-                            disabled={isLoading}
-                            className={`p-1.5 rounded-md transition-all ${isRecording ? 'bg-red-500/30 text-red-500' : 'text-vscode-fg/30 hover:text-white/80 hover:bg-white/5'} active:scale-95`}
-                            title="Voice Input"
-                        >
-                            {isRecording ? <Square className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+
+                    </div>
+
+                    <div className="ml-auto flex shrink-0 items-center gap-2">
+                        <button onClick={onToggleLiveMode} className={`p-2 rounded transition-colors ${isLiveMode ? 'bg-vscode-button-bg text-vscode-button-fg' : 'text-vscode-fg/40 hover:text-vscode-fg/75 hover:bg-vscode-list-hoverBackground'}`}>
+                            <VoiceIcon className="w-4 h-4" />
                         </button>
+                        <button onClick={toggleRecording} className={`p-2 rounded transition-colors ${isRecording ? 'bg-red-500/15 text-red-400' : 'text-vscode-fg/40 hover:text-vscode-fg/75 hover:bg-vscode-list-hoverBackground'}`}>
+                            {isRecording ? <Square className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                        </button>
+
+                        {agentDraftEnabled && !(isLoading || isRemoteProcessing) && (
+                            <button
+                                onClick={handleStartAgent}
+                                disabled={!canSubmit}
+                                className={`flex items-center gap-1.5 px-2.5 py-2 rounded text-[11px] font-medium transition-colors ${
+                                    canSubmit
+                                        ? 'bg-vscode-button-bg text-vscode-button-fg hover:bg-vscode-button-hover active:scale-95'
+                                        : 'bg-vscode-editor-background text-vscode-fg/25 border border-vscode-border cursor-not-allowed'
+                                }`}
+                                title="Start autonomous agent mission"
+                            >
+                                <Play className="w-3.5 h-3.5" />
+                                <span className="hidden sm:inline">Start mission</span>
+                            </button>
+                        )}
+
                         {isLoading || isRemoteProcessing ? (
                             <button
-                                onClick={() => onCancel?.()}
-                                className="p-1.5 rounded-md transition-all bg-red-600 text-white hover:bg-red-500 shadow-lg shadow-red-500/30 active:scale-95 animate-pulse"
-                                title={isRemoteProcessing ? "Take control" : "Stop generation"}
+                                onClick={isStopping ? undefined : onCancel}
+                                disabled={isStopping}
+                                className={`flex items-center gap-1.5 p-2.5 rounded bg-red-600 text-white active:scale-95 ${isStopping ? 'opacity-70 cursor-wait' : 'animate-pulse'}`}
+                                title={isStopping ? 'Stopping...' : 'Stop current run'}
                             >
                                 <StopCircle className="w-4 h-4" />
+                                {isStopping && <span className="hidden sm:inline text-[11px] font-medium">Stopping...</span>}
                             </button>
                         ) : (
-                            <button
-                                onClick={handleSend}
-                                disabled={!value.trim() && images.length === 0 && contextFiles.length === 0}
-                                className={`p-1.5 rounded-md transition-all ${(value.trim() || images.length > 0 || contextFiles.length > 0) ? 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20 active:scale-95' : 'text-vscode-fg/10 pointer-events-none'}`}
-                                title="Send message"
-                            >
+                            <button onClick={handleSend} disabled={!canSubmit} className={`p-2.5 rounded transition-colors ${canSubmit ? 'bg-vscode-button-bg text-vscode-button-fg hover:bg-vscode-button-hover active:scale-95' : 'text-vscode-fg/20 bg-vscode-editor-background'}`}>
                                 <Send className="w-4 h-4" />
                             </button>
                         )}
                     </div>
-                </div >
-            </div >
-        </div >
+                </div>
+            </div>
+
+            {/* Autocomplete Menus */}
+            {showCommandMenu && (
+                <div className="absolute bottom-full left-0 mb-2 w-full bg-vscode-input-bg border border-vscode-border rounded-md shadow-lg overflow-hidden z-[9999] animate-in fade-in slide-in-from-bottom-2">
+                    <div className="px-3 py-2 border-b border-vscode-border text-[10px] font-medium text-vscode-fg/55 bg-vscode-editor-background">Commands</div>
+                    <div className="max-h-60 overflow-y-auto custom-scrollbar">
+                        {filteredCommands.map(cmd => (
+                            <button key={cmd.command} onClick={() => { onChange(cmd.command); setShowCommandMenu(false); }} className="w-full flex items-center justify-between px-3 py-2.5 hover:bg-vscode-list-hoverBackground transition-colors group">
+                                <span className="font-mono text-sm text-vscode-link-foreground">{cmd.command}</span>
+                                <span className="text-[10px] text-vscode-fg/45 font-medium">{cmd.description}</span>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {showFileMenu && fileResults?.length > 0 && (
+                <div className="absolute bottom-full left-0 mb-2 w-full bg-vscode-input-bg border border-vscode-border rounded-md shadow-lg overflow-hidden z-[9999] animate-in fade-in slide-in-from-bottom-2">
+                    <div className="px-3 py-2 border-b border-vscode-border text-[10px] font-medium text-vscode-fg/55 bg-vscode-editor-background">Context files</div>
+                    <div className="max-h-60 overflow-y-auto custom-scrollbar">
+                        {fileResults.map(file => (
+                            <button key={file.path} onClick={() => addContextFile(file)} className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-vscode-list-hoverBackground transition-colors group">
+                                <div className="w-7 h-7 rounded bg-vscode-editor-background flex items-center justify-center border border-vscode-border"><FileCode className="w-4 h-4 text-vscode-fg/45" /></div>
+                                <div className="flex flex-col text-left">
+                                    <span className="text-sm text-vscode-fg/75 group-hover:text-vscode-fg font-medium">{file.name}</span>
+                                    <span className="text-[11px] text-vscode-fg/45 font-mono truncate max-w-[300px]">{file.path}</span>
+                                </div>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+        </div>
     );
 }

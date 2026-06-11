@@ -1,184 +1,498 @@
-import { useRef, useState, useMemo, useEffect } from 'react';
-import { useChat } from '@hooks/useChat';
+import { useRef, useMemo, useEffect, useState, type ReactNode } from 'react';
+import { buildTaskRunViewModel, useChat } from '../../hooks/useChat';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
-import { AutoApprovePanel } from './AutoApprovePanel';
-import { EtherPanel } from './EtherPanel';
-import { TodoTracker } from './TodoTracker';
-// import { PermissionRequestPanel } from './PermissionRequestPanel'';
-// import { Virtuoso, VirtuosoHandle } from 'react-virtuoso'; // TEMPORARILY DISABLED
-import { useLiveMode } from '@hooks/useLiveMode';
-import { useVSCodeApi } from '@hooks/useVSCodeApi';
-import { useSessions } from '@hooks/useSessions';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { useLiveMode } from '../../hooks/useLiveMode';
+import { useVSCodeApi } from '../../hooks/useVSCodeApi';
+import { useSessions } from '../../hooks/useSessions';
+import { MissionWidget } from './MissionWidget';
+import { useAgentStateMachine } from '../../hooks/useAgentStateMachine';
+import { SessionState } from '../../services/state-machine/sessionStateMachine';
+import { useNetworkHealth } from '../../hooks/useNetworkHealth';
+import { Clock3, History, Loader2, MessageSquare, UserCircle } from 'lucide-react';
+import { PermissionRequestPanel } from './PermissionRequestPanel';
+import { cleanAssistantVisibleText, isRenderableChatMessage } from '../../utils/chatVisibility';
+import { findRetryPromptBefore } from '../../utils/chatErrors';
+import { TaskRunHeader } from './TaskRunHeader';
+import { CheckpointPanel } from '../checkpoints/CheckpointPanel';
+import { deriveMissionRuntime } from '../../utils/missionRuntime';
+import type { ContextFilePayload } from '../../types/protocol';
+import type { SessionMetadata } from '../../types/session';
 
-interface ChatViewProps {
-    onOpenSettings: () => void;
+export interface ChatViewProps {
     onOpenHistory: () => void;
     onOpenAgent: () => void;
+    onOpenAccount: () => void;
+    agentState: ReturnType<typeof useAgentStateMachine>;
+    mode: 'plan' | 'act' | 'mission';
+    onModeChange: (mode: 'plan' | 'act' | 'mission') => void;
+    model: { id: string; name: string; provider: string };
+    onModelChange: (model: { id: string; name: string; provider: string }) => void;
 }
 
-// interface PermissionRequest {
-//     id: string;
-//     question: string;
-// }
+export function ChatView({
+    onOpenHistory,
+    onOpenAgent,
+    onOpenAccount,
+    agentState,
+    mode,
+    onModeChange,
+    model,
+    onModelChange
+}: ChatViewProps) {
+    const { sessions, currentSessionId, loadSession } = useSessions();
+    const {
+        messages,
+        todos,
+        isLoading,
+        isStopping,
+        inputValue,
+        setInputValue,
+        sendMessage,
+        cancelGeneration,
+        contextStatus,
+        usageSnapshot,
+        taskProgress,
+        hubTasks,
+        workSummariesByTurn,
+        fileResults,
+        searchFiles,
+        pendingPermissions,
+        pendingEdits,
+        respondToPermission,
+        restoreCheckpoint
+    } = useChat(currentSessionId);
 
-/**
- * Main Chat View for Ricochet.
- * Single panel, settings in bottom toolbar, minimal top bar.
- */
-export function ChatView({ onOpenSettings }: ChatViewProps) {
-    const { currentSessionId } = useSessions();
-    const { messages, todos, isLoading, inputValue, setInputValue, sendMessage, cancelGeneration, executeCommand, restoreCheckpoint, taskProgress } = useChat(currentSessionId || 'default');
     const { status: liveStatus, toggleLiveMode } = useLiveMode();
     const scrollRef = useRef<HTMLDivElement>(null);
-    // Auto-respond to permission requests to prevent Promise deadlock
-    // (Actual approval comes from Telegram in Live Mode)
-    const { onMessage } = useVSCodeApi();
+    const { onMessage, postMessage } = useVSCodeApi();
+    const [workspaceName, setWorkspaceName] = useState('Project');
+    const visibleMessages = useMemo(() => messages.filter(isRenderableChatMessage), [messages]);
+    const messageRows = useMemo(() => {
+        const renderedSummaryKeys = new Set<string>();
+
+        const rows = visibleMessages.flatMap((message) => {
+            let workSummary: (typeof workSummariesByTurn)[string] | undefined;
+
+            if (message.role === 'assistant') {
+                const summaryKey = message.run_id || message.turn_id || message.id;
+                const candidate = workSummariesByTurn[summaryKey];
+                if (candidate && !renderedSummaryKeys.has(summaryKey)) {
+                    workSummary = candidate;
+                    renderedSummaryKeys.add(summaryKey);
+                }
+
+                const hasVisibleAssistantContent = Boolean(
+                    cleanAssistantVisibleText(message.content || '') ||
+                    message.errorInfo ||
+                    message.checkpointHash ||
+                    (Array.isArray((message as any).artifacts) && (message as any).artifacts.length > 0)
+                );
+
+                if (!hasVisibleAssistantContent && !workSummary) {
+                    return [];
+                }
+            }
+
+            return [{ message, workSummary }];
+        });
+
+        Object.values(workSummariesByTurn)
+            .filter(summary => !renderedSummaryKeys.has(summary.turnId))
+            .sort((a, b) => a.startedAt - b.startedAt)
+            .forEach(summary => {
+                renderedSummaryKeys.add(summary.turnId);
+                rows.push({
+                    message: {
+                        id: `work-summary-${summary.turnId}`,
+                        role: 'assistant' as const,
+                        content: '',
+                        timestamp: summary.startedAt,
+                        run_id: summary.turnId,
+                        turn_id: summary.turnId,
+                    },
+                    workSummary: summary,
+                });
+            });
+
+        return rows;
+    }, [visibleMessages, workSummariesByTurn]);
+
+    const pendingInteractionList = useMemo(() => Object.values(pendingPermissions), [pendingPermissions]);
+    const hasInlineEditApproval = pendingEdits.length > 0;
+    const pendingPermissionList = useMemo(
+        () => pendingInteractionList.filter((request: any) => request.kind !== 'choice' && !(hasInlineEditApproval && /edit|file|write|save|apply|diff/i.test(request.question || ''))),
+        [hasInlineEditApproval, pendingInteractionList]
+    );
+    const pendingChoice = useMemo(
+        () => pendingInteractionList.find((request: any) => request.kind === 'choice') || null,
+        [pendingInteractionList]
+    );
+    const activeWorkSummary = useMemo(() => {
+        return Object.values(workSummariesByTurn).find(summary => summary.status === 'running' || summary.status === 'waiting') || null;
+    }, [workSummariesByTurn]);
+    const taskRunWorkers = useMemo(() => {
+        return Object.values(agentState.context.workers || {}).map((worker: any, index) => {
+            const status = String(worker.status || (worker.isActive ? 'running' : 'unknown'));
+            return {
+                id: String(worker.id || `worker-${index + 1}`),
+                name: String(worker.name || worker.id || `Worker ${index + 1}`),
+                status,
+                isActive: Boolean(worker.isActive) || /queued|running|in progress|active/i.test(status),
+                progress: typeof worker.progress === 'string' && worker.progress.trim()
+                    ? worker.progress.trim()
+                    : typeof worker.lastResult === 'string' && worker.lastResult.trim()
+                        ? worker.lastResult.trim()
+                        : undefined,
+            };
+        });
+    }, [agentState.context.workers]);
+
     useEffect(() => {
         const unsubscribe = onMessage((message: any) => {
             if (message.type === 'request_permission') {
-                // Just log it - don't block, let Telegram handle actual approval
-                console.log('[ChatView] Permission request received (handled by Telegram):', message.payload?.question?.slice(0, 50));
-                // Note: We don't auto-respond here because Telegram will respond via core
+                console.log('[ChatView] Permission request received:', message.payload?.question?.slice(0, 50));
+            } else if (message.type === 'workspace_state') {
+                const name = typeof message.payload?.name === 'string' ? message.payload.name.trim() : '';
+                setWorkspaceName(name || 'Project');
             }
         });
+        postMessage({ type: 'get_workspace_state' });
         return () => { unsubscribe(); };
-    }, [onMessage]);
+    }, [onMessage, postMessage]);
 
-    const handleSend = (text?: string) => {
+    const handleSend = (text?: string, contextFiles?: ContextFilePayload[]) => {
         const msg = typeof text === 'string' ? text : inputValue;
         if (!msg.trim()) return;
-        sendMessage(msg);
+
+        sendMessage(msg, contextFiles, mode === 'plan');
     };
 
-    // Extract task topic from first user message (Kilo Code style)
-    const fullTaskTopic = useMemo(() => {
-        const firstUserMsg = messages.find(m => m.role === 'user');
-        return firstUserMsg?.content || null;
-    }, [messages]);
+    const handleStartAgent = (text?: string, contextFiles?: ContextFilePayload[]) => {
+        const msg = typeof text === 'string' ? text : inputValue;
+        if (!msg.trim()) return;
 
-    const [taskExpanded, setTaskExpanded] = useState(false);
+        agentState.send({ type: 'start_session', content: msg });
+        postMessage({
+            type: 'start_session',
+            payload: {
+                prompt: msg,
+                model: model.id,
+                provider: model.provider,
+                session_id: currentSessionId || undefined,
+                context_files: contextFiles || []
+            }
+        });
+        setInputValue('');
+    };
 
-    // Show truncated in header, full when expanded
-    const displayTopic = fullTaskTopic
-        ? (taskExpanded ? fullTaskTopic : (fullTaskTopic.length > 80 ? fullTaskTopic.slice(0, 80) + '...' : fullTaskTopic))
-        : null;
+    const handleCancelRuntime = () => {
+        cancelGeneration();
+        if (agentState.uiState.isActive) {
+            agentState.send({ type: 'cancel_session' });
+        }
+    };
+
+    const runtimeActive = useMemo(() => {
+        const activeWorker = taskRunWorkers.some((worker: any) => worker.isActive || worker.status === 'queued' || worker.status === 'running' || worker.status === 'In Progress');
+        const runningTool = Object.values(agentState.context.activeToolCalls || {}).some((tool: any) => tool.status === 'running');
+        const waitingForInput = Boolean(agentState.context.pendingChoice || agentState.context.pendingTool);
+        const explicitMissionActive = Boolean(agentState.context.missionTitle) && agentState.uiState.isActive && agentState.context.missionStatus !== 'completed' && agentState.context.missionStatus !== 'failed' && agentState.context.missionStatus !== 'stopped';
+
+        return isLoading ||
+            isStopping ||
+            pendingInteractionList.length > 0 ||
+            Boolean(taskProgress?.is_active) ||
+            Boolean(activeWorkSummary) ||
+            activeWorker ||
+            runningTool ||
+            waitingForInput ||
+            explicitMissionActive;
+    }, [
+        agentState.context.activeToolCalls,
+        agentState.context.missionStatus,
+        agentState.context.missionTitle,
+        agentState.context.pendingChoice,
+        agentState.context.pendingTool,
+        agentState.uiState.isActive,
+        isLoading,
+        isStopping,
+        pendingInteractionList.length,
+        activeWorkSummary,
+        taskProgress?.is_active,
+        taskRunWorkers
+    ]);
+    const taskRun = useMemo(() => buildTaskRunViewModel({
+        messages,
+        todos,
+        hubTasks,
+        workers: taskRunWorkers,
+        pendingPermissionCount: pendingInteractionList.length,
+        taskProgress,
+        workSummariesByTurn,
+        usageSnapshot,
+        contextStatus,
+        isLoading: runtimeActive,
+    }), [
+        contextStatus,
+        hubTasks,
+        messages,
+        pendingInteractionList.length,
+        runtimeActive,
+        taskProgress,
+        taskRunWorkers,
+        todos,
+        usageSnapshot,
+        workSummariesByTurn
+    ]);
+    const missionRuntime = useMemo(
+        () => deriveMissionRuntime(agentState.context, agentState.state, agentState.uiState),
+        [agentState.context, agentState.state, agentState.uiState]
+    );
+
+    const latestNetworkActivityAt = useMemo(() => {
+        const timestamps: number[] = [];
+        for (const message of visibleMessages) {
+            if (message.timestamp) timestamps.push(message.timestamp);
+        }
+        for (const summary of Object.values(workSummariesByTurn)) {
+            if (summary.startedAt) timestamps.push(summary.startedAt);
+            if (summary.completedAt) timestamps.push(summary.completedAt);
+            for (const item of summary.items || []) {
+                if (item.timestamp) timestamps.push(item.timestamp);
+            }
+        }
+        return timestamps.length > 0 ? Math.max(...timestamps) : null;
+    }, [visibleMessages, workSummariesByTurn]);
+
+    const networkStatus = useNetworkHealth({
+        runtimeActive,
+        lastActivityAt: latestNetworkActivityAt,
+    });
+
+    const composer = (
+        <ChatInput
+            value={inputValue}
+            onChange={setInputValue}
+            onSend={handleSend}
+            onStartAgent={handleStartAgent}
+            onCancel={handleCancelRuntime}
+            isLoading={runtimeActive}
+            isStopping={isStopping}
+            fileResults={fileResults}
+            searchFiles={searchFiles}
+            liveStatus={liveStatus}
+            onToggleLiveMode={toggleLiveMode}
+            currentMode={mode}
+            onModeChange={onModeChange}
+            currentModel={model}
+            onModelChange={onModelChange}
+            sessionId={currentSessionId || undefined}
+            pendingEdits={activeWorkSummary ? [] : pendingEdits}
+            pendingChoice={pendingChoice}
+            onChoiceResponse={respondToPermission}
+            contextStatus={taskRun ? null : contextStatus}
+            usageSnapshot={taskRun ? null : usageSnapshot}
+            networkStatus={networkStatus}
+            missionStatus={missionRuntime.shouldShowPill && agentState.state !== SessionState.idle ? (
+                <MissionWidget agentState={agentState} onOpenDashboard={onOpenAgent} inline />
+            ) : null}
+        />
+    );
 
     return (
-        <div className="flex flex-col h-full bg-vscode-sideBar-background text-vscode-fg">
-            <style>{`
-                @keyframes fadeIn {
-                    from { opacity: 0; transform: translateY(4px); }
-                    to { opacity: 1; transform: translateY(0); }
-                }
-                .animate-fade-in {
-                    animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
-                }
-            `}</style>
+            <div className="flex flex-col h-full bg-vscode-editor-background text-vscode-fg overflow-hidden selection:bg-vscode-editor-selectionBackground">
+            <div className="flex-1 min-h-0 flex flex-col relative z-0">
+                <CheckpointPanel onRestore={restoreCheckpoint} />
+                <TaskRunHeader taskRun={taskRun} onOpenAgent={onOpenAgent} />
+                {!taskRun && !taskProgress && !agentState.context.sessionId && <TodoTracker todos={todos} />}
+                {pendingPermissionList.length > 0 && (
+                    <div className="shrink-0" data-ricochet-permission-list>
+                        {pendingPermissionList.map((request: any) => (
+                            <PermissionRequestPanel
+                                key={request.id}
+                                request={request}
+                                onResponse={respondToPermission}
+                                inline
+                            />
+                        ))}
+                    </div>
+                )}
 
-            {/* Task Header - Kilo Code style sticky top */}
-            {fullTaskTopic && (
-                <div className="sticky top-0 z-10 bg-[#1e1e1e] border-b border-[#333] shadow-md">
-                    <button
-                        onClick={() => setTaskExpanded(!taskExpanded)}
-                        className="w-full flex items-start gap-2 px-3 py-2 hover:bg-[#252526] transition-colors text-left"
-                    >
-                        {taskExpanded ? (
-                            <ChevronDown className="w-4 h-4 text-vscode-fg/50 flex-shrink-0 mt-0.5" />
-                        ) : (
-                            <ChevronRight className="w-4 h-4 text-vscode-fg/50 flex-shrink-0 mt-0.5" />
-                        )}
-                        <span className="text-xs text-blue-400 font-medium flex-shrink-0 mt-0.5">Task:</span>
-                        <span className={`text-xs text-vscode-fg/80 flex-1 ${taskExpanded ? 'whitespace-pre-wrap' : 'truncate'}`}>
-                            {displayTopic}
-                        </span>
-                    </button>
-                </div>
-            )}
-
-            {/* Content area */}
-            <div className="flex-1 min-h-0 flex flex-col pt-0.5">
-                {/* Only show old TodoTracker if NO taskProgress (fallback for old behavior) */}
-                {!taskProgress && <TodoTracker todos={todos} />}
-
-                <div className="flex-1 min-h-0">
-                    {messages.length === 0 ? (
-                        <WelcomeMessage />
+                <div className="flex-1 min-h-0 custom-scrollbar overflow-y-auto">
+                    {visibleMessages.length === 0 ? (
+                        <EmptyChatLauncher
+                            workspaceName={workspaceName}
+                            sessions={sessions}
+                            onLoadSession={loadSession}
+                            onOpenHistory={onOpenHistory}
+                            onOpenAccount={onOpenAccount}
+                            composer={composer}
+                        />
                     ) : (
-                        <div
-                            ref={scrollRef}
-                            className="h-full overflow-y-auto"
-                        >
-                            {messages.map((message, index) => {
-                                // Attach taskProgress to the most recent streaming/active assistant message (Antigravity-style)
-                                // This ensures the progress card appears inline with the current response
-                                const isLastAssistant = message.role === 'assistant' &&
-                                    messages.slice(index + 1).every(m => m.role !== 'assistant');
-                                const shouldShowProgress = isLastAssistant && taskProgress?.is_active;
-
+                        <div ref={scrollRef} className="max-w-4xl mx-auto w-full px-4 space-y-2 py-8">
+                            {messageRows.map(({ message, workSummary }) => {
+                                const retryPrompt = message.errorInfo?.retryable
+                                    ? findRetryPromptBefore(visibleMessages, message)
+                                    : null;
                                 return (
-                                    <ChatMessage
-                                        key={message.id}
-                                        message={message}
-                                        taskProgress={shouldShowProgress ? taskProgress : undefined}
-                                        onExecuteCommand={executeCommand}
-                                        onRestore={restoreCheckpoint}
-                                    />
+                                    <div key={message.id} className="animate-in fade-in duration-500 slide-in-from-bottom-2">
+                                        <ChatMessage
+                                            message={message}
+                                            workSummary={workSummary}
+                                            pendingPermissions={pendingPermissions}
+                                            pendingEdits={pendingEdits}
+                                            onRespondToPermission={respondToPermission}
+                                            onRestore={restoreCheckpoint}
+                                            onRetryMessage={retryPrompt ? () => sendMessage(retryPrompt) : undefined}
+                                            onExecuteCommand={(cmd) => postMessage({ type: 'execute_command', payload: { command: cmd } })}
+                                            onSendMessage={(content) => sendMessage(content)}
+                                        />
+                                    </div>
                                 );
                             })}
+
+                            {/* Thinking State */}
+                            {isLoading && !activeWorkSummary && (!visibleMessages[visibleMessages.length - 1]?.isStreaming) && (
+                                <div className="px-5 py-4 animate-pulse flex flex-col gap-3 group">
+                                    <div className="flex items-center gap-4">
+                                        <div className="w-8 h-8 rounded-md bg-vscode-input-bg border border-vscode-border flex items-center justify-center shrink-0">
+                                            <Loader2 className="w-4 h-4 text-vscode-fg/45 animate-spin" />
+                                        </div>
+                                        <div className="flex flex-col gap-0.5">
+                                            <div className="text-[10px] font-medium text-vscode-fg/45">
+                                                {taskProgress?.task_name || 'Autonomous Agent'}
+                                            </div>
+                                            {taskProgress?.status && (
+                                                <div className="text-[11px] text-vscode-fg/55 truncate max-w-[400px]">
+                                                    {taskProgress.status}...
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="ml-12 h-[1px] w-32 bg-vscode-border" />
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
             </div>
 
-            {/* Bottom Input Area */}
-            <div className="bg-vscode-editor-background">
-                <AutoApprovePanel />
-                {liveStatus.enabled && <EtherPanel status={liveStatus} onToggleLiveMode={() => toggleLiveMode()} />}
+            {visibleMessages.length > 0 && (
+            <div className="p-3 bg-vscode-editor-background border-t border-vscode-border">
+                <div className="max-w-4xl mx-auto">
+                    {composer}
+                </div>
+            </div>
+            )}
+        </div>
+    );
+};
 
-                {/* Permission Request Panel - TEMPORARILY DISABLED FOR DEBUGGING */}
-                {/* {permissionRequest && (
-                    <PermissionRequestPanel
-                        request={permissionRequest}
-                        onResponse={handlePermissionResponse}
-                    />
-                )} */}
+function EmptyChatLauncher({
+    workspaceName,
+    sessions,
+    onLoadSession,
+    onOpenHistory,
+    onOpenAccount,
+    composer
+}: {
+    workspaceName: string;
+    sessions: SessionMetadata[];
+    onLoadSession: (id: string) => void;
+    onOpenHistory: () => void;
+    onOpenAccount: () => void;
+    composer: ReactNode;
+}) {
+    const recentSessions = useMemo(
+        () => [...sessions].sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0)).slice(0, 4),
+        [sessions]
+    );
 
-                <ChatInput
-                    value={inputValue}
-                    onChange={setInputValue}
-                    onSend={handleSend}
-                    isLoading={isLoading}
-                    onCancel={cancelGeneration}
-                    onOpenSettings={onOpenSettings}
-                    liveStatus={liveStatus}
-                    onToggleLiveMode={toggleLiveMode}
-                />
+    const getRelativeTime = (timestamp?: number) => {
+        if (!timestamp) return '';
+        const diff = Date.now() - timestamp;
+        const hours = Math.floor(diff / 3600000);
+        if (hours < 1) return 'Just now';
+        if (hours < 24) return `${hours}h ago`;
+        return `${Math.floor(hours / 24)}d ago`;
+    };
+
+    return (
+        <div className="min-h-full h-full px-4 py-3 flex flex-col gap-2">
+            <div className="flex-1 min-h-[340px] flex items-center">
+                <div className="w-full max-w-4xl mx-auto">
+                    <div className="mb-2 flex items-end justify-between gap-3">
+                        <div className="min-w-0">
+                            <h1 className="text-[21px] leading-tight font-semibold text-vscode-fg/88 tracking-normal truncate">
+                                {workspaceName || 'Project'}
+                            </h1>
+                            <div className="mt-1 text-[10.5px] leading-none text-vscode-fg/38">
+                                Ricochet
+                            </div>
+                        </div>
+                        <button
+                            onClick={onOpenAccount}
+                            className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-vscode-border bg-vscode-input-bg hover:bg-vscode-list-hoverBackground text-vscode-fg/65 transition-colors"
+                            title="Open Grik account"
+                            aria-label="Open Grik account"
+                        >
+                            <UserCircle className="w-3.5 h-3.5" />
+                        </button>
+                    </div>
+
+                    {composer}
+                </div>
+            </div>
+
+            <div className="w-full max-w-4xl mx-auto shrink-0 pb-1">
+                <div className="flex items-center justify-between gap-3 mb-1.5">
+                    <div className="flex items-center gap-1.5 text-[9.5px] uppercase tracking-wide text-vscode-fg/36 font-medium">
+                        <Clock3 className="w-3 h-3" />
+                        Recent
+                    </div>
+                    <button
+                        onClick={onOpenHistory}
+                        className="h-5 px-1.5 inline-flex items-center gap-1 rounded hover:bg-vscode-list-hoverBackground text-[10px] text-vscode-fg/48 hover:text-vscode-fg/70 transition-colors"
+                        title="Open full history"
+                    >
+                        <History className="w-3 h-3" />
+                        History
+                    </button>
+                </div>
+
+                {recentSessions.length > 0 ? (
+                    <div className="space-y-0.5">
+                        {recentSessions.map(session => (
+                            <button
+                                key={session.id}
+                                onClick={() => onLoadSession(session.id)}
+                                className="w-full min-h-[28px] flex items-center justify-between gap-3 px-1.5 py-0.5 rounded hover:bg-vscode-list-hoverBackground text-left group transition-colors"
+                            >
+                                <span className="flex items-center gap-2 min-w-0">
+                                    <MessageSquare className="w-3 h-3 shrink-0 text-vscode-fg/30 group-hover:text-vscode-fg/55" />
+                                    <span className="text-[11px] text-vscode-fg/58 truncate group-hover:text-vscode-fg/85 transition-colors">
+                                        {session.title || 'Untitled chat'}
+                                    </span>
+                                </span>
+                                <span className="flex items-center gap-2.5 shrink-0 text-[10px] leading-none text-vscode-fg/34">
+                                    <span>{session.messageCount || 0} msgs</span>
+                                    <span className="font-mono">{getRelativeTime(session.lastModified)}</span>
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+                ) : (
+                    <div className="px-1.5 py-2 text-[11px] text-vscode-fg/38">
+                        No previous sessions yet.
+                    </div>
+                )}
             </div>
         </div>
     );
 }
 
-function WelcomeMessage() {
-    return (
-        <div className="flex flex-col items-center justify-center h-full text-center px-6 py-12">
-            {/* Logo */}
-            <div className="mb-6">
-                <svg width="64" height="64" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M9.75 7H9.25C9.11193 7 9 7.44772 9 8V23C9 23.5523 9.11193 24 9.25 24H9.75C9.88807 24 10 23.5523 10 23V8C10 7.44772 9.88807 7 9.75 7Z" fill="currentColor" fillOpacity="0.8" />
-                    <path d="M23 11.5C23 9.567 21.433 8 19.5 8C17.567 8 16 9.567 16 11.5C16 13.433 17.567 15 19.5 15C21.433 15 23 13.433 23 11.5Z" fill="currentColor" fillOpacity="0.8" />
-                    <path d="M19 14C19 12.3431 17.6569 11 16 11C14.3431 11 13 12.3431 13 14C13 15.6569 14.3431 17 16 17C17.6569 17 19 15.6569 19 14Z" fill="currentColor" fillOpacity="0.5" />
-                </svg>
-            </div>
-
-            {/* Title */}
-            <h2 className="text-lg font-medium text-vscode-fg mb-2">
-                What can I help you with?
-            </h2>
-            <p className="text-sm text-vscode-fg/50 max-w-[280px]">
-                Generate, refactor, and debug code with AI.
-            </p>
-        </div>
-    );
+function TodoTracker({ todos }: { todos: any[] }) {
+    if (!todos || todos.length === 0) return null;
+    return null;
 }

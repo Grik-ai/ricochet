@@ -60,7 +60,7 @@ var BuiltinModes = []Mode{
 		RoleDefinition: "You are Ricochet, a quality assurance specialist. You specialize in writing Vitest/Jest/Go tests and verifying system behavior.",
 		ToolGroups:     []string{"read", "command", "mcp", "edit"},
 		FileRestrictions: []FileRestriction{
-			{Regex: ".*_test\\.go$|.*\\.test\\.(ts|js)$|.*\\.md$", Description: "Test files and documentation only"},
+			{Regex: ".*_test\\.go$|.*\\.test\\.(ts|js)$|.*\\.md$|.*\\.resolved$", Description: "Test files, documentation, and analysis reports"},
 		},
 	},
 	{
@@ -85,7 +85,7 @@ var ToolGroupDefinitions = map[string][]string{
 	"command": {"execute_command", "command_status"},
 	"browser": {"browser_open", "browser_screenshot", "browser_click", "browser_type"},
 	"mcp":     {"use_mcp_tool", "access_mcp_resource"}, // Placeholder for MCP
-	"always":  {"switch_mode", "update_todos", "restore_checkpoint", "task_boundary", "start_swarm", "update_plan", "start_task", "notify_user"},
+	"always":  {"switch_mode", "update_todos", "restore_checkpoint", "task_boundary", "start_swarm", "update_plan", "ask_user_choice", "submit_plan"},
 }
 
 func IsToolAllowed(mode Mode, toolName string) bool {
@@ -105,9 +105,31 @@ func IsToolAllowed(mode Mode, toolName string) bool {
 			}
 		}
 
-		// Special handling for MCP?
-		// If group is "mcp" allow any tool starting with mcp_?
-		// For now simple mapping.
+		// MCP tools are dynamic and not predefined in ToolGroupDefinitions.
+		// If the mode has "mcp" group, we allow tools that aren't explicitly
+		// categorized in other (more restricted) groups like 'edit' or 'command'.
+		if group == "mcp" {
+			// Check if it's a known non-mcp tool
+			isKnownNonMcp := false
+			for g, tList := range ToolGroupDefinitions {
+				if g == "mcp" || g == "always" {
+					continue
+				}
+				for _, t := range tList {
+					if t == toolName {
+						isKnownNonMcp = true
+						break
+					}
+				}
+				if isKnownNonMcp {
+					break
+				}
+			}
+
+			if !isKnownNonMcp {
+				return true
+			}
+		}
 	}
 	return false
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/igoryan-dao/ricochet/internal/config"
 	"github.com/igoryan-dao/ricochet/internal/paths"
+	"github.com/igoryan-dao/ricochet/internal/protocol"
 	"github.com/igoryan-dao/ricochet/internal/safeguard/checkpoint"
 )
 
@@ -93,9 +94,8 @@ func (m *Manager) CheckPermission(tool string) error {
 			if m.AutoApproval.ExecuteAllCommands {
 				return nil
 			}
-			if m.AutoApproval.ExecuteSafeCommands && IsSafeCommand(tool) { // Need to verify IsSafeCommand or equivalent logic
-				return nil
-			}
+			// Safe-command decisions require the actual command string, not just the
+			// tool name. ExecuteCommand/CheckCommand handles that once args exist.
 		case "read_file", "list_dir", "codebase_search":
 			if m.AutoApproval.ReadFiles {
 				return nil
@@ -147,53 +147,20 @@ func (m *Manager) CheckFileAccess(path string, write bool) error {
 
 // CheckCommand verifies if a shell command is allowed
 func (m *Manager) CheckCommand(command string) error {
-	// Simple prefix match or exact match for now
-	// Real implementation needs shell tokenization to check executable.
-
-	// 1. Check Allow
-	allowed := false
-	for _, pattern := range m.Permissions.Commands.Allow {
-		if pattern == "*" || pattern == command {
-			allowed = true
-			break
-		}
-		// Prefix check
-		if len(pattern) > 0 && pattern[len(pattern)-1] == '*' {
-			prefix := pattern[:len(pattern)-1]
-			if len(command) >= len(prefix) && command[:len(prefix)] == prefix {
-				allowed = true
-				break
-			}
-		}
+	if m == nil || m.Permissions == nil {
+		return nil
 	}
 
-	if !allowed {
-		return fmt.Errorf("command denied: '%s' not in allow list", command)
-	}
-
-	// 2. Check Deny
-	for _, pattern := range m.Permissions.Commands.Deny {
-		if pattern == command {
-			return fmt.Errorf("command explicitly denied: '%s'", command)
+	decision := GetCommandDecision(command, m.Permissions.Commands.Allow, m.Permissions.Commands.Deny)
+	switch decision {
+	case protocol.PermissionAutoApprove:
+		return nil
+	case protocol.PermissionAutoDeny:
+		return fmt.Errorf("command denied by permissions: %q", command)
+	default:
+		if HasAllowedCommandMatch(command, m.Permissions.Commands.Allow) {
+			return nil
 		}
-		// Prefix check
-		if len(pattern) > 0 && pattern[len(pattern)-1] == '*' {
-			prefix := pattern[:len(pattern)-1]
-			if len(command) >= len(prefix) && command[:len(prefix)] == prefix {
-				return fmt.Errorf("command denied by pattern '%s'", pattern)
-			}
-		}
+		return fmt.Errorf("command requires explicit permission: %q", command)
 	}
-
-	return nil
-}
-
-// Helper to check if a command is generally safe (simple heuristic)
-// Since we don't have the command args here, we just return false for now unless we change signature.
-// For now, we rely on 'ExecuteAllCommands' for the "Always Proceed" button which is the user's issue.
-func IsSafeCommand(tool string) bool {
-	// Refactor: We might needs args to determine if command is safe (e.g. ls vs rm)
-	// But CheckPermission only takes tool name.
-	// We will trust the Zone system for finer grained control if AutoApproval is off.
-	return false
 }

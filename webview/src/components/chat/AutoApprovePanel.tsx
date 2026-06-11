@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
 import { ChevronUp, ChevronDown, Search, FileEdit, Terminal, Globe, Server, Bell, Trash2 } from 'lucide-react';
 
@@ -104,7 +104,16 @@ export function AutoApprovePanel({ style }: AutoApprovePanelProps) {
         };
     });
 
+    const isFirstMount = useRef(true);
+
     useEffect(() => {
+        if (isFirstMount.current) {
+            isFirstMount.current = false;
+            // Load but don't re-sync on mount to avoid redundant save_settings RPC
+            localStorage.setItem('autoApproveSettings', JSON.stringify(settings));
+            return;
+        }
+
         localStorage.setItem('autoApproveSettings', JSON.stringify(settings));
 
         // Transform to backend snake_case format

@@ -1,6 +1,6 @@
 /**
  * Session State Machine
- * 
+ *
  * Manages the lifecycle state of an agent session from creation to completion.
  */
 
@@ -21,7 +21,7 @@ export type SessionState = (typeof SessionState)[keyof typeof SessionState]
 
 // ============ Events ============
 
-type StartSessionEvent = { type: "start_session" }
+type StartSessionEvent = { type: "start_session"; content?: string }
 type SessionCreatedEvent = { type: "session_created"; sessionId: string }
 type ApiReqStartedEvent = { type: "api_req_started" }
 type SayTextEvent = { type: "say_text"; partial?: boolean; payload?: { text: string } }
@@ -31,18 +31,21 @@ type AskBrowserActionLaunchEvent = { type: "ask_browser_action_launch"; partial:
 type AskUseMcpServerEvent = { type: "ask_use_mcp_server"; partial: boolean }
 type AskFollowupEvent = { type: "ask_followup"; partial: boolean }
 type AskCompletionResultEvent = { type: "ask_completion_result" }
-type AskApiReqFailedEvent = { type: "ask_api_req_failed" }
-type AskMistakeLimitReachedEvent = { type: "ask_mistake_limit_reached" }
-type AskInvalidModelEvent = { type: "ask_invalid_model" }
-type AskPaymentRequiredPromptEvent = { type: "ask_payment_required_prompt" }
-type AskResumeTaskEvent = { type: "ask_resume_task" }
+type SubmitInputEvent = { type: "submit_input" } // Optimistic transition
 type ProcessErrorEvent = { type: "process_error"; error: string }
 type ApproveActionEvent = { type: "approve_action" }
 type RejectActionEvent = { type: "reject_action" }
 type SendMessageEvent = { type: "send_message"; content: string }
 type CancelSessionEvent = { type: "cancel_session" }
+type ChatUpdateEvent = { type: "chat_update"; message: any }
+type TaskProgressEvent = { type: "task_progress"; payload: any }
 type RetryEvent = { type: "retry" }
-type ChatUpdateEvent = { type: "chat_update"; message: any } // using any for ChatMessage struct for now
+type AskUserChoiceEvent = { type: "ask_user_choice"; payload: { id: string; choices: string[]; question: string; choiceMetadata?: any[] } }
+type AskApiReqFailedEvent = { type: "ask_api_req_failed" }
+type AskMistakeLimitReachedEvent = { type: "ask_mistake_limit_reached" }
+type AskInvalidModelEvent = { type: "ask_invalid_model" }
+type AskPaymentRequiredPromptEvent = { type: "ask_payment_required_prompt" }
+type AskResumeTaskEvent = { type: "ask_resume_task" }
 
 export type SessionEvent =
     | StartSessionEvent
@@ -55,18 +58,20 @@ export type SessionEvent =
     | AskUseMcpServerEvent
     | AskFollowupEvent
     | AskCompletionResultEvent
+    | AskUserChoiceEvent
     | AskApiReqFailedEvent
     | AskMistakeLimitReachedEvent
     | AskInvalidModelEvent
     | AskPaymentRequiredPromptEvent
     | AskResumeTaskEvent
+    | SubmitInputEvent
     | ProcessErrorEvent
     | ApproveActionEvent
     | RejectActionEvent
     | SendMessageEvent
     | CancelSessionEvent
-    | CancelSessionEvent
     | ChatUpdateEvent
+    | TaskProgressEvent
     | RetryEvent
 
 export interface SessionUiState {
@@ -87,7 +92,7 @@ export interface SessionStateMachine {
 export interface AgentLogEntry {
     id: string;
     timestamp: number;
-    type: 'info' | 'tool_call' | 'tool_result' | 'error' | 'user' | 'step';
+    type: 'assistant_text' | 'tool_started' | 'tool_finished' | 'status_check' | 'worker_spawned' | 'worker_running' | 'worker_completed' | 'mission_completed' | 'mission_failed' | 'mission_timed_out' | 'permission_requested' | 'info' | 'tool_call' | 'tool_result' | 'error' | 'user' | 'step' | 'choice';
     content: string;
     metadata?: any;
 }
@@ -95,10 +100,33 @@ export interface AgentLogEntry {
 export interface SessionContext {
     sessionId?: string
     errorMessage?: string
+    missionStatus: 'idle' | 'creating' | 'running' | 'waiting' | 'completed' | 'failed' | 'stopped'
+    parentTurnStatus: 'idle' | 'running' | 'waiting' | 'completed' | 'failed'
+    missionTitle?: string
     sawApiReqStarted: boolean
     sawSessionCreated: boolean
     logs: AgentLogEntry[]
     currentMessageId?: string // Track current streaming message to update logic
+    workers: Record<string, WorkerState> // Track parallel swarm workers
+    activeToolCalls: Record<string, { id: string; name: string; args?: any; status: 'running' | 'completed' | 'failed'; updatedAt: number }>
+    lastEventAt?: number
+    workerConcurrency?: number
+    pendingChoice?: { id: string; choices: string[]; question: string; choiceMetadata?: any[] };
+    pendingTool?: { id: string; name: string; args: any };
+}
+
+
+export interface WorkerState {
+    id: string;
+    name: string;
+    status: string;
+    isActive: boolean;
+    progress?: string;
+    color?: string;
+    lastResult?: string;
+    startedAt?: number;
+    updatedAt?: number;
+    completedAt?: number;
 }
 
 // ...
@@ -107,10 +135,25 @@ function createInitialContext(): SessionContext {
     return {
         sessionId: undefined,
         errorMessage: undefined,
+        missionStatus: 'idle',
+        parentTurnStatus: 'idle',
+        missionTitle: undefined,
         sawApiReqStarted: false,
         sawSessionCreated: false,
         logs: [],
+        workers: {},
+        activeToolCalls: {},
+        lastEventAt: undefined,
+        workerConcurrency: undefined,
     }
+}
+
+function stripReasoningBlocks(text: string): string {
+    return text
+        .replace(/<(?:thinking|think)>[\s\S]*?(?:<\/(?:thinking|think)>|$)/gi, "")
+        .replace(/<(?:thinking|think)\b[\s\S]*$/gi, "")
+        .replace(/^\s*(?:thinking|think)>?[\s\S]*$/gi, "")
+        .trim();
 }
 
 export function createSessionStateMachine(): SessionStateMachine {
@@ -127,22 +170,24 @@ export function createSessionStateMachine(): SessionStateMachine {
 
             // Intelligent Log Merging Logic
             if (logs) {
-                if (event.type === 'chat_update') {
-                    // Update existing log if ID matches
-                    const newLogs = [...context.logs];
-                    logs.forEach(incomingLog => {
-                        const existingIdx = newLogs.findIndex(l => l.id === incomingLog.id);
-                        if (existingIdx !== -1) {
-                            newLogs[existingIdx] = incomingLog;
-                        } else {
-                            newLogs.push(incomingLog);
+                const newLogs = [...context.logs];
+                logs.forEach(incomingLog => {
+                    if (!incomingLog.content.trim()) return;
+                    if (incomingLog.type === 'mission_completed') {
+                        const existingCompletionIdx = newLogs.findIndex(l => l.type === 'mission_completed');
+                        if (existingCompletionIdx !== -1) {
+                            newLogs[existingCompletionIdx] = incomingLog;
+                            return;
                         }
-                    });
-                    context.logs = newLogs;
-                } else {
-                    // Legacy append behavior
-                    context.logs = [...context.logs, ...logs];
-                }
+                    }
+                    const existingIdx = newLogs.findIndex(l => l.id === incomingLog.id);
+                    if (existingIdx !== -1) {
+                        newLogs[existingIdx] = incomingLog;
+                    } else {
+                        newLogs.push(incomingLog);
+                    }
+                });
+                context.logs = newLogs.sort((a, b) => a.timestamp - b.timestamp);
             }
         }
     }
@@ -150,18 +195,26 @@ export function createSessionStateMachine(): SessionStateMachine {
     const getState = (): SessionState => state
 
     const getUiState = (): SessionUiState => {
+        const hasActiveWorkersValue = hasActiveWorkers(context.workers);
+        const hasActiveTools = hasRunningTools(context.activeToolCalls);
+        const hasPendingInput = Boolean(context.pendingChoice || context.pendingTool);
+        const isRuntimeActive =
+            hasActiveWorkersValue ||
+            hasActiveTools ||
+            hasPendingInput ||
+            state === SessionState.creating ||
+            state === SessionState.streaming ||
+            state === SessionState.waiting_approval ||
+            state === SessionState.waiting_input;
+
         return {
-            showSpinner: state === SessionState.creating || state === SessionState.streaming,
+            showSpinner: isRuntimeActive,
             showCancelButton:
-                state === SessionState.creating ||
-                state === SessionState.streaming ||
-                state === SessionState.waiting_approval ||
-                state === SessionState.waiting_input,
-            isActive:
-                state === SessionState.creating ||
-                state === SessionState.streaming ||
-                state === SessionState.waiting_approval ||
-                state === SessionState.waiting_input,
+                isRuntimeActive &&
+                state !== SessionState.completed &&
+                state !== SessionState.stopped &&
+                state !== SessionState.error,
+            isActive: isRuntimeActive,
         }
     }
 
@@ -191,41 +244,55 @@ interface TransitionResult {
 function transition(currentState: SessionState, event: SessionEvent, context: SessionContext): TransitionResult {
     switch (currentState) {
         case SessionState.idle:
-            return transitionFromIdle(event)
+            return transitionFromIdle(event, context)
 
         case SessionState.creating:
             return transitionFromCreating(event, context)
 
         case SessionState.streaming:
-            return transitionFromStreaming(event)
+            return transitionFromStreaming(event, context, currentState)
 
         case SessionState.waiting_approval:
-            return transitionFromWaitingApproval(event)
+            return transitionFromWaitingApproval(event, context)
 
         case SessionState.waiting_input:
-            return transitionFromWaitingInput(event)
+            return transitionFromWaitingInput(event, context)
 
         case SessionState.completed:
-            return transitionFromCompleted(event)
+            return transitionFromCompleted(event, context)
 
         case SessionState.paused:
-            return transitionFromPaused(event)
+            return transitionFromPaused(event, context)
 
         case SessionState.error:
-            return transitionFromError(event)
+            return transitionFromError(event, context)
 
         case SessionState.stopped:
-            return transitionFromStopped(event)
+            return transitionFromStopped(event, context)
 
         default:
             return { nextState: currentState }
     }
 }
 
-function transitionFromIdle(event: SessionEvent): TransitionResult {
+function transitionFromIdle(event: SessionEvent, context: SessionContext): TransitionResult {
     switch (event.type) {
         case "start_session":
-            return { nextState: SessionState.creating }
+            return {
+                nextState: SessionState.creating,
+                contextUpdate: {
+                    missionStatus: 'creating',
+                    parentTurnStatus: 'running',
+                    missionTitle: event.content,
+                    lastEventAt: Date.now(),
+                    logs: [{
+                        id: `mission-start-${Date.now()}`,
+                        timestamp: Date.now(),
+                        type: 'info',
+                        content: 'Mission started.'
+                    }]
+                }
+            }
 
         // Allow direct transition to streaming if we receive events that indicate
         // the session is already running
@@ -244,6 +311,16 @@ function transitionFromIdle(event: SessionEvent): TransitionResult {
                 contextUpdate: { sawApiReqStarted: true },
             }
 
+        // Handle activity events that can occur in Plan Mode or if a session
+        // was started without an explicit start_session event
+        case "chat_update":
+        case "task_progress":
+        case "ask_user_choice":
+        case "ask_tool":
+        case "say_text":
+            // Directly transition via transitionFromStreaming to ensure context is updated
+            return transitionFromStreaming(event, context, SessionState.idle)
+
         default:
             return { nextState: SessionState.idle }
     }
@@ -255,6 +332,9 @@ function transitionFromCreating(event: SessionEvent, context: SessionContext): T
             const newContext: Partial<SessionContext> = {
                 sawSessionCreated: true,
                 sessionId: event.sessionId,
+                missionStatus: 'running',
+                parentTurnStatus: 'running',
+                lastEventAt: Date.now(),
             }
             // Transition to streaming only if we've seen both events
             if (context.sawApiReqStarted) {
@@ -265,12 +345,21 @@ function transitionFromCreating(event: SessionEvent, context: SessionContext): T
 
         case "api_req_started": {
             const newContext: Partial<SessionContext> = { sawApiReqStarted: true }
+            newContext.missionStatus = 'running';
+            newContext.parentTurnStatus = 'running';
+            newContext.lastEventAt = Date.now();
             // Transition to streaming only if we've seen both events
             if (context.sawSessionCreated) {
                 return { nextState: SessionState.streaming, contextUpdate: newContext }
             }
             return { nextState: SessionState.creating, contextUpdate: newContext }
         }
+
+        case "chat_update":
+        case "task_progress":
+        case "ask_user_choice":
+            // Direct jump to streaming/active if we see real activity
+            return transitionFromStreaming(event, context, SessionState.creating)
 
         case "process_error":
             return {
@@ -286,39 +375,165 @@ function transitionFromCreating(event: SessionEvent, context: SessionContext): T
     }
 }
 
-function transitionFromStreaming(event: SessionEvent): TransitionResult {
+function parseToolArgs(raw: any): any {
+    if (!raw) return {};
+    if (typeof raw === 'object') return raw;
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return {};
+    }
+}
+
+function normalizeWorkerId(id?: string): string {
+    if (!id) return '';
+    return id.startsWith('agent-') ? id : `agent-${id}`;
+}
+
+function hasActiveWorkers(workers: Record<string, WorkerState>): boolean {
+    return Object.values(workers).some(worker => worker.isActive || worker.status === 'queued' || worker.status === 'running' || worker.status === 'In Progress');
+}
+
+function hasRunningTools(activeToolCalls: SessionContext['activeToolCalls']): boolean {
+    return Object.values(activeToolCalls).some(tool => tool.status === 'running');
+}
+
+function clearActiveRuntimeCalls(): SessionContext['activeToolCalls'] {
+    return {};
+}
+
+function upsertWorkerState(
+    workers: Record<string, WorkerState>,
+    worker: Partial<WorkerState> & { id: string },
+    timestamp: number
+): Record<string, WorkerState> {
+    const previous = workers[worker.id];
+    return {
+        ...workers,
+        [worker.id]: {
+            id: worker.id,
+            name: worker.name || previous?.name || 'Worker',
+            status: worker.status || previous?.status || 'running',
+            isActive: worker.isActive ?? previous?.isActive ?? true,
+            progress: worker.progress || previous?.progress,
+            color: worker.color || previous?.color,
+            lastResult: worker.lastResult || previous?.lastResult,
+            startedAt: previous?.startedAt || worker.startedAt || timestamp,
+            updatedAt: timestamp,
+            completedAt: worker.completedAt || previous?.completedAt,
+        }
+    };
+}
+
+function workersFromSwarmResult(result?: string, timestamp = Date.now()): WorkerState[] {
+    if (!result) return [];
+    const workers: WorkerState[] = [];
+    const regex = /(agent-[a-zA-Z0-9-]+)\s*->\s*([^\n\r]+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(result)) !== null) {
+        workers.push({
+            id: match[1],
+            name: match[2].trim() || 'Worker',
+            status: 'running',
+            isActive: true,
+            progress: 'Worker running',
+            startedAt: timestamp,
+            updatedAt: timestamp,
+        });
+    }
+    return workers;
+}
+
+function workerLogType(event?: string, status?: string): AgentLogEntry['type'] {
+    if (event === 'worker_spawned' || status === 'queued') return 'worker_spawned';
+    if (event === 'mission_timed_out' || status === 'timeout') return 'mission_timed_out';
+    if (event === 'worker_completed' || status === 'completed') return 'worker_completed';
+    if (event === 'worker_aborted' || status === 'aborted') return 'mission_failed';
+    if (event === 'worker_failed' || status === 'failed') return 'mission_failed';
+    return 'worker_running';
+}
+
+function workerLogContent(worker: WorkerState, event?: string): string {
+    if (event === 'worker_spawned' || worker.status === 'queued') return `Queued worker ${worker.id}: ${worker.name}`;
+    if (event === 'mission_timed_out' || worker.status === 'timeout') return `Worker ${worker.id} timed out; showing partial result.`;
+    if (event === 'worker_completed' || worker.status === 'completed') return `Worker ${worker.id} completed: ${worker.name}`;
+    if (event === 'worker_aborted' || worker.status === 'aborted') return `Worker ${worker.id} aborted: ${worker.name}`;
+    if (event === 'worker_failed' || worker.status === 'failed') return `Worker ${worker.id} failed: ${worker.name}`;
+    return `Worker ${worker.id} running: ${worker.name}`;
+}
+
+function toolDisplayName(name: string, args: any): string {
+    if (name === 'read_file') return `Reading ${String(args.path || args.file || 'file')}`;
+    if (name === 'list_dir') return `Exploring ${String(args.path || args.dir || 'folder')}`;
+    if (name === 'write_scratchpad') return `Saving notes${args.name ? `: ${args.name}` : ''}`;
+    if (name === 'read_scratchpad') return 'Reading shared notes';
+    if (name === 'start_swarm') return 'Starting fast bounded swarm';
+    return `Running ${name}`;
+}
+
+function isLowSignalInternalTool(name: string): boolean {
+    return name === 'read_scratchpad';
+}
+
+function transitionFromStreaming(event: SessionEvent, context: SessionContext, currentState: SessionState): TransitionResult {
     const timestamp = Date.now();
     switch (event.type) {
         // Stay streaming on any say message
-        case "say_text":
+        case "say_text": {
+            const visibleText = stripReasoningBlocks((event as SayTextEvent).payload?.text || "");
+            if (!visibleText) {
+                return { nextState: SessionState.streaming }
+            }
+
             return {
                 nextState: SessionState.streaming,
                 contextUpdate: {
                     logs: [{
                         id: `log-${timestamp}`,
                         timestamp,
-                        type: 'info',
-                        content: (event as SayTextEvent).payload?.text || "", // Verify event structure
+                        type: 'assistant_text',
+                        content: visibleText,
                     }]
+                    ,
+                    missionStatus: 'running',
+                    parentTurnStatus: 'running',
+                    lastEventAt: timestamp,
                 }
             }
+        }
 
         // Stay streaming on api_req_started (new request)
         case "api_req_started":
-            return { nextState: SessionState.streaming }
+            return {
+                nextState: SessionState.streaming,
+                contextUpdate: {
+                    missionStatus: 'running',
+                    parentTurnStatus: 'running',
+                    lastEventAt: timestamp,
+                }
+            }
 
         // Approval-required asks (only on complete)
         case "ask_tool":
             return {
                 nextState: event.partial ? SessionState.streaming : SessionState.waiting_approval,
                 contextUpdate: event.partial ? undefined : {
+                    pendingTool: {
+                        id: (event as any).payload?.toolId,
+                        name: (event as any).payload?.name,
+                        args: (event as any).payload?.args
+                    },
                     logs: [{
                         id: `log-${timestamp}`,
                         timestamp,
-                        type: 'tool_call',
-                        content: (event as any).payload?.name || "Tool Call", // Using any cast for quick fix, need to verify types
+                        type: 'permission_requested',
+                        content: (event as any).payload?.name || "Tool Call",
                         metadata: (event as any).payload
                     }]
+                    ,
+                    missionStatus: 'waiting',
+                    parentTurnStatus: 'waiting',
+                    lastEventAt: timestamp,
                 }
             }
 
@@ -346,14 +561,37 @@ function transitionFromStreaming(event: SessionEvent): TransitionResult {
 
         // Completion
         case "ask_completion_result":
+            if (hasActiveWorkers(context.workers)) {
+                return {
+                    nextState: SessionState.streaming,
+                    contextUpdate: {
+                        activeToolCalls: clearActiveRuntimeCalls(),
+                        parentTurnStatus: 'completed',
+                        missionStatus: 'running',
+                        lastEventAt: timestamp,
+                        logs: [{
+                            id: 'parent-turn-completed-waiting-workers',
+                            timestamp,
+                            type: 'info',
+                            content: 'Parent turn finished; waiting for active workers.'
+                        }]
+                    }
+                }
+            }
             return {
                 nextState: SessionState.completed,
                 contextUpdate: {
+                    activeToolCalls: clearActiveRuntimeCalls(),
+                    pendingChoice: undefined,
+                    pendingTool: undefined,
+                    missionStatus: 'completed',
+                    parentTurnStatus: 'completed',
+                    lastEventAt: timestamp,
                     logs: [{
                         id: `log-${timestamp}`,
                         timestamp,
-                        type: 'info',
-                        content: "Task Completed."
+                        type: 'mission_completed',
+                        content: "Mission completed."
                     }]
                 }
             }
@@ -369,9 +607,12 @@ function transitionFromStreaming(event: SessionEvent): TransitionResult {
                     logs: [{
                         id: `log-${timestamp}`,
                         timestamp,
-                        type: 'error',
+                        type: 'mission_failed',
                         content: "An error occurred during execution."
-                    }]
+                    }],
+                    missionStatus: 'failed',
+                    parentTurnStatus: 'failed',
+                    lastEventAt: timestamp,
                 }
             }
 
@@ -389,7 +630,10 @@ function transitionFromStreaming(event: SessionEvent): TransitionResult {
                         timestamp,
                         type: 'info',
                         content: "Session stopped by user."
-                    }]
+                    }],
+                    missionStatus: 'stopped',
+                    parentTurnStatus: 'failed',
+                    lastEventAt: timestamp,
                 }
             }
 
@@ -397,92 +641,358 @@ function transitionFromStreaming(event: SessionEvent): TransitionResult {
         case "chat_update": {
             const msg = event.message;
             const newLogs: AgentLogEntry[] = [];
+            const activeToolCalls = { ...context.activeToolCalls };
+            let workers = { ...context.workers };
+            const toolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls : [];
+            const hasRunningToolCalls = toolCalls.some((tc: any) => tc.status !== 'completed' && tc.status !== 'error');
+            const isFinalNoWorkUpdate = msg.isStreaming === false && !hasRunningToolCalls && !hasActiveWorkers(context.workers);
 
             // 1. Text Content
             if (msg.content) {
-                newLogs.push({
-                    id: `log-${msg.id}-text`,
-                    timestamp: msg.timestamp,
-                    type: 'info',
-                    content: msg.content
-                });
+                const visibleContent = stripReasoningBlocks(msg.content);
+                if (visibleContent) {
+                    newLogs.push({
+                        id: `log-${msg.id}-text`,
+                        timestamp: msg.timestamp,
+                        type: 'assistant_text',
+                        content: visibleContent
+                    });
+                }
             }
 
             // 2. Tool Calls
-            if (msg.toolCalls && msg.toolCalls.length > 0) {
-                msg.toolCalls.forEach((tc: any) => {
-                    // Create Tool Call Log
-                    newLogs.push({
-                        id: `log-${tc.id}`, // Stable ID
-                        timestamp: msg.timestamp,
-                        type: 'tool_call',
-                        content: `Executing ${tc.name}...`,
-                        metadata: {
-                            name: tc.name,
-                            args: tc.arguments ? JSON.parse(tc.arguments || "{}") : {}
+            if (toolCalls.length > 0) {
+                toolCalls.forEach((tc: any) => {
+                    const args = parseToolArgs(tc.arguments);
+                    const status = tc.status === 'error' ? 'failed' : tc.status === 'completed' ? 'completed' : 'running';
+                    activeToolCalls[tc.id] = {
+                        id: tc.id,
+                        name: tc.name,
+                        args,
+                        status,
+                        updatedAt: msg.timestamp || timestamp,
+                    };
+
+                    if (tc.name === 'command_status') {
+                        const workerId = normalizeWorkerId(args.id);
+                        if (workerId) {
+                            workers = upsertWorkerState(workers, {
+                                id: workerId,
+                                status: status === 'completed' ? 'running' : status,
+                                isActive: true,
+                                progress: 'Worker status checked',
+                            }, msg.timestamp || timestamp);
+                            newLogs.push({
+                                id: `worker-status-${workerId}`,
+                                timestamp: msg.timestamp,
+                                type: 'status_check',
+                                content: `Checked worker ${workerId}`,
+                                metadata: { workerId, args }
+                            });
+                        }
+                        delete activeToolCalls[tc.id];
+                        return;
+                    }
+
+	                    if (tc.name === 'subagent') {
+                        newLogs.push({
+                            id: `subagent-request-${tc.id}`,
+                            timestamp: msg.timestamp,
+                            type: 'worker_spawned',
+                            content: `Requested worker: ${args.description || args.goal || 'Subtask'}`,
+                            metadata: { args }
+                        });
+	                        return;
+	                    }
+
+	                    if (isLowSignalInternalTool(tc.name)) {
+	                        return;
+	                    }
+
+	                    newLogs.push({
+	                        id: `log-${tc.id}`, // Stable ID
+	                        timestamp: msg.timestamp,
+	                        type: 'tool_started',
+	                        content: toolDisplayName(tc.name, args),
+	                        metadata: {
+	                            name: tc.name,
+	                            args
                         }
                     });
 
                     // Create Tool Result Log (if completed)
-                    if (tc.status === 'completed' || tc.status === 'error') {
-                        newLogs.push({
-                            id: `log-${tc.id}-result`,
-                            timestamp: msg.timestamp, // In real backend, this would be later
-                            type: tc.status === 'error' ? 'error' : 'tool_result',
-                            content: tc.result || (tc.status === 'error' ? "Tool failed" : "Tool completed")
-                        });
-                    }
+	                    if (tc.status === 'completed' || tc.status === 'error') {
+	                        const resultContent = tc.name === 'write_scratchpad'
+	                            ? 'Saved notes'
+	                            : tc.result || (tc.status === 'error' ? "Tool failed" : "Tool completed");
+                            if (tc.name === 'start_swarm') {
+                                workersFromSwarmResult(resultContent, msg.timestamp || timestamp).forEach(worker => {
+                                    workers = upsertWorkerState(workers, worker, msg.timestamp || timestamp);
+                                    newLogs.push({
+                                        id: `worker-${worker.id}-fallback-running`,
+                                        timestamp: msg.timestamp || timestamp,
+                                        type: 'worker_running',
+                                        content: `Worker ${worker.id} running: ${worker.name}`,
+                                        metadata: { worker }
+                                    });
+                                });
+                            }
+	                        newLogs.push({
+	                            id: `log-${tc.id}-result`,
+	                            timestamp: msg.timestamp, // In real backend, this would be later
+	                            type: tc.status === 'error' ? 'error' : 'tool_finished',
+	                            content: resultContent
+	                        });
+	                    }
                 });
+            }
+
+            if (currentState === SessionState.completed && isFinalNoWorkUpdate) {
+                return {
+                    nextState: SessionState.completed,
+                    contextUpdate: {
+                        logs: newLogs,
+                        activeToolCalls: clearActiveRuntimeCalls(),
+                        workers,
+                        missionStatus: 'completed',
+                        parentTurnStatus: 'completed',
+                        lastEventAt: msg.timestamp || timestamp,
+                    }
+                }
             }
 
             return {
                 nextState: SessionState.streaming,
                 contextUpdate: {
-                    logs: newLogs
+                    logs: newLogs,
+                    activeToolCalls,
+                    workers,
+                    missionStatus: hasActiveWorkers(workers) ? 'running' : 'running',
+                    lastEventAt: msg.timestamp || timestamp,
                 }
             }
         }
+
+        case "task_progress": {
+            const p = (event as TaskProgressEvent).payload;
+            const workers = { ...context.workers };
+            const logs: AgentLogEntry[] = [];
+            const eventName = p.event || '';
+            let missionStatus = context.missionStatus === 'idle' ? 'running' : context.missionStatus;
+            let parentTurnStatus = context.parentTurnStatus === 'idle' ? 'running' : context.parentTurnStatus;
+            let workerConcurrency = context.workerConcurrency;
+
+            if (p.agent_identifier && String(p.agent_identifier).startsWith('agent-')) {
+                const previous = workers[p.agent_identifier];
+                const nextWorker: WorkerState = {
+                    id: p.agent_identifier,
+                    name: p.task_name || previous?.name || "Unknown Worker",
+                    status: p.status || previous?.status || "active",
+                    isActive: Boolean(p.is_active),
+                    progress: p.summary || previous?.progress,
+                    color: p.agent_color || previous?.color,
+                    lastResult: p.result || previous?.lastResult,
+                    startedAt: previous?.startedAt || timestamp,
+                    updatedAt: timestamp,
+                    completedAt: p.is_active === false ? timestamp : previous?.completedAt,
+                };
+                workers[p.agent_identifier] = nextWorker;
+
+                logs.push({
+                    id: `worker-${p.agent_identifier}-${eventName || nextWorker.status}`,
+                    timestamp,
+                    type: workerLogType(eventName, nextWorker.status),
+                    content: workerLogContent(nextWorker, eventName),
+                    metadata: { worker: nextWorker, progress: p }
+                });
+
+                missionStatus = hasActiveWorkers(workers) ? 'running' : missionStatus;
+	                if (eventName === 'mission_timed_out' || nextWorker.status === 'timeout') {
+	                    missionStatus = hasActiveWorkers(workers) ? 'running' : 'completed';
+	                    parentTurnStatus = context.parentTurnStatus === 'completed' ? 'completed' : parentTurnStatus;
+	                } else if (eventName === 'worker_aborted' || nextWorker.status === 'aborted') {
+	                    missionStatus = hasActiveWorkers(workers) ? 'stopped' : 'stopped';
+	                    parentTurnStatus = 'failed';
+	                } else if (eventName === 'worker_failed' || nextWorker.status === 'failed') {
+	                    missionStatus = 'failed';
+	                    parentTurnStatus = 'failed';
+	                }
+	            } else if (p.status) {
+	                const status = String(p.status).toLowerCase();
+	                if (status.includes('waiting for approval')) {
+	                    missionStatus = 'waiting';
+	                    parentTurnStatus = 'waiting';
+	                    logs.push({
+	                        id: `approval-waiting-${timestamp}`,
+	                        timestamp,
+	                        type: 'permission_requested',
+	                        content: 'Waiting for approval.',
+	                        metadata: p
+	                    });
+	                } else if (status.includes('loop warning')) {
+	                    logs.push({
+	                        id: 'loop-warning',
+	                        timestamp,
+	                        type: 'info',
+	                        content: 'Loop warning: repeated narration detected; agent is changing strategy.',
+	                        metadata: p
+	                    });
+	                } else if (status.includes('mission accomplished') || status.includes('completed')) {
+	                    missionStatus = hasActiveWorkers(workers) ? 'running' : 'completed';
+                    parentTurnStatus = 'completed';
+                    logs.push({
+                        id: `mission-progress-${timestamp}`,
+                        timestamp,
+                        type: missionStatus === 'completed' ? 'mission_completed' : 'info',
+                        content: missionStatus === 'completed' ? 'Mission completed.' : 'Parent turn completed; workers still active.',
+                        metadata: p
+                    });
+                }
+            }
+
+            if (p.worker_running) {
+                workerConcurrency = p.worker_running;
+            }
+
+            if (parentTurnStatus === 'completed' && !hasActiveWorkers(workers) && Object.keys(workers).length > 0 && missionStatus !== 'failed') {
+                missionStatus = 'completed';
+                logs.push({
+                    id: 'mission-completed-after-workers',
+                    timestamp,
+                    type: 'mission_completed',
+                    content: 'Mission completed after all workers finished.',
+                    metadata: p
+                });
+            }
+
+            return {
+                nextState: missionStatus === 'completed'
+                    ? SessionState.completed
+                    : currentState === SessionState.creating
+                        ? SessionState.streaming
+                        : currentState,
+                contextUpdate: {
+                    workers,
+                    logs,
+                    missionStatus,
+                    parentTurnStatus,
+                    workerConcurrency,
+                    lastEventAt: timestamp,
+                }
+            };
+        }
+
+        case "ask_user_choice":
+            return {
+                nextState: SessionState.waiting_input,
+                contextUpdate: {
+                    pendingChoice: event.payload,
+                    logs: [{
+                        id: `choice-${event.payload.id}`,
+                        timestamp: Date.now(),
+                        type: 'permission_requested',
+                        content: event.payload.question,
+                        metadata: event.payload
+                    }],
+                    missionStatus: 'waiting',
+                    parentTurnStatus: 'waiting',
+                    lastEventAt: timestamp,
+                }
+            }
 
         default:
             return { nextState: SessionState.streaming }
     }
 }
 
-function transitionFromWaitingApproval(event: SessionEvent): TransitionResult {
+function transitionFromWaitingApproval(event: SessionEvent, context?: SessionContext): TransitionResult {
     switch (event.type) {
         case "approve_action":
         case "reject_action":
         case "api_req_started": // Auto-approved
-            return { nextState: SessionState.streaming }
+            return {
+                nextState: SessionState.streaming,
+                contextUpdate: { pendingTool: undefined, pendingChoice: undefined, missionStatus: 'running', parentTurnStatus: 'running', lastEventAt: Date.now() }
+            }
 
         case "cancel_session":
             return { nextState: SessionState.stopped }
+
+        case "chat_update":
+        case "task_progress":
+        case "say_text":
+            return transitionFromStreaming(event, context || createInitialContext(), SessionState.waiting_approval)
 
         default:
             return { nextState: SessionState.waiting_approval }
     }
 }
 
-function transitionFromWaitingInput(event: SessionEvent): TransitionResult {
+function transitionFromWaitingInput(event: SessionEvent, context?: SessionContext): TransitionResult {
     switch (event.type) {
         case "api_req_started":
-            return { nextState: SessionState.streaming }
-
         case "send_message":
-            return { nextState: SessionState.streaming }
+        case "submit_input":
+            return {
+                nextState: SessionState.streaming,
+                contextUpdate: { pendingChoice: undefined, pendingTool: undefined, missionStatus: 'running', parentTurnStatus: 'running', lastEventAt: Date.now() }
+            }
 
         case "cancel_session":
             return { nextState: SessionState.stopped }
+
+        case "chat_update":
+        case "task_progress":
+        case "say_text":
+            return transitionFromStreaming(event, context || createInitialContext(), SessionState.waiting_input)
 
         default:
             return { nextState: SessionState.waiting_input }
     }
 }
 
-function transitionFromCompleted(event: SessionEvent): TransitionResult {
+function transitionFromCompleted(event: SessionEvent, context?: SessionContext): TransitionResult {
     switch (event.type) {
         case "api_req_started":
             return { nextState: SessionState.streaming }
+
+        case "chat_update": {
+            const ctx = context || createInitialContext();
+            const msg = event.message;
+            const toolCalls = Array.isArray(msg?.toolCalls) ? msg.toolCalls : [];
+            const hasRunningToolCalls = toolCalls.some((tc: any) => tc.status !== 'completed' && tc.status !== 'error');
+            if (msg?.isStreaming === false && !hasRunningToolCalls && !hasActiveWorkers(ctx.workers)) {
+                return {
+                    nextState: SessionState.completed,
+                    contextUpdate: {
+                        activeToolCalls: clearActiveRuntimeCalls(),
+                        missionStatus: 'completed',
+                        parentTurnStatus: 'completed',
+                        lastEventAt: msg.timestamp || Date.now(),
+                    }
+                }
+            }
+            return transitionFromStreaming(event, ctx, SessionState.completed)
+        }
+
+        case "task_progress": {
+            const ctx = context || createInitialContext();
+            const p = event.payload;
+            if (!p?.is_active && !hasActiveWorkers(ctx.workers)) {
+                return {
+                    nextState: SessionState.completed,
+                    contextUpdate: {
+                        missionStatus: 'completed',
+                        parentTurnStatus: 'completed',
+                        lastEventAt: Date.now(),
+                    }
+                }
+            }
+            return transitionFromStreaming(event, ctx, SessionState.completed)
+        }
+
+        case "say_text":
+            return { nextState: SessionState.completed }
 
         case "send_message": // Continue with follow-up
             return { nextState: SessionState.streaming }
@@ -495,10 +1005,15 @@ function transitionFromCompleted(event: SessionEvent): TransitionResult {
     }
 }
 
-function transitionFromPaused(event: SessionEvent): TransitionResult {
+function transitionFromPaused(event: SessionEvent, context?: SessionContext): TransitionResult {
     switch (event.type) {
         case "api_req_started":
             return { nextState: SessionState.streaming }
+
+        case "chat_update":
+        case "task_progress":
+        case "say_text":
+            return transitionFromStreaming(event, context || createInitialContext(), SessionState.paused)
 
         case "cancel_session":
             return { nextState: SessionState.stopped }
@@ -508,10 +1023,15 @@ function transitionFromPaused(event: SessionEvent): TransitionResult {
     }
 }
 
-function transitionFromError(event: SessionEvent): TransitionResult {
+function transitionFromError(event: SessionEvent, context?: SessionContext): TransitionResult {
     switch (event.type) {
         case "api_req_started":
             return { nextState: SessionState.streaming }
+
+        case "chat_update":
+        case "task_progress":
+        case "say_text":
+            return transitionFromStreaming(event, context || createInitialContext(), SessionState.error)
 
         case "retry":
             return { nextState: SessionState.streaming }
@@ -524,10 +1044,15 @@ function transitionFromError(event: SessionEvent): TransitionResult {
     }
 }
 
-function transitionFromStopped(event: SessionEvent): TransitionResult {
+function transitionFromStopped(event: SessionEvent, context?: SessionContext): TransitionResult {
     switch (event.type) {
         case "api_req_started":
             return { nextState: SessionState.streaming }
+
+        case "chat_update":
+        case "task_progress":
+        case "say_text":
+            return transitionFromStreaming(event, context || createInitialContext(), SessionState.stopped)
 
         case "start_session": // New task
             return { nextState: SessionState.creating }

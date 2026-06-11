@@ -38,24 +38,34 @@ const (
 // This is the single source of truth for tool classifications.
 var toolCategoryRegistry = map[string]ToolCategory{
 	// ─── READ TOOLS (Always Auto-Approved) ───
-	"list_dir":            CategoryRead,
-	"read_file":           CategoryRead,
-	"read_definitions":    CategoryRead,
-	"codebase_search":     CategoryRead,
-	"grep_search":         CategoryRead,
-	"find_by_name":        CategoryRead,
-	"view_file":           CategoryRead,
-	"view_file_outline":   CategoryRead,
-	"view_code_item":      CategoryRead,
-	"get_diagnostics":     CategoryRead,
-	"get_definitions":     CategoryRead, // LSP go-to-definition
-	"lsp_goto_definition": CategoryRead,
-	"lsp_hover":           CategoryRead,
-	"lsp_references":      CategoryRead,
-	"lsp_completions":     CategoryRead,
-	"command_status":      CategoryRead, // Check status of bg command (read-only)
-	"get_workflows":       CategoryRead,
-	"get_context_stats":   CategoryRead,
+	"list_dir":                  CategoryRead,
+	"read_file":                 CategoryRead,
+	"read_definitions":          CategoryRead,
+	"codebase_search":           CategoryRead,
+	"grep_search":               CategoryRead,
+	"find_by_name":              CategoryRead,
+	"view_file":                 CategoryRead,
+	"view_file_outline":         CategoryRead,
+	"view_code_item":            CategoryRead,
+	"get_diagnostics":           CategoryRead,
+	"get_definitions":           CategoryRead, // LSP go-to-definition
+	"lsp_goto_definition":       CategoryRead,
+	"lsp_hover":                 CategoryRead,
+	"lsp_references":            CategoryRead,
+	"lsp_completions":           CategoryRead,
+	"command_status":            CategoryRead, // Check status of bg command (read-only)
+	"get_workflows":             CategoryRead,
+	"get_context_stats":         CategoryRead,
+	"web_search":                CategoryRead,
+	"list_available_skills":     CategoryRead,
+	"retrieve_context_original": CategoryRead,
+	"graph_status":              CategoryRead,
+	"graph_explore":             CategoryRead,
+	"route_lookup":              CategoryRead,
+	"dependency_trace":          CategoryRead,
+	"symbol_impact":             CategoryRead,
+	"research_doctor":           CategoryRead,
+	"document_parse":            CategoryRead,
 
 	// ─── WRITE TOOLS (Require Approval in Act Mode, Blocked in Plan) ───
 	"write_file":           CategoryWrite,
@@ -66,6 +76,7 @@ var toolCategoryRegistry = map[string]ToolCategory{
 	"delete_file":          CategoryWrite,
 	"move_file":            CategoryWrite,
 	"create_directory":     CategoryWrite,
+	"batch_edit":           CategoryWrite,
 
 	// ─── EXECUTE TOOLS (Require Approval) ───
 	"execute_command": CategoryExecute,
@@ -73,15 +84,22 @@ var toolCategoryRegistry = map[string]ToolCategory{
 	"execute_python":  CategoryExecute,
 
 	// ─── META TOOLS (Always Silent Auto-Approve) ───
-	"task_boundary":   CategoryMeta,
-	"update_todos":    CategoryMeta,
-	"update_plan":     CategoryMeta,
-	"list_tasks":      CategoryMeta,
-	"start_task":      CategoryMeta,
-	"switch_mode":     CategoryMeta,
-	"ask_user_choice": CategoryMeta, // User interaction tool
-	"notify_user":     CategoryMeta,
-	"start_swarm":     CategoryMeta,
+	"task_boundary":    CategoryMeta,
+	"update_todos":     CategoryMeta,
+	"update_plan":      CategoryMeta,
+	"list_tasks":       CategoryMeta,
+	"create_task":      CategoryMeta,
+	"next_task":        CategoryMeta,
+	"complete_task":    CategoryMeta,
+	"add_subtask":      CategoryMeta,
+	"switch_mode":      CategoryMeta,
+	"ask_user_choice":  CategoryMeta, // User interaction tool
+	"submit_plan":      CategoryMeta,
+	"start_swarm":      CategoryMeta,
+	"subagent":         CategoryMeta,
+	"write_scratchpad": CategoryMeta,
+	"read_scratchpad":  CategoryMeta,
+	"invoke_skill":     CategoryMeta,
 
 	// ─── BROWSER TOOLS ───
 	"browser_open":       CategoryBrowser,

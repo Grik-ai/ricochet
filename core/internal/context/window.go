@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 
 	"github.com/igoryan-dao/ricochet/internal/protocol"
 )
@@ -14,6 +16,8 @@ type ContextSettings struct {
 	CondenseThreshold    int
 	SlidingWindowSize    int
 	ShowContextIndicator bool
+	MaxFragmentTokens    int
+	ShowContributorPanel bool
 }
 
 // ContextResult contains the result of context management
@@ -23,9 +27,11 @@ type ContextResult struct {
 	WasTruncated bool
 	Summary      string
 	SystemPrompt string // Modified system prompt (e.g. with Condensed Context)
+	TokensBefore int
 	TokensUsed   int
 	TokensMax    int
 	Percentage   float64
+	Report       *protocol.ContextBuildReport
 }
 
 // WindowManager handles context window optimization
@@ -37,19 +43,37 @@ type WindowManager struct {
 
 // NewWindowManager creates a new window manager
 func NewWindowManager(maxTokens int) *WindowManager {
+	threshold := 70
+	if val := os.Getenv("RICOCHET_COMPACT_PCT"); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			if i > 0 && i <= 100 {
+				threshold = i
+			}
+		}
+	}
+
 	return &WindowManager{
 		MaxTokens: maxTokens,
 		Settings: &ContextSettings{
 			AutoCondense:         true,
-			CondenseThreshold:    70,
+			CondenseThreshold:    threshold,
 			SlidingWindowSize:    20,
 			ShowContextIndicator: true,
+			MaxFragmentTokens:    defaultMaxContextFragmentTokens,
+			ShowContributorPanel: true,
 		},
 	}
 }
 
 // NewWindowManagerWithSettings creates a window manager with custom settings
 func NewWindowManagerWithSettings(maxTokens int, settings *ContextSettings, condenseProvider CondenseProvider) *WindowManager {
+	// Apply override if not provided in settings
+	if settings != nil && os.Getenv("RICOCHET_COMPACT_PCT") != "" {
+		if i, err := strconv.Atoi(os.Getenv("RICOCHET_COMPACT_PCT")); err == nil {
+			settings.CondenseThreshold = i
+		}
+	}
+
 	wm := &WindowManager{
 		MaxTokens: maxTokens,
 		Settings:  settings,
@@ -67,8 +91,7 @@ type toolCallKey struct {
 	Args string
 }
 
-// ManageContext is the main entry point for context management
-// It tries condensation first, then falls back to sliding window pruning
+// ManageContext is the main entry point for context management (The Tengu Flow)
 func (wm *WindowManager) ManageContext(ctx context.Context, messages []protocol.Message, systemPrompt string) (*ContextResult, error) {
 	result := &ContextResult{
 		Messages:     messages,
@@ -76,68 +99,116 @@ func (wm *WindowManager) ManageContext(ctx context.Context, messages []protocol.
 		TokensMax:    wm.MaxTokens,
 	}
 
-	// Calculate system tokens separately
-	sysTokens := EstimateBudgetedTokens(systemPrompt)
+	// TIER 1: Optimize & Microcompact (Non-destructive, local)
+	messages = wm.OptimizeToolResults(messages)
+	messages = wm.Microcompact(messages) // Refactored from EvictFileContent
+	tokensBeforeCompression := EstimateBudgetedTokens(systemPrompt)
+	for _, msg := range messages {
+		tokensBeforeCompression += EstimateMessageBudgetedTokens(msg)
+	}
+	compressionReport := wm.compressMessages(&messages)
+	result.Messages = messages
 
-	// Calculate current token usage with fudge factor
+	// Calculate usage after microcompaction
+	sysTokens := EstimateBudgetedTokens(systemPrompt)
 	totalTokens := sysTokens
 	for _, msg := range messages {
 		totalTokens += EstimateMessageBudgetedTokens(msg)
 	}
 	result.TokensUsed = totalTokens
+	result.TokensBefore = tokensBeforeCompression
 	result.Percentage = float64(totalTokens) / float64(wm.MaxTokens) * 100
+	report := BuildContextReport(systemPrompt, messages, wm.MaxTokens, wm.maxFragmentTokens())
+	report.Compression = compressionReport
+	result.Report = &report
 
-	log.Printf("[Context] Current: %d/%d tokens (%.1f%%), %d messages, System: %d tokens",
-		totalTokens, wm.MaxTokens, result.Percentage, len(messages), sysTokens)
+	log.Printf("[Context] Tier 1 usage: %d/%d (%.1f%%)", totalTokens, wm.MaxTokens, result.Percentage)
 
-	// 0. Optimize tool results (e.g. remove redundant read_file outputs)
-	messages = wm.OptimizeToolResults(messages)
-	result.Messages = messages
+	// Check if already within limits
+	if result.Percentage < float64(wm.Settings.CondenseThreshold) {
+		return result, nil
+	}
 
-	// Calculate system tokens separately
-	sysTokens = EstimateBudgetedTokens(systemPrompt)
+	// TIER 2: Full Compaction (LLM Summarization)
 	if wm.Settings != nil && wm.Settings.AutoCondense && wm.CondenseManager != nil {
-		shouldCondense, percentage := wm.CondenseManager.ShouldCondense(messages, systemPrompt)
-		// Update percentage in result based on shouldCondense calculation if needed
-		// but we already calculated it above.
-
+		shouldCondense, _ := wm.CondenseManager.ShouldCondense(messages, systemPrompt)
 		if shouldCondense {
-			log.Printf("[Context] Threshold reached (%.1f%%), attempting condensation...", percentage*100)
+			log.Printf("[Context] Tier 2: Threshold reached, attempting LLM condensation...")
 			condenseResult, err := wm.CondenseManager.Condense(ctx, messages, systemPrompt)
 			if err == nil && condenseResult.WasCondensed {
 				result.Messages = condenseResult.Messages
 				result.WasCondensed = true
 				result.Summary = condenseResult.Summary
+				result.TokensBefore = condenseResult.TokensBefore
 				result.TokensUsed = condenseResult.TokensAfter
 				result.Percentage = float64(condenseResult.TokensAfter) / float64(wm.MaxTokens) * 100
-				log.Printf("[Context] Condensation successful: %d -> %d tokens", condenseResult.TokensBefore, condenseResult.TokensAfter)
+				report := BuildContextReport(systemPrompt, result.Messages, wm.MaxTokens, wm.maxFragmentTokens())
+				report.Compression = compressionReport
+				result.Report = &report
 				return result, nil
 			}
-			if err != nil {
-				log.Printf("[Context] Condensation failed: %v", err)
-			}
+			log.Printf("[Context] Tier 2: Full condensation failed/skipped. Falling back to Tier 3.")
 		}
 	}
 
-	// 2. Fallback to sliding window pruning
-	if totalTokens > wm.MaxTokens || len(messages) > 2 {
-		pruned := wm.PruneMessages(messages, systemPrompt)
-		if len(pruned) < len(messages) {
-			result.Messages = pruned
-			result.WasTruncated = true
-			// Recalculate tokens after pruning
-			newTokens := EstimateBudgetedTokens(systemPrompt)
-			for _, msg := range pruned {
-				newTokens += EstimateMessageBudgetedTokens(msg)
+	// TIER 3: Snip Compaction (Historical Truncation)
+	if result.Percentage >= 90.0 || totalTokens > wm.MaxTokens {
+		log.Printf("[Context] Tier 3: Emergency limit reached, snipping history...")
+
+		// PHASE 4: Distill the history about to be pruned
+		if wm.Settings != nil && wm.CondenseManager != nil && len(messages) > 10 {
+			// Try to summarize the portion that will likely be pruned
+			pruneCandidate := messages[:len(messages)-6] // Keep last 6 intact for summary focus
+			summaryPrompt := wm.CondenseManager.buildCondensePrompt(pruneCandidate)
+			summary, err := wm.CondenseManager.Provider.Summarize(ctx, summaryPrompt)
+			if err == nil {
+				result.Summary = summary
+				log.Printf("[Context] Tier 3: Successfully generated tombstone summary for pruned history.")
+			} else {
+				log.Printf("[Context] Tier 3: Failed to generate summary: %v", err)
 			}
-			result.TokensUsed = newTokens
-			result.Percentage = float64(newTokens) / float64(wm.MaxTokens) * 100
-			log.Printf("[Context] Truncated: %d -> %d msgs, %d -> %d tokens",
-				len(messages), len(pruned), totalTokens, newTokens)
 		}
+
+		pruned := wm.PruneMessages(messages, systemPrompt)
+		result.Messages = pruned
+		result.WasTruncated = true
+
+		// Recalculate
+		newTokens := EstimateBudgetedTokens(systemPrompt)
+		for _, msg := range pruned {
+			newTokens += EstimateMessageBudgetedTokens(msg)
+		}
+		result.TokensUsed = newTokens
+		result.Percentage = float64(newTokens) / float64(wm.MaxTokens) * 100
+		report := BuildContextReport(systemPrompt, result.Messages, wm.MaxTokens, wm.maxFragmentTokens())
+		report.Compression = compressionReport
+		result.Report = &report
 	}
 
 	return result, nil
+}
+
+func (wm *WindowManager) compressMessages(messages *[]protocol.Message) *protocol.ContextCompressionReport {
+	if wm == nil || messages == nil {
+		return nil
+	}
+	compressor := NewContextCompressor("")
+	if wm.Settings != nil && wm.Settings.MaxFragmentTokens > 0 {
+		compressor.MaxTokens = wm.Settings.MaxFragmentTokens
+	}
+	compressed, report := compressor.CompressMessages(*messages)
+	if report == nil {
+		return nil
+	}
+	*messages = compressed
+	return report
+}
+
+func (wm *WindowManager) maxFragmentTokens() int {
+	if wm == nil || wm.Settings == nil {
+		return defaultMaxContextFragmentTokens
+	}
+	return normalizeMaxFragmentTokens(wm.Settings.MaxFragmentTokens)
 }
 
 // PruneMessages reduces the message list to fit within MaxTokens.
@@ -147,7 +218,7 @@ func (wm *WindowManager) ManageContext(ctx context.Context, messages []protocol.
 // with their corresponding assistant message containing tool_calls to avoid API errors.
 func (wm *WindowManager) PruneMessages(messages []protocol.Message, systemPrompt string) []protocol.Message {
 	// 0. Evict large file contents from old messages first to save tokens
-	messages = wm.EvictFileContent(messages)
+	messages = wm.Microcompact(messages)
 
 	// 1. Calculate tokens reserved for System Prompt
 	sysTokens := EstimateBudgetedTokens(systemPrompt)
@@ -169,10 +240,23 @@ func (wm *WindowManager) PruneMessages(messages []protocol.Message, systemPrompt
 		return messages
 	}
 
-	// Always keep the first message (initial task)
+	// Always keep the first message (initial task/system)
 	firstMsg := messages[0]
 	firstMsgTokens := EstimateMessageBudgetedTokens(firstMsg)
 	availableTokens -= firstMsgTokens
+
+	// Special handling: if first message is System, also try to pin the first User message (the actual objective)
+	var secondPinnedMsg *protocol.Message
+	if firstMsg.Role == "system" && len(messages) > 1 {
+		secondMsg := messages[1]
+		if secondMsg.Role == "user" {
+			secondMsgTokens := EstimateMessageBudgetedTokens(secondMsg)
+			if secondMsgTokens < availableTokens/2 { // Only pin if it doesn't take up more than half the remaining window
+				secondPinnedMsg = &secondMsg
+				availableTokens -= secondMsgTokens
+			}
+		}
+	}
 
 	if len(messages) == 0 {
 		return messages
@@ -304,25 +388,35 @@ func (wm *WindowManager) PruneMessages(messages []protocol.Message, systemPrompt
 		validKeep = append(validKeep, msg)
 	}
 
-	// 3. Construct final list with marker and pinned first message
+	// 3. Construct final list with markers and pinned messages
 	finalResult := []protocol.Message{firstMsg}
-	if len(validKeep) < len(messages)-1 {
+	if secondPinnedMsg != nil {
+		finalResult = append(finalResult, *secondPinnedMsg)
+	}
+
+	if len(validKeep) < (len(messages)-1) && !(secondPinnedMsg != nil && len(validKeep) == len(messages)-2) {
 		numPruned := len(messages) - 1 - len(validKeep)
-		marker := protocol.Message{
-			Role:    "user",
-			Content: fmt.Sprintf("[Notice: %d older messages were hidden to stay within context limits. Context safety margin (fudge) applied.]", numPruned),
+		if secondPinnedMsg != nil {
+			numPruned--
 		}
-		finalResult = append(finalResult, marker)
+		if numPruned > 0 {
+			marker := protocol.Message{
+				Role:    "user",
+				Content: fmt.Sprintf("[Notice: %d older messages were hidden to stay within context limits. Context safety margin (fudge) applied.]", numPruned),
+			}
+			finalResult = append(finalResult, marker)
+		}
 	}
 	finalResult = append(finalResult, validKeep...)
 
 	return finalResult
 }
 
-// EvictFileContent replaces large tool results with a placeholder for messages that are not recent.
-func (wm *WindowManager) EvictFileContent(messages []protocol.Message) []protocol.Message {
-	// We keep the last 8 messages fully intact.
-	keepIntact := 8
+// Microcompact (Tier 1) replaces large tool results with a placeholder for messages that are not recent.
+// This is non-destructive to the summary, it only cleans out raw data to preserve reasoning tokens.
+func (wm *WindowManager) Microcompact(messages []protocol.Message) []protocol.Message {
+	// We keep the last 6 messages (3 turns) fully intact.
+	keepIntact := 6
 	if len(messages) <= keepIntact {
 		return messages
 	}
@@ -331,6 +425,7 @@ func (wm *WindowManager) EvictFileContent(messages []protocol.Message) []protoco
 	result := make([]protocol.Message, len(messages))
 	copy(result, messages)
 
+	clearedCount := 0
 	// Process messages before the intact window, skipping the first (pinned) message
 	for i := 1; i < len(result)-keepIntact; i++ {
 		msg := &result[i]
@@ -338,12 +433,18 @@ func (wm *WindowManager) EvictFileContent(messages []protocol.Message) []protoco
 		if msg.Role == "user" && len(msg.ToolResults) > 0 {
 			for idx := range msg.ToolResults {
 				tr := &msg.ToolResults[idx]
-				// If content is large (>2000 chars), evict it
-				if len(tr.Content) > 2000 {
-					tr.Content = "[Content evicted to save tokens. Use read_file or run command again to view if needed.]"
+				// If content is large (>1024 chars), evict it
+				if len(tr.Content) > 1024 {
+					oldLen := len(tr.Content)
+					tr.Content = fmt.Sprintf("[History: Tool Result from %s cleared (was %d chars) for context window efficiency]", tr.ToolUseID, oldLen)
+					clearedCount++
 				}
 			}
 		}
+	}
+
+	if clearedCount > 0 {
+		log.Printf("[Context] Microcompact: Cleared %d heavy tool results from history.", clearedCount)
 	}
 
 	return result

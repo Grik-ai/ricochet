@@ -47,6 +47,13 @@
                     "name": "Ricochet Chat",
                     "icon": "assets/icon.svg"
                 }
+            ],
+            "explorer": [
+                {
+                    "id": "ricochet.pendingChanges",
+                    "name": "Ricochet Pending Changes",
+                    "icon": "$(diff)"
+                }
             ]
         },
         "commands": [
@@ -71,6 +78,11 @@
                 "icon": "$(history)"
             },
             {
+                "command": "ricochet.openAccount",
+                "title": "Open Grik Account",
+                "icon": "$(account)"
+            },
+            {
                 "command": "ricochet.openSettings",
                 "title": "Open Settings",
                 "icon": "$(settings-gear)"
@@ -79,6 +91,36 @@
                 "command": "ricochet.installCli",
                 "title": "Install CLI Globally",
                 "icon": "$(terminal)"
+            },
+            {
+                "command": "ricochet.refreshPendingChanges",
+                "title": "Refresh Pending Changes",
+                "icon": "$(refresh)"
+            },
+            {
+                "command": "ricochet.openPendingChange",
+                "title": "Open Pending Change",
+                "icon": "$(go-to-file)"
+            },
+            {
+                "command": "ricochet.acceptEdit",
+                "title": "Accept File",
+                "icon": "$(check)"
+            },
+            {
+                "command": "ricochet.rejectEdit",
+                "title": "Reject File",
+                "icon": "$(x)"
+            },
+            {
+                "command": "ricochet.acceptHunk",
+                "title": "Accept Hunk",
+                "icon": "$(check)"
+            },
+            {
+                "command": "ricochet.rejectHunk",
+                "title": "Reject Hunk",
+                "icon": "$(x)"
             }
         ],
         "menus": {
@@ -104,11 +146,63 @@
                     "when": "view == ricochet.chatView"
                 },
                 {
+                    "command": "ricochet.openAccount",
+                    "group": "navigation@45",
+                    "when": "view == ricochet.chatView"
+                },
+                {
                     "command": "ricochet.openSettings",
                     "group": "navigation@50",
                     "when": "view == ricochet.chatView"
+                },
+                {
+                    "command": "ricochet.refreshPendingChanges",
+                    "group": "navigation@10",
+                    "when": "view == ricochet.pendingChanges"
+                }
+            ],
+            "view/item/context": [
+                {
+                    "command": "ricochet.openPendingChange",
+                    "group": "inline@1",
+                    "when": "view == ricochet.pendingChanges && viewItem =~ /pending(File|Hunk)/"
+                },
+                {
+                    "command": "ricochet.acceptEdit",
+                    "group": "inline@2",
+                    "when": "view == ricochet.pendingChanges && viewItem == pendingFile"
+                },
+                {
+                    "command": "ricochet.rejectEdit",
+                    "group": "inline@3",
+                    "when": "view == ricochet.pendingChanges && viewItem == pendingFile"
+                },
+                {
+                    "command": "ricochet.acceptHunk",
+                    "group": "inline@2",
+                    "when": "view == ricochet.pendingChanges && viewItem == pendingHunk"
+                },
+                {
+                    "command": "ricochet.rejectHunk",
+                    "group": "inline@3",
+                    "when": "view == ricochet.pendingChanges && viewItem == pendingHunk"
                 }
             ]
+        },
+        "configuration": {
+            "title": "Ricochet",
+            "properties": {
+                "ricochet.grik.apiBaseUrl": {
+                    "type": "string",
+                    "default": "https://grik.ai/api/v1",
+                    "description": "Base URL for the Grik API used by Ricochet account, credits, and device login. For local development use http://localhost:8080/api/v1."
+                },
+                "ricochet.grik.webBaseUrl": {
+                    "type": "string",
+                    "default": "https://grik.ai",
+                    "description": "Base URL for Grik web dashboard, registration, and billing pages."
+                }
+            }
         }
     },
     "scripts": {

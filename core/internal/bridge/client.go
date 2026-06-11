@@ -81,6 +81,9 @@ func (c *Client) Start(ctx context.Context) error {
 	// Add auth secret to metadata
 	secret := os.Getenv("RICOCHET_BRIDGE_SECRET")
 	ctx = metadata.AppendToOutgoingContext(ctx, "x-bridge-secret", secret)
+	if accessToken := os.Getenv("GRIKAI_ACCESS_TOKEN"); accessToken != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+accessToken)
+	}
 
 	// 1. Handshake
 	resp, err := c.bridgeClient.Handshake(ctx, &proto.HandshakeRequest{

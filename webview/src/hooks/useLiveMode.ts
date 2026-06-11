@@ -8,6 +8,7 @@ export interface LiveModeStatus {
     connectedVia?: 'telegram' | 'discord' | string | null;
     lastActivity?: string;
     sessionId?: string;
+    isDaemon?: boolean;
     // Ether display fields
     stage?: EtherStage;
     lastMessage?: string;

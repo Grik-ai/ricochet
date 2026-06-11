@@ -1,13 +1,18 @@
 import * as vscode from 'vscode';
 import { CoreProcess } from '../../core-process';
+import { ChatUpdatePayload, UsageSnapshot } from '../../protocol/coreMessages';
 import { parseSourceCodeDefinitionsForFile } from '../tree-sitter';
 import { DiffService } from '../diff/DiffService';
-import { SessionService } from '../session/SessionService';
+import { SessionMetadata, SessionService } from '../session/SessionService';
+import { formatChatErrorInfo } from './chatErrors';
+import * as path from 'path';
+import * as fs from 'fs';
 
 export class ChatService {
     private isLiveModeEnabled = false;
     private diffService: DiffService;
-    private activeSessionId: string | null = null;
+    private readonly workspaceStateKey = 'ricochet_active_session_id';
+    private readonly hydratedCoreSessions = new Set<string>();
 
     // Throttling for chat updates to prevent webview crash
     private pendingChatUpdate: any = null;
@@ -15,11 +20,22 @@ export class ChatService {
     private readonly THROTTLE_MS = 300; // ~3 updates per second - aggressive rate limiting for stability
 
     constructor(
+        private readonly context: vscode.ExtensionContext,
         private readonly core: CoreProcess,
         private readonly postMessage: (msg: any) => void,
-        private readonly sessionService: SessionService
+        private readonly sessionService: SessionService,
+        private readonly onSessionMetadataChanged?: (metadata: SessionMetadata) => void
     ) {
-        this.diffService = new DiffService();
+        this.diffService = DiffService.getInstance();
+    }
+
+    public get activeSessionId(): string | null {
+        return this.context.workspaceState.get<string>(this.workspaceStateKey) || null;
+    }
+
+    public set activeSessionId(sessionId: string | null) {
+        console.log(`[ChatService] Setting activeSessionId to: ${sessionId}`);
+        this.context.workspaceState.update(this.workspaceStateKey, sessionId);
     }
 
     public setActiveSession(sessionId: string) {
@@ -29,25 +45,73 @@ export class ChatService {
     public async handleMessage(message: any): Promise<void> {
         switch (message.type) {
             case 'send_message':
-                // Auto-create session if none exists
-                if (!this.activeSessionId) {
+                const requestedRunId = message.payload?.run_id;
+                if (message.payload?.session_id && message.payload.session_id !== this.activeSessionId) {
+                    this.activeSessionId = message.payload.session_id;
+                }
+
+                // If UI did not pass a session_id, this is a fresh start from the welcome screen.
+                // Do not reuse the persisted active session, because that reopens an old chat.
+                if (!message.payload?.session_id) {
                     const workspaces = vscode.workspace.workspaceFolders;
                     if (workspaces && workspaces.length > 0) {
-                        this.activeSessionId = await this.sessionService.createSession(workspaces[0].uri.fsPath);
+                        this.activeSessionId = await this.sessionService.createSession(workspaces[0].uri.fsPath, message.payload.content);
                         console.log('[ChatService] Auto-created session:', this.activeSessionId);
+                        message.payload.session_id = this.activeSessionId;
+                        this.postMessage({
+                            type: 'session_created',
+                            payload: { id: this.activeSessionId, sessionId: this.activeSessionId }
+                        });
+                        await this.notifySessionMetadata(this.activeSessionId);
                     }
                 }
 
-                // Save user message to session
                 if (this.activeSessionId) {
-                    await this.sessionService.appendMessage(this.activeSessionId, {
+                    message.payload.session_id = this.activeSessionId;
+                    await this.ensureCoreSessionHydrated(this.activeSessionId);
+                }
+
+                const requestSessionId = this.activeSessionId;
+
+                // Save user message to session
+                if (requestSessionId) {
+                    await this.sessionService.appendMessage(requestSessionId, {
                         role: 'user',
                         content: message.payload.content,
                         timestamp: Date.now()
                     });
+                    await this.notifySessionMetadata(requestSessionId);
                 }
 
-                await this.core.send('chat_message', message.payload);
+                try {
+                    await this.core.send('chat_message', message.payload);
+                    // The core promise resolves when the autonomous loop has concluded.
+                    // Some short/read-only runs can finish without a final chat_update,
+                    // so always release the webview input as a completion fallback.
+                    this.postMessage({ type: 'ask_completion_result', payload: { session_id: requestSessionId, run_id: requestedRunId } });
+                } catch (e: any) {
+                    console.error('[ChatService] Error sending chat message:', e);
+                    const errorInfo = this.formatChatError(e);
+                    this.postMessage({
+                        type: 'chat_update',
+                        payload: {
+                            session_id: requestSessionId,
+                            run_id: requestedRunId,
+                            message: {
+                                id: Date.now().toString(),
+                                role: 'assistant',
+                                content: '',
+                                errorInfo,
+                                timestamp: Date.now(),
+                                isStreaming: false,
+                                metadata: { tokensIn: 0, tokensOut: 0, totalCost: 0, contextLimit: 0 },
+                                sessionId: requestSessionId,
+                                run_id: requestedRunId
+                            }
+                        }
+                    });
+                    this.postMessage({ type: 'ask_completion_result', payload: { session_id: requestSessionId, run_id: requestedRunId } });
+                }
                 break;
 
             case 'toggle_live_mode':
@@ -96,16 +160,34 @@ export class ChatService {
         }
     }
 
-    public async onChatUpdate(payload: any): Promise<void> {
+    public async onChatUpdate(payload: ChatUpdatePayload): Promise<void> {
+        if (!this.belongsToActiveSession(payload)) return;
+        if (payload.usage) {
+            await this.onUsageUpdate(payload.usage);
+        }
+
         const isFinalMessage = payload.message?.isStreaming === false || payload.done === true;
 
         // Final messages bypass throttle and flush immediately
         if (isFinalMessage) {
             this.flushPendingUpdate();
-            this.postMessage({ type: 'chat_update', payload });
+            this.postChatUpdate(payload);
+
+            // Check for pending edits in tool calls. The core can either ask the extension
+            // to review an edit via propose_edit, or apply an auto-approved edit directly.
+            // Register both running and completed edit tools so the review bar/decorations
+            // still appear after auto-approved writes.
+            const toolCalls = payload.message?.toolCalls;
+            if (toolCalls && toolCalls.length > 0) {
+                for (const tool of toolCalls as any[]) {
+                    if (tool.status === 'pending' || tool.status === 'running' || tool.status === 'completed') {
+                        this.registerToolEditProposal(tool);
+                    }
+                }
+            }
 
             // Save to session
-            if (this.activeSessionId && payload.message && !payload.message.partial) {
+            if (this.activeSessionId && payload.message && !(payload.message as any).partial) {
                 await this.sessionService.appendMessage(this.activeSessionId, {
                     ...payload.message,
                     timestamp: Date.now()
@@ -119,15 +201,162 @@ export class ChatService {
 
         if (!this.chatUpdateTimer) {
             // Send first update immediately, then throttle subsequent ones
-            this.postMessage({ type: 'chat_update', payload });
+            this.postChatUpdate(payload);
             this.chatUpdateTimer = setTimeout(() => {
                 this.chatUpdateTimer = null;
                 if (this.pendingChatUpdate) {
-                    this.postMessage({ type: 'chat_update', payload: this.pendingChatUpdate });
+                    this.postChatUpdate(this.pendingChatUpdate);
                     this.pendingChatUpdate = null;
                 }
             }, this.THROTTLE_MS);
         }
+    }
+
+    public async onUsageUpdate(payload: UsageSnapshot): Promise<void> {
+        const sessionId = payload.sessionId || this.activeSessionId;
+        if (!sessionId || (this.activeSessionId && sessionId !== this.activeSessionId)) return;
+
+        await this.sessionService.updateUsage(sessionId, { ...payload, sessionId });
+        this.postMessage({ type: 'usage_update', payload: { ...payload, sessionId } });
+        await this.notifySessionMetadata(sessionId);
+    }
+
+    public acceptsRuntimePayload(payload: any): boolean {
+        return this.belongsToActiveSession(payload);
+    }
+
+    public async cancelActiveChatRuntime(reason = 'session_switch'): Promise<void> {
+        const sessionId = this.activeSessionId;
+        if (!sessionId) return;
+
+        this.flushPendingUpdate();
+        this.pendingChatUpdate = null;
+
+        try {
+            await this.core.send('abort_chat', { session_id: sessionId });
+        } catch (e) {
+            console.error(`[ChatService] Failed to abort active chat runtime (${reason}):`, e);
+        }
+
+        this.postMessage({ type: 'generation_cancelled', payload: { session_id: sessionId } });
+    }
+
+    private async ensureCoreSessionHydrated(sessionId: string): Promise<void> {
+        if (this.hydratedCoreSessions.has(sessionId)) return;
+
+        const sessionData = await this.sessionService.loadSession(sessionId);
+        try {
+            await this.core.send('hydrate_session', {
+                session_id: sessionId,
+                messages: sessionData?.messages || []
+            });
+            this.hydratedCoreSessions.add(sessionId);
+        } catch (hydrateError) {
+            console.error('[ChatService] Failed to hydrate core session:', hydrateError);
+            throw hydrateError;
+        }
+    }
+
+    private belongsToActiveSession(payload: ChatUpdatePayload): boolean {
+        const payloadSessionId = payload.session_id || (payload.message as any)?.sessionId;
+        return !payloadSessionId || !this.activeSessionId || payloadSessionId === this.activeSessionId;
+    }
+
+    private postChatUpdate(payload: ChatUpdatePayload): void {
+        if (this.belongsToActiveSession(payload)) {
+            this.postMessage({ type: 'chat_update', payload });
+        }
+    }
+
+    private async notifySessionMetadata(sessionId: string): Promise<void> {
+        const metadata = await this.sessionService.getSessionMetadata(sessionId);
+        if (!metadata) return;
+
+        this.onSessionMetadataChanged?.(metadata);
+    }
+
+    private formatChatError(error: any) {
+        return formatChatErrorInfo(error);
+    }
+
+    private registerToolEditProposal(tool: any): void {
+        const toolName = String(tool?.name || '');
+        if (!/(write|edit|replace)/.test(toolName)) return;
+
+        const args = this.parseToolArguments(tool.arguments);
+        let filePath = args.TargetFile || args.targetFile || args.path || args.file;
+        if (!filePath) return;
+
+        if (!path.isAbsolute(filePath) && vscode.workspace.workspaceFolders) {
+            filePath = path.join(vscode.workspace.workspaceFolders[0].uri.fsPath, filePath);
+        }
+
+        const proposal = this.buildEditProposal(filePath, toolName, args);
+        if (!proposal?.newContent) return;
+
+        this.diffService.registerPendingEdit(filePath, proposal.newContent, {
+            originalContent: proposal.originalContent,
+            proposalId: tool.id,
+            tool: toolName
+        });
+    }
+
+    private parseToolArguments(rawArgs: unknown): Record<string, any> {
+        if (!rawArgs) return {};
+        if (typeof rawArgs !== 'string') return rawArgs as Record<string, any>;
+
+        try {
+            return JSON.parse(rawArgs || "{}");
+        } catch {
+            return {};
+        }
+    }
+
+    private buildEditProposal(filePath: string, toolName: string, args: Record<string, any>): { originalContent?: string; newContent: string } | undefined {
+        const currentContent = this.readTextIfExists(filePath);
+
+        if (toolName === 'write_file' || toolName === 'write_to_file') {
+            const newContent = args.content || args.CodeContent || '';
+            if (!newContent) return undefined;
+            return {
+                originalContent: currentContent === newContent ? '' : currentContent,
+                newContent
+            };
+        }
+
+        const target = args.TargetContent || args.targetContent || args.target || '';
+        const replacement = args.ReplacementContent || args.replacementContent || args.replacement || '';
+        if (!target && !replacement) return undefined;
+
+        if (currentContent !== undefined) {
+            if (currentContent.includes(target)) {
+                return {
+                    originalContent: currentContent,
+                    newContent: currentContent.replace(target, replacement)
+                };
+            }
+
+            if (replacement && currentContent.includes(replacement)) {
+                return {
+                    originalContent: currentContent.replace(replacement, target),
+                    newContent: currentContent
+                };
+            }
+        }
+
+        return {
+            originalContent: target,
+            newContent: replacement
+        };
+    }
+
+    private readTextIfExists(filePath: string): string | undefined {
+        try {
+            if (fs.existsSync(filePath)) {
+                return fs.readFileSync(filePath, 'utf8');
+            }
+        } catch (e) {}
+        return undefined;
     }
 
     private flushPendingUpdate(): void {
@@ -136,7 +365,7 @@ export class ChatService {
             this.chatUpdateTimer = null;
         }
         if (this.pendingChatUpdate) {
-            this.postMessage({ type: 'chat_update', payload: this.pendingChatUpdate });
+            this.postChatUpdate(this.pendingChatUpdate);
             this.pendingChatUpdate = null;
         }
     }
@@ -171,13 +400,52 @@ export class ChatService {
         this.postMessage({ type: 'chat_cleared' });
     }
 
-    private executeCommand(command: string): void {
-        if (command) {
-            const terminal = vscode.window.terminals.find(t => t.name === 'Ricochet')
-                || vscode.window.createTerminal('Ricochet');
-            terminal.show();
-            terminal.sendText(command);
+    private async executeCommand(command: string): Promise<void> {
+        if (!command) return;
+
+        if (command === '/accept-all') {
+            const edits = this.diffService.getPendingEdits();
+            const files = edits.map(edit => edit.filePath).filter(Boolean);
+            for (const edit of edits) {
+                await this.diffService.applyPendingEdit(edit.filePath);
+            }
+            this.postMessage({
+                type: 'edit_approval_resolved',
+                payload: {
+                    decision: 'accepted',
+                    files,
+                    session_id: this.activeSessionId,
+                    timestamp: Date.now()
+                }
+            });
+            this.postMessage({ type: 'pending_edits', payload: [] });
+            return;
         }
+
+        if (command === '/reject-all') {
+            const edits = this.diffService.getPendingEdits();
+            const files = edits.map(edit => edit.filePath).filter(Boolean);
+            for (const edit of edits) {
+                await this.diffService.rejectPendingEdit(edit.filePath);
+            }
+            this.postMessage({
+                type: 'edit_approval_resolved',
+                payload: {
+                    decision: 'rejected',
+                    files,
+                    session_id: this.activeSessionId,
+                    timestamp: Date.now()
+                }
+            });
+            this.postMessage({ type: 'pending_edits', payload: [] });
+            vscode.window.showInformationMessage(`Discarded all ${edits.length} pending changes.`);
+            return;
+        }
+
+        const terminal = vscode.window.terminals.find(t => t.name === 'Ricochet')
+            || vscode.window.createTerminal('Ricochet');
+        terminal.show();
+        terminal.sendText(command);
     }
 
     private async searchFiles(query: string): Promise<void> {
@@ -191,13 +459,21 @@ export class ChatService {
 
         try {
             const uris = await vscode.workspace.findFiles(globPattern, excludePattern, 20);
-            const results = uris.map(uri => {
+            const results = await Promise.all(uris.map(async uri => {
                 const relativePath = vscode.workspace.asRelativePath(uri);
+                let size: number | undefined;
+                try {
+                    size = (await vscode.workspace.fs.stat(uri)).size;
+                } catch {
+                    size = undefined;
+                }
                 return {
                     path: relativePath,
-                    name: uri.path.split('/').pop() || relativePath
+                    name: uri.path.split('/').pop() || relativePath,
+                    kind: 'file',
+                    size
                 };
-            });
+            }));
 
             this.postMessage({
                 type: 'file_search_results',

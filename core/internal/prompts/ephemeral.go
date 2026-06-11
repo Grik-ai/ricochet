@@ -5,7 +5,6 @@ import (
 	"strings"
 )
 
-// EphemeralContext holds dynamic state for generating ephemeral messages
 type EphemeralContext struct {
 	Mode             string // "planning", "execution", "verification"
 	HasPlan          bool
@@ -14,154 +13,94 @@ type EphemeralContext struct {
 	LastToolFailed   bool
 	IsInTaskMode     bool
 	ArtifactsCreated []string
+	SessionID        string // For scoping artifacts
+	WorkspaceRoot    string // Original source root
 }
 
 // BuildEphemeralMessage generates a conditional reminder based on current context
-// This is inserted at the END of the message history to maximize adherence
 func BuildEphemeralMessage(ctx EphemeralContext) string {
+	if !ctx.IsInTaskMode && ctx.Mode != "planning" && ctx.Mode != "execution" && ctx.Mode != "verification" {
+		return ""
+	}
+
 	var reminders []string
 
-	// Mode-specific reminders
-	switch strings.ToLower(ctx.Mode) {
-	case "planning":
-		if !ctx.HasPlan && ctx.IsInTaskMode {
-			reminders = append(reminders, `<planning_reminder>
-CRITICAL: You are in PLANNING mode but have not created an implementation plan yet.
-You MUST:
-1. Create implementation_plan.md artifact with your technical approach
-2. Use notify_user to request review before proceeding to EXECUTION
-3. DO NOT start making code changes until the plan is approved
+	if ctx.Mode == "planning" && !ctx.HasPlan {
+		reminders = append(reminders, `<planning_reminder>
+💡 TIP: You are in PLANNING mode.
+- Focus on research and architecture.
+- Submit an implementation plan artifact with submit_plan before making any changes.
+- Do not run modifying commands until the user approves your plan.
 </planning_reminder>`)
-		} else if ctx.HasPlan {
-			reminders = append(reminders, `<planning_reminder>
-You are in PLANNING mode. Continue refining your implementation plan.
-Remember to use notify_user when ready for review.
-</planning_reminder>`)
-		}
+	}
 
-	case "execution":
-		if !ctx.HasPlan && ctx.IsInTaskMode {
+	if ctx.Mode == "execution" {
+		if ctx.HasPlan {
 			reminders = append(reminders, `<execution_reminder>
-CRITICAL: You are in EXECUTION mode but no implementation plan was created.
-Consider switching to PLANNING mode first to design your approach.
-If this is a simple task, proceed with caution and communicate your steps clearly.
+⚡ You are in EXECUTION mode.
+- Follow the approved implementation plan.
+- Update task.md as you progress.
+- Keep the user informed of your status.
+- Use replace_file_content for targeted edits.
 </execution_reminder>`)
 		} else {
 			reminders = append(reminders, `<execution_reminder>
-You are in EXECUTION mode. Follow your implementation plan.
-Remember to:
-- Use replace_file_content for targeted edits (NOT write_file for full overwrites)
-- Create checkpoints before destructive operations
-- Communicate progress clearly to the user
+🚨 CRITICAL: You are in EXECUTION mode but have no implementation plan!
+- This is highly discouraged. Large tasks require a plan.
+- Consider switching back to PLANNING mode or creating a plan immediately.
 </execution_reminder>`)
 		}
-
-		// ALWAYS add file edit reminder in execution mode
-		reminders = append(reminders, `<file_edit_reminder>
-⚠️ CRITICAL FILE EDITING RULE:
-When editing existing files, you MUST use 'replace_file_content' tool.
-NEVER use 'write_file' to edit existing files - it destroys diff history!
-Exception: ONLY use write_file for creating NEW files that don't exist.
-</file_edit_reminder>`)
-
-	case "verification":
-		reminders = append(reminders, `<verification_reminder>
-You are in VERIFICATION mode. Test your changes thoroughly.
-After verification:
-1. Create walkthrough.md to document what was accomplished
-2. Include proof of testing (screenshots, command outputs)
-3. Report any issues found and fixes applied
-</verification_reminder>`)
 	}
 
-	// Task mode reminder
-	if ctx.IsInTaskMode && ctx.ToolCallCount > 5 {
-		reminders = append(reminders, `<progress_reminder>
-You have made multiple tool calls. Remember to:
-- Update task.md to track your progress
-- Use task_boundary to update task status and summary
-- Keep the user informed of your progress
-</progress_reminder>`)
-	}
-
-	// Tool failure recovery
 	if ctx.LastToolFailed {
 		reminders = append(reminders, `<error_recovery_reminder>
-Your last tool call failed. Remember to:
-- Read and understand the error message carefully
-- Check your arguments and paths
-- Don't repeat the same failing approach
-- Consider an alternative strategy
+🚨 CAUTION: The last tool call failed.
+- Analyze the error before retrying.
+- If you're stuck, use search_web to find a solution or ask the user for help.
 </error_recovery_reminder>`)
 	}
 
-	// Artifact management
+	if ctx.ToolCallCount > 5 {
+		reminders = append(reminders, `<progress_reminder>
+⏱️ You've made several tool calls in this turn.
+- Ensure you're not in a loop.
+- Consider summarizing progress.
+</progress_reminder>`)
+	}
+
 	if len(ctx.ArtifactsCreated) > 0 {
-		artifactList := strings.Join(ctx.ArtifactsCreated, ", ")
-		reminders = append(reminders, fmt.Sprintf(`<artifact_reminder>
-You have created artifacts: %s
-Remember to keep them updated as you make progress.
-CRITICAL: Artifacts should be concise and user-focused.
-</artifact_reminder>`, artifactList))
+		reminders = append(reminders, `<artifact_reminder>
+📄 You have active artifacts: `+strings.Join(ctx.ArtifactsCreated, ", ")+`
+- Keep them updated as you work.
+</artifact_reminder>`)
 	}
 
-	// Communication reminder (always shown when in task mode)
-	if ctx.IsInTaskMode {
-		reminders = append(reminders, `<agentic_flow_reminder>
-🚨 SILENT AGENTIC FLOW MANDATORY:
-- DO NOT repeat or acknowledge the user's request in chat.
-- NO "I understand", "I'll do that", or "Starting plan...".
-- CALL task_boundary AT THE START of your response to update the UI.
-- Use chat ONLY for brief (<1 sentence) immediate status or questions.
-- High-level planning belongs in implementation_plan.md, not chat.
-</agentic_flow_reminder>`)
+	// Session-scoped artifact reminder
+	artifactPath := ".resolved"
+	if ctx.SessionID != "" {
+		artifactPath = fmt.Sprintf(".ricochet/brain/%s/filename.resolved", ctx.SessionID)
 	}
 
-	// ALWAYS show file edit reminder (enforced by backend, but reminder helps)
-	reminders = append(reminders, `<file_edit_enforcement>
-🚨 FILE EDITING IS ENFORCED BY BACKEND:
-- write_file ONLY works for NEW files (backend rejects existing files)
-- For ANY existing file: MUST use 'replace_file_content'
-- Attempting to write_file an existing file will FAIL with error
-</file_edit_enforcement>`)
+	reminders = append(reminders, fmt.Sprintf(`<communication_reminder>
+📢 LARGE OUTPUT RULE:
+- For requested implementation plans, use submit_plan instead of write_file.
+- For non-plan reports/analysis exceeding 500 words, use write_file.
+- **DIRECTORY**: Save internal reports to: %s
+- Use the '.resolved' extension for final artifacts.
+</communication_reminder>`, artifactPath))
 
-	// ALWAYS show artifact creation reminder for large outputs
-	reminders = append(reminders, `<artifact_creation_rule>
-📄 LARGE OUTPUT RULE (MANDATORY):
-- If your response would exceed 500 words: CREATE A MARKDOWN FILE
-- Use write_file for: project_analysis.md, implementation_plan.md, etc.
-- Then reply with SHORT summary (2-3 sentences max)
-- DO NOT paste large reports directly in chat
-</artifact_creation_rule>`)
-
-	// Combine all reminders
 	if len(reminders) == 0 {
 		return ""
 	}
 
-	var sb strings.Builder
-	sb.WriteString("\n<EPHEMERAL_MESSAGE>\n")
-	sb.WriteString("The following are system-injected reminders based on your current context.\n")
-	sb.WriteString("Pay close attention to these guidelines.\n\n")
-	for _, reminder := range reminders {
-		sb.WriteString(reminder)
-		sb.WriteString("\n")
-	}
-	sb.WriteString("</EPHEMERAL_MESSAGE>")
-
-	return sb.String()
+	return fmt.Sprintf("\n<EPHEMERAL_MESSAGE>\nYou have the following system-injected reminders:\n\n%s\n</EPHEMERAL_MESSAGE>", strings.Join(reminders, "\n\n"))
 }
 
-// BuildToolSpecificReminder generates reminders for specific tool patterns
-func BuildToolSpecificReminder(toolName string, consecutiveFailures int) string {
-	if consecutiveFailures >= 2 {
-		return fmt.Sprintf(`<tool_reminder>
-WARNING: Tool '%s' has failed %d times consecutively.
-Consider:
-- Reviewing the tool's requirements and arguments
-- Checking if you have the necessary permissions
-- Trying a different approach to solve the problem
-</tool_reminder>`, toolName, consecutiveFailures)
+// BuildToolSpecificReminder adds context for specific tools
+func BuildToolSpecificReminder(toolName string, failureCount int) string {
+	if failureCount < 2 {
+		return ""
 	}
-	return ""
+
+	return fmt.Sprintf("⚠️ The tool '%s' has failed %d times. Check your arguments and file context before retrying.", toolName, failureCount)
 }

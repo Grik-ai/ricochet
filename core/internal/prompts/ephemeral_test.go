@@ -29,8 +29,8 @@ func TestBuildEphemeralMessage_Planning(t *testing.T) {
 	if !strings.Contains(result, "PLANNING mode") {
 		t.Error("Expected PLANNING mode reminder")
 	}
-	if !strings.Contains(result, "implementation_plan.md") {
-		t.Error("Expected mention of implementation_plan.md")
+	if !strings.Contains(result, "submit_plan") {
+		t.Error("Expected mention of submit_plan")
 	}
 	if !strings.Contains(result, "<EPHEMERAL_MESSAGE>") {
 		t.Error("Expected ephemeral message wrapper")

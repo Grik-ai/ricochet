@@ -14,6 +14,13 @@ type MessageStateHandler struct {
 	messages  []protocol.Message
 	sessionID string
 	updatedAt time.Time
+	OnChanged func() `json:"-"`
+}
+
+func (h *MessageStateHandler) SetOnChanged(cb func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.OnChanged = cb
 }
 
 // NewMessageStateHandler creates a new handler
@@ -28,26 +35,38 @@ func NewMessageStateHandler(sessionID string) *MessageStateHandler {
 // AddMessage appends a new message
 func (h *MessageStateHandler) AddMessage(msg protocol.Message) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.messages = append(h.messages, msg)
 	h.updatedAt = time.Now()
+	cb := h.OnChanged
+	h.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
 }
 
 // SetMessages replaces all messages (e.g. for context pruning)
 func (h *MessageStateHandler) SetMessages(msgs []protocol.Message) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.messages = msgs
 	h.updatedAt = time.Now()
+	cb := h.OnChanged
+	h.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
 }
 
 // UpdateMessage updates a message at a specific index (useful for streaming partial updates)
 func (h *MessageStateHandler) UpdateMessage(index int, msg protocol.Message) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if index >= 0 && index < len(h.messages) {
 		h.messages[index] = msg
 		h.updatedAt = time.Now()
+	}
+	cb := h.OnChanged
+	h.mu.Unlock()
+	if cb != nil {
+		cb()
 	}
 }
 

@@ -3,11 +3,16 @@ import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as readline from 'readline';
 import * as fs from 'fs';
+import { CoreNotificationPayloads, CoreRequestPayloads } from './protocol/coreMessages';
 
 export interface CoreMessage {
     type: string;
     payload: unknown;
 }
+
+type MessageHandler<TPayload = unknown> = (payload: TPayload) => void;
+type RequestHandler<TPayload = unknown> = (payload: TPayload) => Promise<unknown>;
+type Unsubscribe = () => void;
 
 /**
  * Manages the ricochet-core Go process lifecycle.
@@ -15,11 +20,12 @@ export interface CoreMessage {
  */
 export class CoreProcess {
     private process: ChildProcess | null = null;
-    private messageHandlers: Map<string, (payload: unknown) => void> = new Map();
-    private requestHandlers: Map<string, (payload: unknown) => Promise<unknown>> = new Map();
+    private messageHandlers: Map<string, Set<MessageHandler>> = new Map();
+    private requestHandlers: Map<string, RequestHandler> = new Map();
     private pendingRequests: Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }> = new Map();
     private requestId = 0;
     private rl: readline.Interface | null = null;
+    private ready = false;
 
     constructor(private rootPath: string, private extensionPath: string) { }
 
@@ -52,17 +58,20 @@ export class CoreProcess {
             if (!trimmed || !trimmed.startsWith('{')) {
                 // Not a JSON message, probably a log from the core
                 if (trimmed) {
+                    // Suppress known non-critical telemetry errors
+                    if (trimmed.includes('UnleashProvider must be initialized first')) {
+                        return;
+                    }
                     console.log(`[ricochet-core] LOG: ${trimmed}`);
                 }
                 return;
             }
 
-            console.log(`[Core -> Ext] RAW: ${line.substring(0, 100)}${line.length > 100 ? '...' : ''}`);
             try {
                 const message = JSON.parse(line);
                 this.handleMessage(message);
             } catch (error) {
-                console.error(`[Core -> Ext] Failed to parse JSON: ${line.substring(0, 100)}`, error);
+                console.error(`[Core -> Ext] Failed to parse JSON message`, error);
             }
         });
 
@@ -73,6 +82,7 @@ export class CoreProcess {
         this.process.on('exit', (code) => {
             console.log(`ricochet-core exited with code ${code}`);
             this.process = null;
+            this.rejectPendingRequests(new Error(`Core process exited with code ${code}`));
         });
 
         // Wait for ready message
@@ -80,6 +90,8 @@ export class CoreProcess {
     }
 
     async stop(): Promise<void> {
+        await this.abortActiveRuntime(750);
+
         if (this.process) {
             this.process.kill('SIGTERM');
             this.process = null;
@@ -88,9 +100,25 @@ export class CoreProcess {
             this.rl.close();
             this.rl = null;
         }
+        this.rejectPendingRequests(new Error('Core process stopped'));
     }
 
-    async send(type: string, payload: unknown): Promise<unknown> {
+    async abortActiveRuntime(timeoutMs = 1500): Promise<void> {
+        if (!this.process?.stdin) {
+            return;
+        }
+
+        try {
+            await Promise.race([
+                this.send('abort_chat', {}),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('abort_chat timeout')), timeoutMs))
+            ]);
+        } catch (error) {
+            console.warn('[CoreProcess] Failed to abort active runtime before shutdown:', error);
+        }
+    }
+
+    async send(type: string, payload: unknown, timeoutMs?: number): Promise<unknown> {
         if (!this.process?.stdin) {
             throw new Error('Core process not running');
         }
@@ -103,27 +131,57 @@ export class CoreProcess {
             this.pendingRequests.set(id, { resolve, reject });
             this.process!.stdin!.write(message);
 
-            // Timeout after 5 minutes (increased from 30s for long AI tasks)
-            setTimeout(() => {
-                if (this.pendingRequests.has(id)) {
-                    console.error(`[Ext -> Core] TIMEOUT id=${id} type=${type}`);
-                    this.pendingRequests.delete(id);
-                    reject(new Error('Request timeout after 5 minutes'));
-                }
-            }, 300000);
+            const requestTimeoutMs = timeoutMs ?? (type !== 'chat_message' && type !== 'audio_start' ? 600000 : 0);
+            if (requestTimeoutMs > 0) {
+                setTimeout(() => {
+                    if (this.pendingRequests.has(id)) {
+                        console.error(`[Ext -> Core] TIMEOUT id=${id} type=${type}`);
+                        this.pendingRequests.delete(id);
+                        reject(new Error(`Request timeout (${type}) after ${Math.round(requestTimeoutMs / 1000)}s`));
+                    }
+                }, requestTimeoutMs);
+            }
         });
     }
 
-    onMessage(type: string, handler: (payload: unknown) => void): void {
-        this.messageHandlers.set(type, handler);
+    onMessage<T extends keyof CoreNotificationPayloads>(type: T, handler: (payload: CoreNotificationPayloads[T]) => void): Unsubscribe;
+    onMessage(type: string, handler: MessageHandler): Unsubscribe;
+    onMessage(type: string, handler: MessageHandler): Unsubscribe {
+        const handlers = this.messageHandlers.get(type) ?? new Set<MessageHandler>();
+        handlers.add(handler);
+        this.messageHandlers.set(type, handlers);
+        return () => {
+            handlers.delete(handler);
+            if (handlers.size === 0) {
+                this.messageHandlers.delete(type);
+            }
+        };
     }
 
-    onRequest(type: string, handler: (payload: unknown) => Promise<unknown>): void {
+    onRequest<T extends keyof CoreRequestPayloads>(type: T, handler: (payload: CoreRequestPayloads[T]) => Promise<unknown>): void;
+    onRequest(type: string, handler: RequestHandler): void;
+    onRequest(type: string, handler: RequestHandler): void {
+        if (this.requestHandlers.has(type)) {
+            console.warn(`[CoreProcess] Replacing request handler for '${type}'`);
+        }
         this.requestHandlers.set(type, handler);
     }
 
     private async handleMessage(message: any): Promise<void> {
-        console.log(`[Core -> Ext] RECV id=${message.id} type=${message.type}`);
+        if (message.type !== 'chat_update') {
+            console.log(`[Core -> Ext] RECV id=${message.id} type=${message.type}`);
+        } else {
+            const payload = message.payload || {};
+            const chatMessage = payload.message || {};
+            const visibleContent = this.cleanVisibleChatText(String(chatMessage.content || ''));
+            const toolCount = Array.isArray(chatMessage.toolCalls) ? chatMessage.toolCalls.length : 0;
+            const activityCount = Array.isArray(chatMessage.activities) ? chatMessage.activities.length : 0;
+            const artifactCount = Array.isArray(chatMessage.artifacts) ? chatMessage.artifacts.length : 0;
+            console.log(`[Core -> Ext] CHAT_UPDATE run=${payload.run_id || chatMessage.run_id || ''} role=${chatMessage.role || ''} streaming=${Boolean(chatMessage.isStreaming)} visible=${visibleContent.length > 0} tools=${toolCount} activities=${activityCount} artifacts=${artifactCount}`);
+        }
+        if (message.type === 'ready') {
+            this.ready = true;
+        }
         // Handle response to pending request (Extension -> Core -> Extension)
         if (message.type === 'response' || ('id' in message && this.pendingRequests.has(message.id))) {
             const pending = this.pendingRequests.get(message.id);
@@ -157,10 +215,31 @@ export class CoreProcess {
         }
 
         // Handle push notifications
-        const handler = this.messageHandlers.get(message.type);
-        if (handler) {
-            handler(message.payload);
+        const handlers = this.messageHandlers.get(message.type);
+        if (handlers) {
+            for (const handler of [...handlers]) {
+                try {
+                    handler(message.payload);
+                } catch (error) {
+                    console.error(`[CoreProcess] Message handler for '${message.type}' failed:`, error);
+                }
+            }
         }
+    }
+
+    private cleanVisibleChatText(text: string): string {
+        return text
+            .replace(/<(?:thinking|think)>[\s\S]*?(?:<\/(?:thinking|think)>|$)/gi, '')
+            .replace(/<\/(?:thinking|think)>/gi, '')
+            .replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/gi, '')
+            .trim();
+    }
+
+    private rejectPendingRequests(error: Error): void {
+        for (const [, pending] of this.pendingRequests) {
+            pending.reject(error);
+        }
+        this.pendingRequests.clear();
     }
 
     private sendResponse(id: string | number, payload: unknown, error?: string): void {
@@ -175,13 +254,19 @@ export class CoreProcess {
     }
 
     private async waitForReady(): Promise<void> {
+        if (this.ready) {
+            return;
+        }
         return new Promise((resolve, reject) => {
+            let unsubscribe: Unsubscribe | undefined;
             const timeout = setTimeout(() => {
+                unsubscribe?.();
                 reject(new Error('Core process did not start in time'));
-            }, 10000);
+            }, 30000);
 
-            this.onMessage('ready', () => {
+            unsubscribe = this.onMessage('ready', () => {
                 clearTimeout(timeout);
+                unsubscribe?.();
                 resolve();
             });
         });

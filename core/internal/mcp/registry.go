@@ -1,145 +1,153 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
-// RegistryItem defines a mapping between a project type and an MCP server.
-type RegistryItem struct {
-	Name           string   `json:"name"`
-	Description    string   `json:"description"`
-	TriggerFiles   []string `json:"trigger_files"`   // e.g. ["package.json"]
-	TriggerExts    []string `json:"trigger_exts"`    // e.g. [".ts", ".js"]
-	InstallCommand string   `json:"install_command"` // e.g. "npx -y @modelcontextprotocol/server-filesystem"
-	DefaultArgs    []string `json:"default_args"`    // e.g. ["./"]
+// RegistryServer represents an MCP server in the official registry
+type RegistryServer struct {
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	Category        string   `json:"category"`
+	Command         string   `json:"command"`
+	Args            []string `json:"args"`
+	EnvVars         []string `json:"envVars,omitempty"`
+	LogoURL         string   `json:"logoUrl,omitempty"`
+	GitHubURL       string   `json:"githubUrl,omitempty"`
+	RequiresAPIKey  bool     `json:"requires_api_key,omitempty"`
+	TriggerFiles    []string `json:"trigger_files,omitempty"`
+	TriggerExts     []string `json:"trigger_exts,omitempty"`
+	Tools           []string `json:"tools,omitempty"`
 }
 
-const (
-	DefaultRegistryURL = "https://raw.githubusercontent.com/igoryan-dao/ricochet/main/registry.json"
-	RegistryFileName   = "registry.json"
-)
+// RegistryResponse is the structure of the remote registry JSON
+type RegistryResponse struct {
+	Servers []RegistryServer `json:"servers"`
+}
 
-// GetBuiltInRegistry returns the hardcoded fallback registry.
-func GetBuiltInRegistry() []RegistryItem {
-	return []RegistryItem{
-		{
-			Name:           "filesystem",
-			Description:    "Access to local filesystem (Highly Recommended)",
-			TriggerFiles:   []string{"*"},
-			InstallCommand: "npx",
-			DefaultArgs:    []string{"-y", "@modelcontextprotocol/server-filesystem", "./"},
-		},
-		{
-			Name:           "time-server",
-			Description:    "Time and timezone utilities",
-			TriggerFiles:   []string{"README.md"},
-			InstallCommand: "npx",
-			DefaultArgs:    []string{"-y", "@modelcontextprotocol/server-time"},
-		},
-		{
-			Name:        "github",
-			Description: "GitHub repository interaction",
-			TriggerFiles: []string{
-				".git",
-				".github",
-			},
-			InstallCommand: "npx",
-			DefaultArgs:    []string{"-y", "@modelcontextprotocol/server-github"},
-		},
-		{
-			Name:        "postgres",
-			Description: "PostgreSQL Database Inspector",
-			TriggerFiles: []string{
-				"docker-compose.yml",
-			},
-			TriggerExts: []string{
-				".sql",
-			},
-			InstallCommand: "npx",
-			DefaultArgs:    []string{"-y", "@modelcontextprotocol/server-postgres", "postgresql://user:password@localhost/dbname"},
+// Registry manages fetching and caching of official MCP servers
+type Registry struct {
+	officialURL string
+	cachePath   string
+	httpClient  *http.Client
+	servers     []RegistryServer
+	mu          sync.RWMutex
+	lastSynced  time.Time
+}
+
+// NewRegistry creates a new MCP Registry service
+func NewRegistry(configDir string) *Registry {
+	cachePath := filepath.Join(configDir, "mcp_registry_cache.json")
+	return &Registry{
+		officialURL: "https://raw.githubusercontent.com/igoryan-dao/ricochet-registry/main/mcp-servers.json",
+		cachePath:   cachePath,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
 		},
 	}
 }
 
-// LoadRegistry loads the registry from cache or fetches it from remote.
-func LoadRegistry(configDir string) ([]RegistryItem, error) {
-	cachePath := filepath.Join(configDir, RegistryFileName)
-
-	// 1. Check Cache Age
-	info, err := os.Stat(cachePath)
-	if err == nil {
-		if time.Since(info.ModTime()) < 24*time.Hour {
-			// Cache is fresh, load it
-			if items, err := loadFile(cachePath); err == nil {
-				return items, nil
-			}
-		}
-	}
-
-	// 2. Fetch Remote
-	// For now, we'll skip actual HTTP fetch to avoid external deps failure in this environment
-	// without explicit networking approval or `http` usage.
-	// But the plan says "Enable ... fetch".
-	// Let's implement it but fallback gracefully.
-
-	items, err := fetchRemote(DefaultRegistryURL)
-	if err == nil {
-		// Save to cache
-		_ = saveFile(cachePath, items)
-		return items, nil
-	}
-
-	// 3. Fallback to Cache (even if stale)
-	if info != nil { // info exists from previous stat
-		if items, err := loadFile(cachePath); err == nil {
-			return items, nil
-		}
-	}
-
-	// 4. Fallback to Built-in
-	return GetBuiltInRegistry(), nil
+// GetServers returns the current list of servers from memory/cache
+func (r *Registry) GetServers() []RegistryServer {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.servers
 }
 
-func loadFile(path string) ([]RegistryItem, error) {
-	data, err := os.ReadFile(path)
+// LoadCache loads the registry from the local cache file
+func (r *Registry) LoadCache() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	data, err := os.ReadFile(r.cachePath)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return nil // No cache yet
+		}
+		return err
 	}
-	var items []RegistryItem
-	if err := json.Unmarshal(data, &items); err != nil {
-		return nil, err
+
+	var servers []RegistryServer
+	if err := json.Unmarshal(data, &servers); err != nil {
+		return err
 	}
-	return items, nil
+
+	r.servers = servers
+	if info, err := os.Stat(r.cachePath); err == nil {
+		r.lastSynced = info.ModTime()
+	}
+	return nil
 }
 
-func saveFile(path string, items []RegistryItem) error {
-	data, err := json.MarshalIndent(items, "", "  ")
+// Sync fetches the latest servers from the remote registry and updates the cache
+func (r *Registry) Sync(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", r.officialURL, nil)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
-}
 
-func fetchRemote(url string) ([]RegistryItem, error) {
-	client := http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := r.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to fetch registry: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bad status: %s", resp.Status)
+		return fmt.Errorf("registry returned non-OK status: %s", resp.Status)
 	}
 
-	var items []RegistryItem
-	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+	var registry RegistryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&registry); err != nil {
+		return fmt.Errorf("failed to decode registry JSON: %w", err)
+	}
+
+	r.mu.Lock()
+	r.servers = registry.Servers
+	r.lastSynced = time.Now()
+	r.mu.Unlock()
+
+	// Save to cache
+	data, err := json.MarshalIndent(r.servers, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(r.cachePath), 0755); err != nil {
+		return err
+	}
+
+	return os.WriteFile(r.cachePath, data, 0644)
+}
+
+func (r *Registry) GetLastSynced() time.Time {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.lastSynced
+}
+
+// FetchServers is a compatibility wrapper that loads the cache and syncs if empty.
+func (r *Registry) FetchServers(ctx context.Context) ([]RegistryServer, error) {
+	err := r.LoadCache()
+	if err != nil {
 		return nil, err
 	}
-	return items, nil
+
+	servers := r.GetServers()
+	if len(servers) == 0 {
+		err = r.Sync(ctx)
+		if err != nil {
+			return nil, err
+		}
+		servers = r.GetServers()
+	}
+
+	return servers, nil
 }

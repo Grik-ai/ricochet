@@ -23,6 +23,10 @@ func NewNativeHost(cwd string) *NativeHost {
 	}
 }
 
+func (h *NativeHost) SetCommandOutputLineLimit(limit int) {
+	h.orchestrator.SetOutputLineLimit(limit)
+}
+
 func (h *NativeHost) GetCWD() string {
 	return h.cwd
 }
@@ -65,10 +69,21 @@ func (h *NativeHost) ExecuteCommand(ctx context.Context, command string, backgro
 	if err != nil {
 		return CommandResult{}, err
 	}
+	var durationMs int64
+	if !state.EndTime.IsZero() {
+		durationMs = state.EndTime.Sub(state.StartTime).Milliseconds()
+	}
 
 	return CommandResult{
-		ID:     state.ID,
-		Output: state.Output,
+		ID:          state.ID,
+		Output:      state.Output,
+		Status:      string(state.Status),
+		ExitCode:    state.ExitCode,
+		DurationMs:  durationMs,
+		Cwd:         h.cwd,
+		StartedAt:   state.StartTime,
+		CompletedAt: state.EndTime,
+		Truncated:   state.Truncated,
 	}, nil
 }
 
@@ -90,12 +105,12 @@ func (h *NativeHost) ShowMessage(level string, text string) {
 	fmt.Printf("[%s] %s\n", level, text)
 }
 
-func (h *NativeHost) AskUser(question string) (string, error) {
+func (h *NativeHost) AskUser(sessionID string, question string) (string, error) {
 	// Not implemented for native host (requires stdin interaction)
 	return "", fmt.Errorf("AskUser not implemented for NativeHost")
 }
 
-func (h *NativeHost) AskUserChoice(question string, choices []string) (int, error) {
+func (h *NativeHost) AskUserChoice(sessionID string, question string, choices []string) (int, error) {
 	return 0, fmt.Errorf("AskUserChoice not implemented for NativeHost")
 }
 

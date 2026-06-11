@@ -187,7 +187,7 @@ func (m *Model) handleSlashCommand(input string) (string, tea.Cmd) {
 				return "Usage: /plan done <id>", nil
 			}
 			id := parts[2]
-			if err := pm.UpdateTask(id, "done"); err != nil {
+			if err := pm.UpdateTaskStatus(id, "done"); err != nil {
 				return fmt.Sprintf("Error updating task: %v", err), nil
 			}
 			m.UpdateViewport()
@@ -230,7 +230,7 @@ func (m *Model) handleSlashCommand(input string) (string, tea.Cmd) {
 			for _, item := range recs {
 				sb.WriteString(fmt.Sprintf("\n**%s**\n", item.Name))
 				sb.WriteString(fmt.Sprintf("  - Description: %s\n", item.Description))
-				sb.WriteString(fmt.Sprintf("  - Install: `/extensions install %s %s %s`\n", item.Name, item.InstallCommand, strings.Join(item.DefaultArgs, " ")))
+				sb.WriteString(fmt.Sprintf("  - Install: `/extensions install %s %s %s`\n", item.Name, item.Command, strings.Join(item.Args, " ")))
 			}
 			return sb.String(), nil
 

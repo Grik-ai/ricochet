@@ -1,23 +1,25 @@
-# Ricochet Project Memory
+# Ricochet Project Manifest (Ground Truth)
 
 > [!IMPORTANT]
-> This file contains critical project context, architectural decisions, and "Do's and Don'ts" for the AI Agent. Always consult this file when planning major changes or if you are unsure about the project structure.
+> This file is the primary instruction manual for the Ricochet AI Agent. It defines the core architectural "Skyscraper" pillars and development protocols.
 
-## Core Architecture
-- **Host Abstraction**: All OS interactions must go through `host.Host` interface. Do not use `os` package directly for file/exec unless inside a Host implementation.
-- **RPC Protocol**: Communication between Core and Extension uses JSON-RPC over Stdio. Use `protocol.RPCMessage`.
-- **Agent Mode**: The agent operates in modes (Code, Architect, Ask). Mode logic is in `core/internal/modes`.
+## 🏗️ Core Architecture (Pillars)
+1. **Elegant Delegation**: Ricochet operates on a **Coordinator-Worker** model. The Coordinator synthesizes findings, while Workers handle isolated, task-specific sessions via the `subagent` tool.
+2. **Shadow Agents (Continuous Inspection)**: Every critical write or command is auditable by a specialized **Verifier Agent** to prevent compound error. Never assume success without verification.
+3. **Shared Ground Truth (Scratchpad)**: Cross-agent communication happens via the persistent `.ricochet/scratchpad/` index. Use `read_scratchpad` to sync findings.
+4. **Context Efficiency**: Rules are modular and **path-scoped** in `.ricochet/rules/`. Only relevant rules are loaded into context.
 
-## Coding Standards
-- **Go**: Use standard formatting. Error handling must wrap errors: `fmt.Errorf("failed to x: %w", err)`.
-- **React**: Use functional components and hooks. TailwindCSS for styling.
-- **LSP**: Use `get_diagnostics` and `get_definitions` for code intelligence.
+## 🛠️ Key Commands
+- `go run ./cmd/ricochet` — Start TUI
+- `go build ./...` — Build project
+- `go test ./...` — Run unit and integration tests
 
-## Do's and Don'ts
-- **DO** use `task_boundary` frequently to keep the user informed.
-- **DO NOT** commit direct changes to `main` without verification.
-- **DO** maintain the `task.md` checklist.
+## 📜 Coding & Security Standards
+- **Host Abstraction**: All OS interactions must go through `host.Host`.
+- **Deterministic Hooks**: Safety rules in `.ricochet/hooks/` (shell scripts) can block dangerous actions (exit 2).
+- **Tool Integrity**: Every tool call must have a corresponding result.
 
-## Workflow Automation
-- Custom workflows are defined in `.agent/workflows/*.md`.
-- Use `/` command in Chat to trigger them.
+## 📁 Key Folders
+- `/.ricochet`: Rules, hooks, and scratchpad memory.
+- `/core`: Main Go business logic.
+- `/extension-vscode`: Frontend UI components.

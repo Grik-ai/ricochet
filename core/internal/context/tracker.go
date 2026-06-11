@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -102,4 +103,41 @@ func (f *FileTracker) GetFiles() []string {
 		files = append(files, path)
 	}
 	return files
+}
+
+// GetRecentFiles returns accessed files sorted by most recent first.
+func (f *FileTracker) GetRecentFiles(limit int) []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	type fileAccess struct {
+		path string
+		at   time.Time
+	}
+	items := make([]fileAccess, 0, len(f.accessedFiles))
+	for path, at := range f.accessedFiles {
+		items = append(items, fileAccess{path: path, at: at})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].at.After(items[j].at)
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	files := make([]string, 0, len(items))
+	for _, item := range items {
+		files = append(files, item.path)
+	}
+	return files
+}
+
+// HasRead checks if a file has been read in this session
+func (f *FileTracker) HasRead(path string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	// Handle relative/absolute paths
+	// In practice we should normalize them, but for now we check as is
+	_, exists := f.accessedFiles[path]
+	return exists
 }

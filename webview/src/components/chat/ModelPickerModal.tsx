@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Search, Check, Brain, ArrowLeftRight, X, Loader2, Key } from 'lucide-react';
+import { Search, Check, Cpu, X, Loader2, Key } from 'lucide-react';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
 
 interface ModelInfo {
@@ -17,6 +17,8 @@ interface ProviderInfo {
     id: string;
     name: string;
     hasKey: boolean;
+    hasUserKey?: boolean;
+    keySource?: 'server' | 'user' | 'none';
     available: boolean; // Changed from isAvailable to match Go backend
     models: ModelInfo[];
 }
@@ -26,8 +28,6 @@ interface ModelPickerModalProps {
     onClose: () => void;
     currentModel: { id: string; name: string; provider: string };
     onSelectModel: (model: { id: string; name: string; provider: string }) => void;
-    currentMode: 'plan' | 'act';
-    onModeChange: (mode: 'plan' | 'act') => void;
 }
 
 /**
@@ -38,15 +38,8 @@ export function ModelPickerModal({
     onClose,
     currentModel,
     onSelectModel,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    currentMode: _currentMode,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars  
-    onModeChange: _onModeChange,
 }: ModelPickerModalProps) {
     const [searchQuery, setSearchQuery] = useState('');
-    const [thinkingBudget, setThinkingBudget] = useState(1024);
-    const [thinkingEnabled, setThinkingEnabled] = useState(true);
-    const [isSplitMode, setIsSplitMode] = useState(false);
     const [selectedIndex, setSelectedIndex] = useState(-1);
     const [providers, setProviders] = useState<ProviderInfo[]>([]);
     const [selectedProvider, setSelectedProvider] = useState<string>('');
@@ -101,6 +94,8 @@ export function ModelPickerModal({
                 provider: p.name,
                 providerId: p.id,
                 hasKey: p.hasKey,
+                hasUserKey: p.hasUserKey,
+                keySource: p.keySource,
                 isFree: m.isFree,
                 description: m.description,
                 contextWindow: m.contextWindow,
@@ -180,29 +175,26 @@ export function ModelPickerModal({
     return (
         <div
             ref={modalRef}
-            className="absolute bottom-0 left-0 right-0 bg-[#1e1e1e] rounded-xl shadow-[0_-20px_50px_rgba(0,0,0,0.5)] border border-white/10 overflow-hidden z-[9999] w-full animate-in fade-in slide-in-from-bottom-5 duration-300"
+            className="absolute bottom-0 left-0 right-0 rounded-md border border-vscode-border bg-vscode-input-bg shadow-lg overflow-hidden z-[9999] w-full animate-in fade-in slide-in-from-bottom-5 duration-200"
             style={{
                 maxHeight: 'calc(100vh - 150px)',
                 display: 'flex',
                 flexDirection: 'column',
-                background: 'rgba(30, 30, 30, 0.98)',
-                backdropFilter: 'blur(30px)',
-                WebkitBackdropFilter: 'blur(30px)'
             }}
         >
-            <div className="flex items-center justify-between px-4 py-3 border-b border-white/5 bg-white/[0.02]">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-vscode-border bg-vscode-editor-background">
                 <div className="flex items-center gap-2">
-                    <Brain className="w-4 h-4 text-vscode-fg/40" />
-                    <span className="text-[11px] font-bold uppercase tracking-[0.2em] text-vscode-fg/40">Select Intelligence</span>
+                    <Cpu className="w-4 h-4 text-vscode-fg/45" />
+                    <span className="text-[11px] font-medium text-vscode-fg/65">Model</span>
                 </div>
-                <button onClick={onClose} className="p-1 hover:bg-white/10 rounded-full transition-colors">
+                <button onClick={onClose} className="p-1 hover:bg-vscode-list-hoverBackground rounded transition-colors">
                     <X className="w-4 h-4 text-vscode-fg/40" />
                 </button>
             </div>
 
             {/* Search bar */}
-            <div className="flex items-center gap-2 px-3 py-2.5 border-b border-[#333]">
-                <Search className="w-3.5 h-3.5 text-[#888]" />
+            <div className="flex items-center gap-2 px-3 py-2.5 border-b border-vscode-border">
+                <Search className="w-3.5 h-3.5 text-vscode-fg/45" />
                 <input
                     ref={searchInputRef}
                     type="text"
@@ -210,84 +202,42 @@ export function ModelPickerModal({
                     onChange={(e) => setSearchQuery(e.target.value)}
                     onKeyDown={handleKeyDown}
                     placeholder="Search models..."
-                    className="flex-1 bg-transparent text-sm text-[#ccc] placeholder:text-[#666] outline-none"
+                    className="flex-1 bg-transparent text-sm text-vscode-input-fg placeholder:text-vscode-fg/35 outline-none"
                 />
             </div>
 
             {/* Provider selector */}
-            <div className="flex items-center justify-between px-3 py-2 border-b border-[#333]">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-vscode-border">
                 <div className="flex items-center gap-2">
-                    <span className="text-[11px] text-[#888]">Provider:</span>
+                    <span className="text-[11px] text-vscode-fg/45">Provider:</span>
                     <select
                         value={selectedProvider}
                         onChange={(e) => setSelectedProvider(e.target.value)}
-                        className="bg-transparent text-[11px] text-[#ccc] outline-none cursor-pointer"
+                        className="bg-transparent text-[11px] text-vscode-fg/75 outline-none cursor-pointer"
                     >
                         {providers.map(p => (
-                            <option key={p.id} value={p.id} className="bg-[#1e1e1e]">
-                                {p.name} {p.hasKey ? '✓' : ''}
+                            <option key={p.id} value={p.id} className="bg-vscode-input-bg">
+                                {p.name} {p.available ? '✓' : ''}
                             </option>
                         ))}
                     </select>
-                    {currentProviderInfo?.hasKey && (
-                        <span title="API key configured">
+                    {currentProviderInfo?.available && (
+                        <span title={currentProviderInfo.keySource === 'user' ? 'User API key configured' : 'Server API key configured'}>
                             <Key className="w-3 h-3 text-green-400" />
                         </span>
                     )}
                 </div>
-
-                {/* Icon toggles */}
-                <div className="flex items-center gap-2">
-                    {/* Thinking toggle */}
-                    <button
-                        onClick={() => setThinkingEnabled(!thinkingEnabled)}
-                        className={`p-1 rounded ${thinkingEnabled ? 'text-[#0e639c]' : 'text-[#555]'}`}
-                        title="Extended thinking"
-                    >
-                        <Brain className="w-3.5 h-3.5" />
-                    </button>
-
-                    {/* Split mode toggle */}
-                    <button
-                        onClick={() => setIsSplitMode(!isSplitMode)}
-                        className={`p-1 rounded ${isSplitMode ? 'text-[#0e639c]' : 'text-[#555]'}`}
-                        title="Use different models for Plan vs Act"
-                    >
-                        <ArrowLeftRight className="w-3.5 h-3.5" />
-                    </button>
-                </div>
             </div>
 
-            {/* Thinking slider */}
-            {thinkingEnabled && (
-                <div className="flex items-center gap-2 px-3 py-2 border-b border-[#333]">
-                    <span className="text-[10px] text-[#888] min-w-[110px]">
-                        Thinking ({thinkingBudget.toLocaleString()} tokens)
-                    </span>
-                    <input
-                        type="range"
-                        min={1024}
-                        max={32000}
-                        step={1024}
-                        value={thinkingBudget}
-                        onChange={(e) => setThinkingBudget(Number(e.target.value))}
-                        className="flex-1 h-1 bg-[#333] rounded-full appearance-none cursor-pointer
-                            [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 
-                            [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full 
-                            [&::-webkit-slider-thumb]:bg-[#0e639c]"
-                    />
-                </div>
-            )}
-
             {/* Model list */}
-            <div className="max-h-[300px] overflow-y-auto">
+            <div className="max-h-[300px] overflow-y-auto custom-scrollbar">
                 {isLoading ? (
-                    <div className="flex items-center justify-center py-8 text-[#888]">
+                    <div className="flex items-center justify-center py-8 text-vscode-fg/45">
                         <Loader2 className="w-4 h-4 animate-spin mr-2" />
                         <span className="text-xs">Loading models...</span>
                     </div>
                 ) : filteredModels.length === 0 ? (
-                    <div className="text-center py-8 text-xs text-[#666]">
+                    <div className="text-center py-8 text-xs text-vscode-fg/40">
                         No models found
                     </div>
                 ) : (
@@ -298,21 +248,21 @@ export function ModelPickerModal({
                                 onSelectModel({ id: model.id, name: model.name, provider: model.providerId });
                                 onClose();
                             }}
-                            className={`w-full flex items-center justify-between px-3 py-2.5 ${index === selectedIndex ? 'bg-[#04395e]' :
-                                model.id === currentModel.id ? 'bg-[#2a2d2e]' : 'hover:bg-[#2a2d2e]'
+                            className={`w-full flex items-center justify-between px-3 py-2.5 transition-colors ${index === selectedIndex ? 'bg-vscode-list-hoverBackground' :
+                                model.id === currentModel.id ? 'bg-vscode-list-hoverBackground' : 'hover:bg-vscode-list-hoverBackground'
                                 }`}
                         >
                             <div className="flex-1 text-left">
                                 <div className="flex items-center gap-2">
-                                    <span className="text-[11px] text-[#ccc]">{model.name}</span>
+                                    <span className="text-[11px] text-vscode-fg/85">{model.name}</span>
                                     {model.isFree && (
                                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">FREE</span>
                                     )}
-                                    {model.hasKey && (
+                                    {(model.hasUserKey || model.hasKey) && (
                                         <span className="text-[9px] text-blue-400">✓</span>
                                     )}
                                 </div>
-                                <div className="flex items-center gap-2 text-[10px] text-[#666]">
+                                <div className="flex items-center gap-2 text-[10px] text-vscode-fg/45">
                                     <span>{model.provider}</span>
                                     {model.contextWindow && (
                                         <span>• {(model.contextWindow / 1000).toFixed(0)}k ctx</span>

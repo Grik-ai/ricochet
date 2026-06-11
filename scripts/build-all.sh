@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+export PATH=$PATH:/usr/local/go/bin:/usr/local/bin:/opt/homebrew/bin
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -48,4 +49,10 @@ npm run build
 
 echo "✅ Webview build complete!"
 echo ""
-echo "🎉 All builds finished. Binaries are in extension-vscode/bin/"
+echo "🧩 Building VS Code Extension..."
+cd "$EXT_DIR"
+npm run build
+
+echo "✅ Extension build complete!"
+echo ""
+echo "🎉 All builds finished. Binaries are in extension-vscode/bin/ and extension-vscode/dist/"

@@ -1,147 +1,106 @@
 package agent
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
-	"sort"
+	"strings"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/igoryan-dao/ricochet/internal/checkpoints"
+	"github.com/igoryan-dao/ricochet/internal/paths"
+	"github.com/igoryan-dao/ricochet/internal/protocol"
 )
 
-// Checkpoint represents a snapshot of specific files at a point in time
+// Checkpoint represents a workspace snapshot for legacy controller callers.
 type Checkpoint struct {
 	ID        string            `json:"id"`
 	Name      string            `json:"name"`
 	Timestamp time.Time         `json:"timestamp"`
-	Files     map[string]string `json:"files"` // RelativePath -> Content
+	Files     map[string]string `json:"files,omitempty"`
 }
 
-// CheckpointManager handles the persistence and retrieval of project snapshots
+// CheckpointManager preserves the old agent API while using shadow git storage.
 type CheckpointManager struct {
 	projectRoot string
-	storageDir  string
+	service     *checkpoints.CheckpointService
+	initErr     error
 }
 
-// NewCheckpointManager creates a new manager for the given project
 func NewCheckpointManager(projectRoot string) *CheckpointManager {
-	storageDir := filepath.Join(projectRoot, ".ricochet", "checkpoints")
-	return &CheckpointManager{
+	taskID := paths.GetWorkspaceHash(projectRoot)
+	storageDir := filepath.Join(paths.GetGlobalDir(), "checkpoints")
+	service := checkpoints.NewCheckpointService(taskID, projectRoot, storageDir)
+	manager := &CheckpointManager{
 		projectRoot: projectRoot,
-		storageDir:  storageDir,
+		service:     service,
 	}
+	manager.initErr = service.Init()
+	return manager
 }
 
-// Save creates a new checkpoint of the specified files
-func (m *CheckpointManager) Save(name string, filePaths []string) (string, error) {
-	if err := os.MkdirAll(m.storageDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create checkpoints dir: %w", err)
+func (m *CheckpointManager) Save(name string, _ []string) (string, error) {
+	if m == nil || m.service == nil {
+		return "", fmt.Errorf("checkpoint manager is not initialized")
 	}
-
-	checkpoint := &Checkpoint{
-		ID:        uuid.New().String(),
-		Name:      name,
-		Timestamp: time.Now(),
-		Files:     make(map[string]string),
+	if m.initErr != nil {
+		return "", m.initErr
 	}
-
-	for _, path := range filePaths {
-		// Ensure path is relative to project root for portability
-		relPath, err := filepath.Rel(m.projectRoot, path)
-		if err != nil {
-			relPath = path // fallback to absolute if not in root
-		}
-
-		content, err := os.ReadFile(path)
-		if err != nil {
-			continue // skip files that can't be read
-		}
-		checkpoint.Files[relPath] = string(content)
-	}
-
-	data, err := json.MarshalIndent(checkpoint, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal checkpoint: %w", err)
-	}
-
-	fileName := fmt.Sprintf("%s_%s.json", checkpoint.Timestamp.Format("20060102_150405"), checkpoint.ID[:8])
-	targetPath := filepath.Join(m.storageDir, fileName)
-
-	if err := os.WriteFile(targetPath, data, 0644); err != nil {
-		return "", fmt.Errorf("failed to write checkpoint file: %w", err)
-	}
-
-	return checkpoint.ID, nil
+	return m.service.Save(name)
 }
 
-// List returns a list of all available checkpoints, sorted by timestamp descending
 func (m *CheckpointManager) List() ([]Checkpoint, error) {
-	if _, err := os.Stat(m.storageDir); os.IsNotExist(err) {
-		return nil, nil
+	if m == nil || m.service == nil {
+		return nil, fmt.Errorf("checkpoint manager is not initialized")
 	}
-
-	entries, err := os.ReadDir(m.storageDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read checkpoints dir: %w", err)
+	if m.initErr != nil {
+		return nil, m.initErr
 	}
-
-	var checkpoints []Checkpoint
-	for _, entry := range entries {
-		if filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-
-		data, err := os.ReadFile(filepath.Join(m.storageDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-
-		var cp Checkpoint
-		if err := json.Unmarshal(data, &cp); err == nil {
-			checkpoints = append(checkpoints, cp)
-		}
+	hashes := m.service.List()
+	out := make([]Checkpoint, 0, len(hashes))
+	for _, hash := range hashes {
+		out = append(out, Checkpoint{
+			ID:        hash,
+			Name:      "checkpoint " + shortHash(hash),
+			Timestamp: time.Now(),
+		})
 	}
-
-	sort.Slice(checkpoints, func(i, j int) bool {
-		return checkpoints[i].Timestamp.After(checkpoints[j].Timestamp)
-	})
-
-	return checkpoints, nil
+	return out, nil
 }
 
-// Restore reverts files to the state captured in the specified checkpoint ID or Name
 func (m *CheckpointManager) Restore(idOrName string) error {
-	checkpoints, err := m.List()
-	if err != nil {
-		return err
+	if m == nil || m.service == nil {
+		return fmt.Errorf("checkpoint manager is not initialized")
 	}
-
-	var target *Checkpoint
-	for _, cp := range checkpoints {
-		if cp.ID == idOrName || cp.Name == idOrName || cp.ID[:8] == idOrName {
-			target = &cp
-			break
+	if m.initErr != nil {
+		return m.initErr
+	}
+	for _, hash := range m.service.List() {
+		if hash == idOrName || strings.HasPrefix(hash, idOrName) || "checkpoint "+shortHash(hash) == idOrName {
+			return m.service.Restore(hash)
 		}
 	}
+	return fmt.Errorf("checkpoint not found: %s", idOrName)
+}
 
-	if target == nil {
-		return fmt.Errorf("checkpoint not found: %s", idOrName)
-	}
-
-	for relPath, content := range target.Files {
-		absPath := filepath.Join(m.projectRoot, relPath)
-
-		// Ensure directory exists
-		if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
-			return fmt.Errorf("failed to create dir for %s: %w", relPath, err)
-		}
-
-		if err := os.WriteFile(absPath, []byte(content), 0644); err != nil {
-			return fmt.Errorf("failed to restore file %s: %w", relPath, err)
+func (m *CheckpointManager) Status(enabled bool, checkpointOnWrites bool) protocol.CheckpointStatus {
+	if m == nil || m.service == nil {
+		return protocol.CheckpointStatus{
+			Enabled:            enabled,
+			CheckpointOnWrites: checkpointOnWrites,
+			Error:              "Checkpoint manager is not initialized.",
 		}
 	}
+	status := m.service.Status(enabled, checkpointOnWrites)
+	if m.initErr != nil {
+		status.Initialized = false
+		status.Error = m.initErr.Error()
+	}
+	return status
+}
 
-	return nil
+func shortHash(hash string) string {
+	if len(hash) <= 8 {
+		return hash
+	}
+	return hash[:8]
 }

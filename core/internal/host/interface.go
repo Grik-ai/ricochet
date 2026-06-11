@@ -2,9 +2,12 @@ package host
 
 import (
 	"context"
+	"time"
 
 	"github.com/igoryan-dao/ricochet/internal/protocol"
 )
+
+type commandEventSinkKey struct{}
 
 // Host defines the interface for environment-specific operations.
 // This allows Ricochet to run in different hosts (VSCode, JetBrains, Terminal)
@@ -22,8 +25,8 @@ type Host interface {
 
 	// UI / Interaction
 	ShowMessage(level string, text string)
-	AskUser(question string) (string, error)
-	AskUserChoice(question string, choices []string) (int, error)
+	AskUser(sessionID string, question string) (string, error)
+	AskUserChoice(sessionID string, question string, choices []string) (int, error)
 	SendMessage(msg protocol.RPCMessage)
 	SendRequest(method string, payload interface{}) (interface{}, error)
 }
@@ -46,7 +49,41 @@ type FileInfo struct {
 
 // CommandResult represents the outcome of a command execution
 type CommandResult struct {
-	ID     string // Unique ID for the command
-	Output string // Immediate output (if not background)
-	Error  error
+	ID          string // Unique ID for the command
+	Output      string // Immediate output (if not background)
+	Status      string
+	Error       error
+	ExitCode    int
+	DurationMs  int64
+	Cwd         string
+	StartedAt   time.Time
+	CompletedAt time.Time
+	Truncated   bool
+}
+
+// CommandOutputEvent is emitted by the command runner while stdout/stderr is streaming.
+type CommandOutputEvent struct {
+	ID        string
+	Command   string
+	Cwd       string
+	Output    string
+	Status    CommandLabel
+	Error     string
+	ExitCode  int
+	StartTime time.Time
+	EndTime   time.Time
+	Truncated bool
+}
+
+type CommandEventSink func(CommandOutputEvent)
+
+func WithCommandEventSink(ctx context.Context, sink CommandEventSink) context.Context {
+	return context.WithValue(ctx, commandEventSinkKey{}, sink)
+}
+
+func CommandEventSinkFromContext(ctx context.Context) CommandEventSink {
+	if sink, ok := ctx.Value(commandEventSinkKey{}).(CommandEventSink); ok {
+		return sink
+	}
+	return nil
 }

@@ -9,16 +9,20 @@ export interface SessionMetadata {
     lastModified: number;
     messageCount: number;
     workspaceDir: string;
+    usage?: any;
 }
 
 export interface SessionData {
     messages: any[]; // ChatMessage[]
     todos: any[];    // Todo[]
+    usage?: any;
 }
 
 export class SessionService {
     private readonly globalStateKey = 'ricochet_sessions';
     private readonly storageDir: string;
+    private static readonly defaultTitle = 'New Chat';
+    private static readonly maxTitleLength = 72;
 
     constructor(
         private readonly context: vscode.ExtensionContext
@@ -35,11 +39,28 @@ export class SessionService {
         return sessions.sort((a, b) => b.lastModified - a.lastModified);
     }
 
+    public createTitleFromPrompt(prompt?: string): string {
+        const cleaned = (prompt || '')
+            .replace(/^\s*\[PLAN MODE\]\s*/i, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        if (!cleaned) {
+            return SessionService.defaultTitle;
+        }
+
+        if (cleaned.length <= SessionService.maxTitleLength) {
+            return cleaned;
+        }
+
+        return `${cleaned.slice(0, SessionService.maxTitleLength - 1).trimEnd()}…`;
+    }
+
     public async createSession(workspaceDir: string, title?: string): Promise<string> {
         const id = crypto.randomUUID();
         const metadata: SessionMetadata = {
             id,
-            title: title || 'New Chat',
+            title: this.createTitleFromPrompt(title),
             lastModified: Date.now(),
             messageCount: 0,
             workspaceDir
@@ -56,6 +77,31 @@ export class SessionService {
         fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
 
         return id;
+    }
+
+    public async getSessionMetadata(id: string): Promise<SessionMetadata | undefined> {
+        const sessions = await this.listSessions();
+        return sessions.find(s => s.id === id);
+    }
+
+    public async updateSessionTitle(id: string, promptOrTitle?: string): Promise<SessionMetadata | undefined> {
+        const sessions = await this.listSessions();
+        const index = sessions.findIndex(s => s.id === id);
+        if (index === -1) {
+            return undefined;
+        }
+
+        const current = sessions[index];
+        const title = this.createTitleFromPrompt(promptOrTitle);
+        const metadata: SessionMetadata = {
+            ...current,
+            title,
+            lastModified: Date.now()
+        };
+
+        sessions[index] = metadata;
+        await this.context.globalState.update(this.globalStateKey, sessions);
+        return metadata;
     }
 
     public async loadSession(id: string): Promise<SessionData | null> {
@@ -79,12 +125,11 @@ export class SessionService {
         const sessions = await this.listSessions();
         const index = sessions.findIndex(s => s.id === id);
 
-        let title = "New Chat";
+        let title = SessionService.defaultTitle;
         if (data.messages.length > 0) {
-            // Simple title generation from first user message
             const firstUserMsg = data.messages.find(m => m.role === 'user');
             if (firstUserMsg) {
-                title = firstUserMsg.content.slice(0, 50) + (firstUserMsg.content.length > 50 ? '...' : '');
+                title = this.createTitleFromPrompt(firstUserMsg.content);
             }
         }
 
@@ -93,7 +138,8 @@ export class SessionService {
             title,
             lastModified: Date.now(),
             messageCount: data.messages.length,
-            workspaceDir
+            workspaceDir,
+            usage: data.usage
         };
 
         if (index !== -1) {
@@ -130,5 +176,16 @@ export class SessionService {
         const workspaceDir = sessionMeta ? sessionMeta.workspaceDir : ''; // Ideally we shouldn't lose this
 
         await this.saveSession(sessionId, sessionData, workspaceDir);
+    }
+
+    public async updateUsage(sessionId: string, usage: any): Promise<void> {
+        const sessionData = await this.loadSession(sessionId);
+        if (!sessionData) {
+            return;
+        }
+        sessionData.usage = usage;
+        const sessions = await this.listSessions();
+        const sessionMeta = sessions.find(s => s.id === sessionId);
+        await this.saveSession(sessionId, sessionData, sessionMeta?.workspaceDir || '');
     }
 }

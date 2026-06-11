@@ -124,3 +124,247 @@ func TestFindApplicableSkills(t *testing.T) {
 		})
 	}
 }
+
+func TestDynamicSkillManifestAndScope(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "skills_v2_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	skillsDir := filepath.Join(tmpDir, ".ricochet", "skills", "debug")
+	if err := os.MkdirAll(skillsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	skillBody := `---
+name: debug
+display_name: Debug Ricochet
+description: Diagnose Ricochet
+when_to_use: Use for logs and stuck sessions.
+allowed_tools:
+  - read_file
+  - grep_search
+context: fork
+enabled: true
+triggers:
+  keywords:
+    - debug
+---
+# Debug instructions
+`
+	if err := os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte(skillBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(tmpDir)
+	if err := mgr.LoadSkills(); err != nil {
+		t.Fatalf("LoadSkills failed: %v", err)
+	}
+
+	manifests := mgr.ListSkillManifests()
+	var found bool
+	for _, manifest := range manifests {
+		if manifest.Name == "debug" {
+			found = true
+			if manifest.Context != "fork" {
+				t.Fatalf("expected fork context, got %q", manifest.Context)
+			}
+			if manifest.WhenToUse == "" {
+				t.Fatalf("expected when_to_use to be populated")
+			}
+			if len(manifest.AllowedTools) != 2 {
+				t.Fatalf("expected allowed tools, got %#v", manifest.AllowedTools)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("debug manifest not found")
+	}
+
+	if _, ok := mgr.ActivateSkillScope("s1", "debug"); !ok {
+		t.Fatalf("expected skill scope to activate")
+	}
+	if ok, _ := mgr.ToolAllowedInActiveScope("s1", "read_file"); !ok {
+		t.Fatalf("read_file should be allowed")
+	}
+	if ok, _ := mgr.ToolAllowedInActiveScope("s1", "write_file"); ok {
+		t.Fatalf("write_file should be blocked by skill scope")
+	}
+}
+
+func TestDisabledDynamicSkillIsNotApplicable(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "skills_disabled_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	skillsDir := filepath.Join(tmpDir, ".ricochet", "skills", "off")
+	if err := os.MkdirAll(skillsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	skillBody := `---
+name: off
+description: Disabled skill
+enabled: false
+triggers:
+  keywords:
+    - disabled-trigger
+---
+No-op.
+`
+	if err := os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte(skillBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(tmpDir)
+	if err := mgr.LoadSkills(); err != nil {
+		t.Fatalf("LoadSkills failed: %v", err)
+	}
+	if got := mgr.FindApplicableSkills("disabled-trigger", nil); len(got) != 0 {
+		t.Fatalf("disabled skill should not be applicable: %#v", got)
+	}
+}
+
+func TestMisplacedProjectMarkdownReturnsDiagnostic(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "skills_misplaced_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	skillsDir := filepath.Join(tmpDir, ".ricochet", "skills")
+	if err := os.MkdirAll(skillsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	misplacedPath := filepath.Join(skillsDir, "browser_automation.md")
+	if err := os.WriteFile(misplacedPath, []byte("# Browser automation"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(tmpDir)
+	if err := mgr.LoadSkills(); err != nil {
+		t.Fatalf("LoadSkills failed: %v", err)
+	}
+
+	var diagnosticFound bool
+	for _, manifest := range mgr.ListSkillManifests() {
+		if manifest.ContentPath == misplacedPath {
+			diagnosticFound = true
+			if manifest.LoadStatus != "warning" {
+				t.Fatalf("expected warning load status, got %q", manifest.LoadStatus)
+			}
+			if len(manifest.ValidationErrors) == 0 {
+				t.Fatalf("expected validation errors")
+			}
+			if manifest.Enabled {
+				t.Fatalf("diagnostic should not be enabled")
+			}
+		}
+	}
+	if !diagnosticFound {
+		t.Fatalf("expected misplaced markdown diagnostic")
+	}
+}
+
+func TestSkillOverridesPersistByNameAndPathPrecedence(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "skills_override_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	skillsDir := filepath.Join(tmpDir, ".ricochet", "skills", "alpha")
+	if err := os.MkdirAll(skillsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	skillPath := filepath.Join(skillsDir, "SKILL.md")
+	skillBody := `---
+name: alpha
+description: Alpha skill
+triggers:
+  keywords:
+    - alpha-trigger
+---
+Alpha.
+`
+	if err := os.WriteFile(skillPath, []byte(skillBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	disabled := false
+	enabled := true
+	mgr := NewManager(tmpDir)
+	if err := mgr.LoadSkillsWithOverrides([]SkillOverride{
+		{Name: "alpha", Enabled: &disabled},
+		{ContentPath: skillPath, Enabled: &enabled, Visibility: "on"},
+	}); err != nil {
+		t.Fatalf("LoadSkillsWithOverrides failed: %v", err)
+	}
+	if got := mgr.FindApplicableSkills("alpha-trigger", nil); len(got) != 1 || got[0].Name != "alpha" {
+		t.Fatalf("path override should take precedence over name override: %#v", got)
+	}
+
+	if err := mgr.LoadSkillsWithOverrides([]SkillOverride{{Name: "alpha", Enabled: &disabled, Visibility: "off"}}); err != nil {
+		t.Fatalf("LoadSkillsWithOverrides failed: %v", err)
+	}
+	if got := mgr.FindApplicableSkills("alpha-trigger", nil); len(got) != 0 {
+		t.Fatalf("disabled override should suppress skill: %#v", got)
+	}
+}
+
+func TestProjectSkillCreateDeleteAndRestrictions(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "skills_create_delete_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "RICOCHET.md"), []byte("Project rules"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(tmpDir)
+	path, err := mgr.CreateProjectSkill("Browser Automation", "Automate browser workflows")
+	if err != nil {
+		t.Fatalf("CreateProjectSkill failed: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("created skill missing: %v", err)
+	}
+	if err := mgr.LoadSkills(); err != nil {
+		t.Fatalf("LoadSkills failed: %v", err)
+	}
+
+	var foundProject bool
+	var foundRootRule bool
+	for _, manifest := range mgr.ListSkillManifests() {
+		if manifest.Name == "browser-automation" {
+			foundProject = true
+			if !manifest.CanEdit || !manifest.CanDelete {
+				t.Fatalf("project skill should be editable/deletable: %#v", manifest)
+			}
+		}
+		if manifest.Type == "root_rule" {
+			foundRootRule = true
+			if manifest.CanEdit || manifest.CanDelete {
+				t.Fatalf("root rule should not be editable/deletable: %#v", manifest)
+			}
+		}
+	}
+	if !foundProject {
+		t.Fatalf("created project skill manifest not found")
+	}
+	if !foundRootRule {
+		t.Fatalf("root rule manifest not found")
+	}
+
+	if err := mgr.DeleteProjectSkill("browser-automation", path); err != nil {
+		t.Fatalf("DeleteProjectSkill failed: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected project skill to be deleted, got err=%v", err)
+	}
+	if err := mgr.DeleteProjectSkill("RICOCHET.md", filepath.Join(tmpDir, "RICOCHET.md")); err == nil {
+		t.Fatalf("root rule deletion should be rejected")
+	}
+}

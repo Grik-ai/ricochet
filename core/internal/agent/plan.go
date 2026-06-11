@@ -10,26 +10,43 @@ import (
 	"sync"
 )
 
+// SubTask represents a smaller step within a major task
+type SubTask struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status string `json:"status"` // "pending", "done"
+}
+
 // TaskItem represents a single step in the agent's plan
 type TaskItem struct {
-	ID             string   `json:"id"`
-	Title          string   `json:"title"`
-	Status         string   `json:"status"` // "pending", "active", "done", "failed"
-	Context        string   `json:"context,omitempty"`
-	Dependencies   []string `json:"dependencies,omitempty"` // IDs of tasks that block this one
-	RetryCount     int      `json:"retry_count"`
-	MaxRetries     int      `json:"max_retries"`
-	Priority       int      `json:"priority"`        // 0=normal, 1=high, 2=critical
-	TimeoutSeconds int      `json:"timeout_seconds"` // 0 = no timeout
-	Output         string   `json:"output,omitempty"`
+	ID              string    `json:"id"`
+	Title           string    `json:"title"`
+	Description     string    `json:"description,omitempty"`
+	Status          string    `json:"status"`                 // "pending", "active", "done", "failed"
+	Priority        int       `json:"priority"`               // 0=low, 1=medium, 2=high, 3=critical
+	Column          string    `json:"column,omitempty"`       // backlog, in_progress, review, done, deferred
+	Dependencies    []string  `json:"dependencies,omitempty"` // IDs of tasks that block this one
+	Subtasks        []SubTask `json:"subtasks,omitempty"`
+	AssignedTo      string    `json:"assigned_to,omitempty"` // agent ID or "user"
+	ExternalID      string    `json:"external_id,omitempty"` // YouTrack/Notion ID
+	ExternalURL     string    `json:"external_url,omitempty"`
+	CreatedBy       string    `json:"created_by,omitempty"` // "agent" or "user"
+	Context         string    `json:"context,omitempty"`
+	Output          string    `json:"output,omitempty"`
+	Preconditions   []string  `json:"preconditions,omitempty"`    // Commands or checks that must pass
+	ExpectedOutcome string    `json:"expected_outcome,omitempty"` // Semantic anchor for the auditor
+	RetryCount      int       `json:"retry_count"`
+	MaxRetries      int       `json:"max_retries"`
+	TimeoutSeconds  int       `json:"timeout_seconds"` // 0 = no timeout
 }
 
 // PlanManager handles the agent's long-term plan
 type PlanManager struct {
-	mu       sync.RWMutex
-	Tasks    []TaskItem `json:"tasks"`
-	Cwd      string     `json:"-"`
-	FilePath string     `json:"-"`
+	mu        sync.RWMutex
+	Tasks     []TaskItem `json:"tasks"`
+	Cwd       string     `json:"-"`
+	FilePath  string     `json:"-"`
+	OnChanged func()     `json:"-"`
 }
 
 // NewPlanManager creates a new plan manager associated with a specific directory
@@ -110,6 +127,9 @@ func (pm *PlanManager) saveInternal() error {
 		return err
 	}
 	log.Printf("[Plan] Saved plan to %s (%d tasks)", pm.FilePath, len(pm.Tasks))
+	if pm.OnChanged != nil {
+		pm.OnChanged()
+	}
 	return nil
 }
 
@@ -139,15 +159,29 @@ func (pm *PlanManager) GenerateContext() string {
 			icon = "[!]"
 		}
 
-		sb.WriteString(fmt.Sprintf("%s %s. %s%s\n", icon, task.ID, task.Title, suffix))
+		desc := ""
+		if task.Description != "" {
+			firstLine := strings.Split(task.Description, "\n")[0]
+			if len(firstLine) > 60 {
+				firstLine = firstLine[:57] + "..."
+			}
+			desc = fmt.Sprintf(" - %s", firstLine)
+		}
+
+		priorityStr := ""
+		if task.Priority > 1 {
+			priorityStr = " [HIGH]"
+		}
+
+		sb.WriteString(fmt.Sprintf("%s %s. %s%s%s%s\n", icon, task.ID, task.Title, desc, suffix, priorityStr))
 	}
 	sb.WriteString("========================================\n")
 
 	return sb.String()
 }
 
-// UpdateTask updates the status of a specific task
-func (pm *PlanManager) UpdateTask(id string, status string) error {
+// UpdateTaskStatus updates the status of a specific task
+func (pm *PlanManager) UpdateTaskStatus(id string, status string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -249,4 +283,150 @@ func (pm *PlanManager) GetTasks() []TaskItem {
 	tasks := make([]TaskItem, len(pm.Tasks))
 	copy(tasks, pm.Tasks)
 	return tasks
+}
+
+// CreateTask adds a new task to the plan with more details
+func (pm *PlanManager) CreateTask(title, description string, priority int, dependencies []string, preconditions []string, expectedOutcome string) (string, error) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	id := fmt.Sprintf("%d", len(pm.Tasks)+1)
+	newTask := TaskItem{
+		ID:              id,
+		Title:           title,
+		Description:     description,
+		Status:          "pending",
+		Priority:        priority,
+		Column:          "backlog",
+		Dependencies:    dependencies,
+		CreatedBy:       "agent",
+		Preconditions:   preconditions,
+		ExpectedOutcome: expectedOutcome,
+	}
+
+	pm.Tasks = append(pm.Tasks, newTask)
+	return id, pm.saveInternal()
+}
+
+// GetNextTask returns the highest priority unblocked task
+func (pm *PlanManager) GetNextTask() (*TaskItem, error) {
+	runnable := pm.GetRunnableTasks()
+	if len(runnable) == 0 {
+		return nil, fmt.Errorf("no runnable tasks found")
+	}
+	// runnable is already sorted by priority in GetRunnableTasks()
+	return &runnable[0], nil
+}
+
+// CompleteTask marks a task as done and sets its output
+func (pm *PlanManager) CompleteTask(id, output string) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	for i, t := range pm.Tasks {
+		if t.ID == id {
+			pm.Tasks[i].Status = "done"
+			pm.Tasks[i].Column = "done"
+			pm.Tasks[i].Output = output
+			return pm.saveInternal()
+		}
+	}
+	return fmt.Errorf("task %s not found", id)
+}
+
+// AddSubtask adds a subtask to an existing task
+func (pm *PlanManager) AddSubtask(taskID, title string) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	for i, t := range pm.Tasks {
+		if t.ID == taskID {
+			subID := fmt.Sprintf("%s.%d", taskID, len(t.Subtasks)+1)
+			pm.Tasks[i].Subtasks = append(pm.Tasks[i].Subtasks, SubTask{
+				ID:     subID,
+				Title:  title,
+				Status: "pending",
+			})
+			return pm.saveInternal()
+		}
+	}
+	return fmt.Errorf("parent task %s not found", taskID)
+}
+
+// ListTasks returns tasks filtered by status or column
+func (pm *PlanManager) ListTasks(filter string) []TaskItem {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	if filter == "" {
+		return pm.GetTasks()
+	}
+
+	var filtered []TaskItem
+	for _, t := range pm.Tasks {
+		if t.Status == filter || t.Column == filter {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
+// SetColumn moves a task to a different Kanban column
+func (pm *PlanManager) SetColumn(id, column string) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	for i, t := range pm.Tasks {
+		if t.ID == id {
+			pm.Tasks[i].Column = column
+			// Also sync status if moving to done
+			switch column {
+			case "done":
+				pm.Tasks[i].Status = "done"
+			case "in_progress":
+				pm.Tasks[i].Status = "active"
+			}
+			return pm.saveInternal()
+		}
+	}
+	return fmt.Errorf("task %s not found", id)
+}
+
+// DeleteTask removes a task from the plan
+func (pm *PlanManager) DeleteTask(id string) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	idx := -1
+	for i, t := range pm.Tasks {
+		if t.ID == id {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		return fmt.Errorf("task %s not found", id)
+	}
+
+	pm.Tasks = append(pm.Tasks[:idx], pm.Tasks[idx+1:]...)
+	return pm.saveInternal()
+}
+
+// UpdateTask updates basic task metadata
+func (pm *PlanManager) UpdateTask(id, title, description string, priority int, preconditions []string, expectedOutcome string) error {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	for i, t := range pm.Tasks {
+		if t.ID == id {
+			pm.Tasks[i].Title = title
+			pm.Tasks[i].Description = description
+			pm.Tasks[i].Priority = priority
+			pm.Tasks[i].Preconditions = preconditions
+			pm.Tasks[i].ExpectedOutcome = expectedOutcome
+			return pm.saveInternal()
+		}
+	}
+	return fmt.Errorf("task %s not found", id)
 }

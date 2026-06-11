@@ -1,16 +1,16 @@
 package mcp
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
 // Detect recommends extensions based on the current workspace.
-func Detect(cwd string, mgr *Manager) ([]RegistryItem, error) {
-	// Use manager's config path directory for cache
-	configDir := filepath.Dir(mgr.configPath)
-	registry, err := LoadRegistry(configDir)
+func Detect(cwd string, mgr *Manager) ([]RegistryServer, error) {
+	reg := NewRegistry("")
+	registry, err := reg.FetchServers(context.Background())
 	if err != nil {
 		// Log warning but fallback to built-in? LoadRegistry handles fallback internally.
 		// If error is strictly remote fetch failure, LoadRegistry returns built-in.
@@ -25,7 +25,7 @@ func Detect(cwd string, mgr *Manager) ([]RegistryItem, error) {
 		return nil, err
 	}
 
-	var recommendations []RegistryItem
+	var recommendations []RegistryServer
 
 	// Helper to check if file exists
 	fileExists := func(pattern string) bool {

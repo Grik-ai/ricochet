@@ -24,7 +24,7 @@ type SubtaskResult struct {
 
 // SubtaskExecutor interface allows the tool to call back into the controller/engine
 type SubtaskExecutor interface {
-	RunSubtask(ctx context.Context, parentSessionID string, goal string, contextInfo string, role string) (string, error)
+	RunSubtask(ctx context.Context, parentSessionID string, goal string, contextInfo string, role string, preconditions []string, expectedOutcome string) (string, error)
 }
 
 func (t *SubtaskTool) Definition() protocol.Tool {
@@ -74,5 +74,5 @@ func (t *SubtaskTool) Execute(ctx context.Context, input json.RawMessage) (strin
 		// For now, allow empty, Controller handles it (root task).
 	}
 
-	return t.Executor.RunSubtask(ctx, parentID, args.Goal, args.Context, args.Role)
+	return t.Executor.RunSubtask(ctx, parentID, args.Goal, args.Context, args.Role, nil, "")
 }

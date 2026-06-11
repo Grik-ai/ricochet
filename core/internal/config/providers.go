@@ -19,10 +19,11 @@ type ProvidersConfig struct {
 
 // ProviderConfig defines a single provider's server configuration
 type ProviderConfig struct {
-	Enabled bool          `yaml:"enabled"`
-	Key     string        `yaml:"key"`      // Can be ${ENV_VAR} reference
-	BaseURL string        `yaml:"base_url"` // Optional custom endpoint
-	Models  []ModelConfig `yaml:"models"`
+	Enabled          bool          `yaml:"enabled"`
+	Key              string        `yaml:"key"`      // Can be ${ENV_VAR} reference
+	BaseURL          string        `yaml:"base_url"` // Optional custom endpoint
+	Models           []ModelConfig `yaml:"models"`
+	AttemptTimeoutMs int           `yaml:"attempt_timeout_ms,omitempty"`
 }
 
 // ModelConfig defines a model available from the provider
@@ -44,11 +45,13 @@ type BYOKConfig struct {
 
 // AvailableProvider is returned to frontend
 type AvailableProvider struct {
-	ID        string           `json:"id"`
-	Name      string           `json:"name"`
-	HasKey    bool             `json:"hasKey"`    // Server has key configured
-	Available bool             `json:"available"` // User can use (server key OR BYOK)
-	Models    []AvailableModel `json:"models"`
+	ID         string           `json:"id"`
+	Name       string           `json:"name"`
+	HasKey     bool             `json:"hasKey"`     // Server has key configured
+	HasUserKey bool             `json:"hasUserKey"` // User has configured a BYOK key
+	KeySource  string           `json:"keySource"`  // "server", "user", "none"
+	Available  bool             `json:"available"`  // User can use (server key OR BYOK)
+	Models     []AvailableModel `json:"models"`
 }
 
 // AvailableModel is returned to frontend
@@ -164,13 +167,23 @@ func (pm *ProvidersManager) resolveEnvVars() {
 			val := os.Getenv(envVar)
 			fmt.Fprintf(os.Stderr, "[Providers] Resolving %s -> (len=%d)\n", p.Key, len(val))
 			p.Key = val
-			pm.config.Providers[id] = p
 		}
+		if strings.HasPrefix(p.BaseURL, "${") && strings.HasSuffix(p.BaseURL, "}") {
+			envVar := p.BaseURL[2 : len(p.BaseURL)-1]
+			val := os.Getenv(envVar)
+			fmt.Fprintf(os.Stderr, "[Providers] Resolving %s -> (len=%d)\n", p.BaseURL, len(val))
+			p.BaseURL = val
+		}
+		pm.config.Providers[id] = p
 	}
 }
 
 // SetUserKey sets a user-provided API key for a provider
 func (pm *ProvidersManager) SetUserKey(providerID, key string) {
+	if strings.TrimSpace(key) == "" {
+		delete(pm.userKeys, providerID)
+		return
+	}
 	pm.userKeys[providerID] = key
 }
 
@@ -179,13 +192,17 @@ func (pm *ProvidersManager) GetAvailableProviders() []AvailableProvider {
 	result := make([]AvailableProvider, 0)
 
 	providerNames := map[string]string{
-		"gemini":    "Google Gemini",
-		"deepseek":  "DeepSeek",
-		"anthropic": "Anthropic (Claude)",
-		"openai":    "OpenAI",
-		"xai":       "xAI (Grok)",
-		"minimax":   "MiniMax",
-		"mistral":   "Mistral AI",
+		"gemini":       "Google Gemini",
+		"deepseek":     "DeepSeek",
+		"anthropic":    "Anthropic (Claude)",
+		"openai":       "OpenAI",
+		"xai":          "xAI (Grok)",
+		"minimax":      "MiniMax",
+		"mistral":      "Mistral AI",
+		"openrouter":   "OpenRouter",
+		"zhipu":        "Zhipu AI (GLM)",
+		"zhipu-coding": "Zhipu Coding (GLM)",
+		"grik":         "Grik",
 	}
 
 	for id, p := range pm.config.Providers {
@@ -196,6 +213,12 @@ func (pm *ProvidersManager) GetAvailableProviders() []AvailableProvider {
 		hasServerKey := p.Key != ""
 		hasUserKey := pm.userKeys[id] != ""
 		available := hasServerKey || (pm.config.BYOK.Enabled && hasUserKey)
+		keySource := "none"
+		if hasUserKey {
+			keySource = "user"
+		} else if hasServerKey {
+			keySource = "server"
+		}
 
 		models := make([]AvailableModel, 0, len(p.Models))
 		for _, m := range p.Models {
@@ -216,11 +239,13 @@ func (pm *ProvidersManager) GetAvailableProviders() []AvailableProvider {
 		}
 
 		result = append(result, AvailableProvider{
-			ID:        id,
-			Name:      name,
-			HasKey:    hasServerKey,
-			Available: available,
-			Models:    models,
+			ID:         id,
+			Name:       name,
+			HasKey:     hasServerKey,
+			HasUserKey: hasUserKey,
+			KeySource:  keySource,
+			Available:  available,
+			Models:     models,
 		})
 	}
 
@@ -268,6 +293,15 @@ func (pm *ProvidersManager) GetDefaultModel() string {
 func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 	return &ProvidersConfig{
 		Providers: map[string]ProviderConfig{
+			"grik": {
+				Enabled: true,
+				Key:     os.Getenv("GRIKAI_ACCESS_TOKEN"),
+				BaseURL: os.Getenv("GRIKAI_CODE_GATEWAY_URL"),
+				Models: []ModelConfig{
+					{ID: "ricochet-code", Name: "Grik Ricochet Code", ContextWindow: 200000, SupportsTools: true},
+				},
+				AttemptTimeoutMs: 1000,
+			},
 			"deepseek": {
 				Enabled: true,
 				Key:     os.Getenv("DEEPSEEK_API_KEY"),
@@ -276,27 +310,49 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 					{ID: "deepseek-chat", Name: "DeepSeek V3.2", ContextWindow: 128000, InputPrice: 0.27, OutputPrice: 1.10, SupportsTools: true},
 					{ID: "deepseek-reasoner", Name: "DeepSeek R1", ContextWindow: 64000, InputPrice: 0.55, OutputPrice: 2.19, SupportsTools: false},
 				},
+				AttemptTimeoutMs: 1000,
 			},
 			"gemini": {
 				Enabled: true,
 				Key:     os.Getenv("GEMINI_API_KEY"),
 				Models: []ModelConfig{
-					{ID: "gemini-2.0-flash-exp", Name: "Gemini 2.0 Flash", ContextWindow: 1000000, IsFree: true, SupportsTools: true},
+					{ID: "gemini-3-flash", Name: "Gemini 3 Flash", ContextWindow: 1000000, IsFree: true, SupportsTools: true},
+					{ID: "gemini-3-pro", Name: "Gemini 3 Pro", ContextWindow: 1000000, InputPrice: 1.25, OutputPrice: 10.0, SupportsTools: true},
+					{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", ContextWindow: 1000000, IsFree: true, SupportsTools: true},
+					{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro", ContextWindow: 1000000, InputPrice: 1.25, OutputPrice: 10.0, SupportsTools: true},
 				},
+				AttemptTimeoutMs: 1000,
 			},
 			"anthropic": {
 				Enabled: true,
 				Key:     os.Getenv("ANTHROPIC_API_KEY"),
 				Models: []ModelConfig{
+					{ID: "claude-sonnet-4-20250514", Name: "Claude Sonnet 4", ContextWindow: 200000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true},
 					{ID: "claude-3-5-sonnet-20241022", Name: "Claude 3.5 Sonnet", ContextWindow: 200000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true},
+					{ID: "claude-3-5-haiku-20241022", Name: "Claude 3.5 Haiku", ContextWindow: 200000, InputPrice: 0.80, OutputPrice: 4.0, SupportsTools: true},
 				},
+				AttemptTimeoutMs: 1000,
 			},
 			"openai": {
 				Enabled: true,
 				Key:     os.Getenv("OPENAI_API_KEY"),
 				Models: []ModelConfig{
+					{ID: "gpt-4.1", Name: "GPT-4.1", ContextWindow: 1000000, InputPrice: 2.0, OutputPrice: 8.0, SupportsTools: true},
+					{ID: "gpt-4.1-mini", Name: "GPT-4.1 Mini", ContextWindow: 1000000, InputPrice: 0.40, OutputPrice: 1.60, SupportsTools: true},
 					{ID: "gpt-4o", Name: "GPT-4o", ContextWindow: 128000, InputPrice: 2.5, OutputPrice: 10.0, SupportsTools: true},
+					{ID: "o3-mini", Name: "o3-mini (Reasoning)", ContextWindow: 200000, InputPrice: 1.10, OutputPrice: 4.40, SupportsTools: true},
 				},
+				AttemptTimeoutMs: 1000,
+			},
+			"xai": {
+				Enabled: true,
+				Key:     os.Getenv("XAI_API_KEY"),
+				Models: []ModelConfig{
+					{ID: "grok-4", Name: "Grok 4", ContextWindow: 2000000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true},
+					{ID: "grok-code-fast-1", Name: "Grok Code Fast", ContextWindow: 256000, InputPrice: 0.20, OutputPrice: 1.50, SupportsTools: true},
+					{ID: "grok-3-mini", Name: "Grok 3 Mini", ContextWindow: 131000, InputPrice: 0.30, OutputPrice: 0.50, SupportsTools: true},
+				},
+				AttemptTimeoutMs: 1000,
 			},
 			"mistral": {
 				Enabled: true,
@@ -306,6 +362,26 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 					{ID: "codestral-latest", Name: "Codestral (Free)", ContextWindow: 32000, IsFree: true, SupportsTools: true},
 					{ID: "ministral-8b-latest", Name: "Ministral 8B (Free)", ContextWindow: 128000, IsFree: true, SupportsTools: true},
 				},
+				AttemptTimeoutMs: 1000,
+			},
+			"minimax": {
+				Enabled: true,
+				Key:     os.Getenv("MINIMAX_API_KEY"),
+				Models: []ModelConfig{
+					{ID: "MiniMax-M2.1", Name: "MiniMax M2.1", ContextWindow: 200000, InputPrice: 0.10, OutputPrice: 0.30, SupportsTools: true},
+				},
+				AttemptTimeoutMs: 1000,
+			},
+			"openrouter": {
+				Enabled: true,
+				Key:     os.Getenv("OPENROUTER_API_KEY"),
+				BaseURL: "https://openrouter.ai/api/v1",
+				Models: []ModelConfig{
+					{ID: "anthropic/claude-sonnet-4", Name: "Claude Sonnet 4 (OR)", ContextWindow: 200000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true},
+					{ID: "google/gemini-3-flash", Name: "Gemini 3 Flash (OR)", ContextWindow: 1000000, IsFree: true, SupportsTools: true},
+					{ID: "deepseek/deepseek-chat-v3-0324", Name: "DeepSeek V3 (OR)", ContextWindow: 128000, InputPrice: 0.27, OutputPrice: 1.10, SupportsTools: true},
+				},
+				AttemptTimeoutMs: 1000,
 			},
 		},
 		DefaultProvider: "deepseek",

@@ -11,9 +11,15 @@ export default defineConfig({
     build: {
         outDir: '../extension-vscode/webview-dist',
         emptyOutDir: true,
+        // VS Code webview loader injects one nonce-protected script tag for
+        // webview-dist/main.js. Keep the intentional single-file IIFE bundle
+        // and silence Vite's generic split-chunk warning for this target.
+        chunkSizeWarningLimit: 1200,
         rollupOptions: {
             output: {
+                format: 'iife',
                 entryFileNames: 'main.js',
+                inlineDynamicImports: true,
                 assetFileNames: 'main.[ext]'
             }
         }

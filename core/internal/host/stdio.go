@@ -29,6 +29,10 @@ func NewStdioHost(cwd string) *StdioHost {
 	}
 }
 
+func (h *StdioHost) SetCommandOutputLineLimit(limit int) {
+	h.orchestrator.SetOutputLineLimit(limit)
+}
+
 func (h *StdioHost) GetCWD() string {
 	return h.cwd
 }
@@ -64,7 +68,21 @@ func (h *StdioHost) ExecuteCommand(ctx context.Context, command string, backgrou
 	if err != nil {
 		return CommandResult{}, err
 	}
-	return CommandResult{ID: state.ID, Output: state.Output}, nil
+	var durationMs int64
+	if !state.EndTime.IsZero() {
+		durationMs = state.EndTime.Sub(state.StartTime).Milliseconds()
+	}
+	return CommandResult{
+		ID:          state.ID,
+		Output:      state.Output,
+		Status:      string(state.Status),
+		ExitCode:    state.ExitCode,
+		DurationMs:  durationMs,
+		Cwd:         h.cwd,
+		StartedAt:   state.StartTime,
+		CompletedAt: state.EndTime,
+		Truncated:   state.Truncated,
+	}, nil
 }
 
 func (h *StdioHost) GetCommandStatus(id string) (CommandStatus, bool) {
@@ -73,9 +91,11 @@ func (h *StdioHost) GetCommandStatus(id string) (CommandStatus, bool) {
 		return CommandStatus{}, false
 	}
 	return CommandStatus{
-		ID:     state.ID,
-		Status: string(state.Status),
-		Output: state.Output,
+		ID:      state.ID,
+		Status:  string(state.Status),
+		Output:  state.Output,
+		Error:   state.Error,
+		LogFile: state.LogFile,
 	}, true
 }
 
@@ -86,18 +106,18 @@ func (h *StdioHost) ShowMessage(level string, text string) {
 	})
 }
 
-func (h *StdioHost) AskUser(question string) (string, error) {
+func (h *StdioHost) AskUser(sessionID string, question string) (string, error) {
 	id := fmt.Sprintf("req-%d", time.Now().UnixNano()) // Simple unique ID
-	return h.AskUserWithID(question, id)
+	return h.AskUserWithID(sessionID, question, id)
 }
 
-func (h *StdioHost) AskUserChoice(question string, choices []string) (int, error) {
+func (h *StdioHost) AskUserChoice(sessionID string, question string, choices []string) (int, error) {
 	id := fmt.Sprintf("choice-%d", time.Now().UnixNano())
-	return h.AskUserChoiceWithID(question, choices, id)
+	return h.AskUserChoiceWithID(sessionID, question, choices, id)
 }
 
-func (h *StdioHost) AskUserWithID(question string, id string) (string, error) {
-	ch := make(chan json.RawMessage)
+func (h *StdioHost) AskUserWithID(sessionID string, question string, id string) (string, error) {
+	ch := make(chan json.RawMessage, 1)
 	h.mu.Lock()
 	h.pendingRequests[id] = ch
 	h.mu.Unlock()
@@ -109,7 +129,8 @@ func (h *StdioHost) AskUserWithID(question string, id string) (string, error) {
 	}()
 
 	h.sendRequest("ask_user", id, map[string]string{
-		"question": question,
+		"session_id": sessionID,
+		"question":   question,
 	})
 
 	select {
@@ -119,13 +140,13 @@ func (h *StdioHost) AskUserWithID(question string, id string) (string, error) {
 			return "", fmt.Errorf("failed to parse response: %w", err)
 		}
 		return response, nil
-	case <-time.After(5 * time.Minute):
+	case <-time.After(24 * time.Hour):
 		return "", fmt.Errorf("user response timeout")
 	}
 }
 
-func (h *StdioHost) AskUserChoiceWithID(question string, choices []string, id string) (int, error) {
-	ch := make(chan json.RawMessage)
+func (h *StdioHost) AskUserChoiceWithID(sessionID string, question string, choices []string, id string) (int, error) {
+	ch := make(chan json.RawMessage, 1)
 	h.mu.Lock()
 	h.pendingRequests[id] = ch
 	h.mu.Unlock()
@@ -137,8 +158,9 @@ func (h *StdioHost) AskUserChoiceWithID(question string, choices []string, id st
 	}()
 
 	h.sendRequest("ask_user_choice", id, map[string]interface{}{
-		"question": question,
-		"choices":  choices,
+		"session_id": sessionID,
+		"question":   question,
+		"choices":    choices,
 	})
 
 	select {
@@ -148,14 +170,14 @@ func (h *StdioHost) AskUserChoiceWithID(question string, choices []string, id st
 			return 0, fmt.Errorf("failed to parse choice response: %w", err)
 		}
 		return response, nil
-	case <-time.After(5 * time.Minute):
+	case <-time.After(24 * time.Hour):
 		return 0, fmt.Errorf("user choice response timeout")
 	}
 }
 
 func (h *StdioHost) SendRequest(method string, payload interface{}) (interface{}, error) {
 	id := fmt.Sprintf("req-%d", time.Now().UnixNano())
-	ch := make(chan json.RawMessage)
+	ch := make(chan json.RawMessage, 1)
 
 	h.mu.Lock()
 	h.pendingRequests[id] = ch
@@ -169,11 +191,16 @@ func (h *StdioHost) SendRequest(method string, payload interface{}) (interface{}
 
 	h.sendRequest(method, id, payload)
 
+	timeout := 5 * time.Minute
+	if method == "propose_edit" {
+		timeout = 24 * time.Hour
+	}
+
 	select {
 	case responseBytes := <-ch:
 		// Return RawMessage so caller can unmarshal into desired type
 		return responseBytes, nil
-	case <-time.After(1 * time.Minute):
+	case <-time.After(timeout):
 		return nil, fmt.Errorf("request timeout")
 	}
 }
@@ -184,7 +211,11 @@ func (h *StdioHost) HandleResponse(id string, payload json.RawMessage) {
 	h.mu.Unlock()
 
 	if ok {
-		ch <- payload
+		select {
+		case ch <- payload:
+		default:
+			// No one is listening, drop the response instead of blocking the main thread
+		}
 	}
 }
 

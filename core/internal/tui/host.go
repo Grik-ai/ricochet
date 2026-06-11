@@ -20,13 +20,13 @@ func NewTuiHost(cwd string, msgChan chan tea.Msg) *TuiHost {
 	}
 }
 
-func (h *TuiHost) AskUser(question string) (string, error) {
+func (h *TuiHost) AskUser(sessionID string, question string) (string, error) {
 	respChan := make(chan string)
 	h.msgChan <- AskUserMsg{Question: question, RespChan: respChan, IsInput: true}
 	return <-respChan, nil
 }
 
-func (h *TuiHost) AskUserChoice(question string, choices []string) (int, error) {
+func (h *TuiHost) AskUserChoice(sessionID string, question string, choices []string) (int, error) {
 	respChan := make(chan int)
 	h.msgChan <- AskUserChoiceMsg{Question: question, Choices: choices, RespChan: respChan}
 	return <-respChan, nil

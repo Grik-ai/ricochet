@@ -32,6 +32,7 @@ type VectorStore interface {
 	Clear() error
 	Save() error
 	Load() error
+	Count() int
 }
 
 // LocalStore implements VectorStore using in-memory slice and local persistence
@@ -133,6 +134,12 @@ func (s *LocalStore) Load() error {
 	}
 
 	return json.Unmarshal(data, &s.docs)
+}
+
+func (s *LocalStore) Count() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.docs)
 }
 
 func cosineSimilarity(a, b []float32) float64 {

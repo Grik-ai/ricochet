@@ -69,6 +69,21 @@ func (am *ApprovalManager) CanAutoApprove(toolName string, args map[string]inter
 
 	category := GetToolCategory(toolName)
 
+	if toolName == "delete_file" {
+		if path, ok := args["path"].(string); ok {
+			if am.isExternalPath(path) {
+				if am.settings.DeleteFilesExternal {
+					return true, ""
+				}
+				return false, "Deleting external files requires approval"
+			}
+		}
+		if am.settings.DeleteFiles {
+			return true, ""
+		}
+		return false, "Deleting files requires approval"
+	}
+
 	switch category {
 	case CategoryRead:
 		// Check if file is internal or external
@@ -148,13 +163,6 @@ func (am *ApprovalManager) isExternalPath(path string) bool {
 	return !strings.HasPrefix(absPath, am.workspaceDir)
 }
 
-// isSafeCommand checks if a command is in the safe list
 func (am *ApprovalManager) isSafeCommand(cmd string) bool {
-	// Extract first word (command name)
-	parts := strings.Fields(cmd)
-	if len(parts) == 0 {
-		return false
-	}
-	cmdName := filepath.Base(parts[0])
-	return SafeCommands[cmdName]
+	return IsSafeCommand(cmd)
 }

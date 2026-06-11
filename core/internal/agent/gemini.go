@@ -188,6 +188,9 @@ func (p *GeminiProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 	var usage Usage
 
 	err := p.ChatStream(ctx, req, func(chunk *StreamChunk) error {
+		if chunk.Usage != nil {
+			usage = mergeUsage(usage, *chunk.Usage)
+		}
 		if chunk.Delta != "" {
 			content.WriteString(chunk.Delta)
 		}
@@ -255,8 +258,11 @@ func (p *GeminiProvider) ChatStream(ctx context.Context, req *ChatRequest, callb
 		return fmt.Errorf("gemini error %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse SSE stream
-	scanner := bufio.NewScanner(resp.Body)
+	return p.processStream(resp.Body, callback)
+}
+
+func (p *GeminiProvider) processStream(reader io.Reader, callback StreamCallback) error {
+	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -271,6 +277,18 @@ func (p *GeminiProvider) ChatStream(ctx context.Context, req *ChatRequest, callb
 		var gemResp geminiResponse
 		if err := json.Unmarshal([]byte(data), &gemResp); err != nil {
 			continue
+		}
+
+		if gemResp.UsageMetadata != nil {
+			if err := callback(&StreamChunk{
+				Type: "usage",
+				Usage: &Usage{
+					InputTokens:  gemResp.UsageMetadata.PromptTokenCount,
+					OutputTokens: gemResp.UsageMetadata.CandidatesTokenCount,
+				},
+			}); err != nil {
+				return err
+			}
 		}
 
 		for _, candidate := range gemResp.Candidates {

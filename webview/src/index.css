@@ -25,7 +25,43 @@ body.vscode-high-contrast {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background-color: var(--vscode-sideBar-background, #1e1e1e);
+  background-color: var(--vscode-editor-background, #1e1e1e);
+}
+
+.ricochet-code-block,
+.ricochet-code-block code,
+.ricochet-code-block span {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+.timeline-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition:
+    grid-template-rows 200ms ease-out,
+    opacity 160ms ease-out,
+    transform 200ms ease-out;
+}
+
+.timeline-disclosure[data-open='true'] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.timeline-disclosure-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .timeline-disclosure {
+    transition: none;
+    transform: none;
+  }
 }
 
 .apple-glass {
@@ -55,19 +91,18 @@ body.vscode-high-contrast {
   background: var(--vscode-scrollbarSlider-hoverBackground);
 }
 
-/* Live mode indicator glow */
+/* Live mode indicator glow - subtle industrial pulse */
 .live-mode-active {
-  @apply shadow-live-mode-glow;
-  animation: glow 2s ease-in-out infinite alternate;
+  animation: glow 4s ease-in-out infinite alternate;
 }
 
 @keyframes glow {
   0% {
-    box-shadow: 0 0 5px theme('colors.live-mode');
+    box-shadow: 0 0 2px rgba(37, 99, 235, 0.2);
   }
 
   100% {
-    box-shadow: 0 0 20px theme('colors.live-mode');
+    box-shadow: 0 0 10px rgba(37, 99, 235, 0.1);
   }
 }
 
@@ -87,34 +122,29 @@ body.vscode-high-contrast {
 
 /* ===== ETHER MODE STYLES ===== */
 
-/* Ether active state for ChatInput */
+/* Ether active state for ChatInput - Refined industrial glass */
 .ether-active {
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.05) 0%, rgba(147, 51, 234, 0.03) 100%) !important;
+  background: rgba(37, 99, 235, 0.02) !important;
+  border: 1px solid rgba(37, 99, 235, 0.1) !important;
   box-shadow:
-    0 0 0 1px rgba(59, 130, 246, 0.25),
-    0 0 30px rgba(59, 130, 246, 0.1),
-    inset 0 0 20px rgba(59, 130, 246, 0.03);
+    0 0 20px rgba(0, 0, 0, 0.2),
+    inset 0 0 1px rgba(37, 99, 235, 0.05);
 }
 
-/* Pulsing glow animation */
+/* Pulsing glow animation - Minimalist */
 @keyframes ether-glow {
-
   0%,
   100% {
-    box-shadow:
-      0 0 0 1px rgba(59, 130, 246, 0.2),
-      0 0 15px rgba(59, 130, 246, 0.15);
+    border-color: rgba(37, 99, 235, 0.08);
   }
 
   50% {
-    box-shadow:
-      0 0 0 1px rgba(59, 130, 246, 0.35),
-      0 0 25px rgba(59, 130, 246, 0.25);
+    border-color: rgba(37, 99, 235, 0.2);
   }
 }
 
 .animate-ether-glow {
-  animation: ether-glow 2s ease-in-out infinite;
+  animation: ether-glow 4s ease-in-out infinite;
 }
 
 /* Ether Panel glassmorphism */

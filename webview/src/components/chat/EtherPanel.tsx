@@ -1,4 +1,4 @@
-import { Wifi, WifiOff, ChevronUp, ChevronDown } from 'lucide-react';
+import { Wifi, WifiOff, ChevronUp, ChevronDown, Server } from 'lucide-react';
 import { useState } from 'react';
 
 export type EtherStage = 'idle' | 'listening' | 'processing' | 'responding' | 'receiving';
@@ -11,6 +11,7 @@ export interface EtherStatus {
     stage?: EtherStage;
     lastMessage?: string;
     isVoiceReady?: boolean;
+    isDaemon?: boolean;
 }
 
 interface EtherPanelProps {
@@ -39,7 +40,7 @@ const STAGE_CONFIG: Record<EtherStage, { icon: React.ReactNode; text: string; co
     processing: {
         icon: <VoiceIcon className="w-4 h-4 animate-spin" />,
         text: 'Processing...',
-        color: 'text-yellow-400',
+        color: 'text-blue-300',
     },
     responding: {
         icon: <VoiceIcon className="w-4 h-4" />,
@@ -118,6 +119,17 @@ export function EtherPanel({ status, isMinimized: externalMinimized, onToggleMin
                 </div>
 
                 <div className="flex items-center gap-2">
+                    {/* Daemon status */}
+                    {status.isDaemon && (
+                        <div className="flex items-center gap-1 text-[10px] text-blue-400 group relative">
+                            <Server className="w-3 h-3" />
+                            <span className="uppercase tracking-wider">Gateway</span>
+                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block bg-slate-800 text-[9px] p-1 rounded whitespace-nowrap border border-blue-500/30">
+                                Persistence Enabled: Core is running in background
+                            </div>
+                        </div>
+                    )}
+
                     {/* Connection status */}
                     <div className={`flex items-center gap-1 text-[10px] ${isConnected ? 'text-green-400' : 'text-white/30'}`}>
                         {isConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}

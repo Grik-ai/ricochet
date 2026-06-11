@@ -35,19 +35,6 @@ func (pm *PlanManager) GetTask(taskID string) (TaskItem, bool) {
 	return TaskItem{}, false
 }
 
-// UpdateTaskStatus updates the status of a specific task
-func (pm *PlanManager) UpdateTaskStatus(taskID, status string) error {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
-	for i := range pm.Tasks {
-		if pm.Tasks[i].ID == taskID {
-			pm.Tasks[i].Status = status
-			return pm.saveInternal()
-		}
-	}
-	return fmt.Errorf("task not found: %s", taskID)
-}
 
 // AddTask removed (dup)
 

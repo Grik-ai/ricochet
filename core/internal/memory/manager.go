@@ -5,10 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/igoryan-dao/ricochet/internal/paths"
+	"github.com/igoryan-dao/ricochet/internal/protocol"
 )
+
+var secretLikePattern = regexp.MustCompile(`(?i)(api[_-]?key|secret|token|password|passwd|bearer\s+[a-z0-9._\-]{16,}|sk-[a-z0-9]{20,}|ghp_[a-z0-9]{20,}|glpat-[a-z0-9_\-]{20,})`)
 
 // MemoryItem represents a single fact or memory
 type MemoryItem struct {
@@ -31,8 +37,11 @@ type Manager struct {
 }
 
 func NewManager(cwd string) (*Manager, error) {
-	// Ensure .ricochet directory exists
-	configDir := filepath.Join(cwd, ".ricochet")
+	configDir := filepath.Join(paths.GetGlobalDir(), "memory", paths.GetWorkspaceHash(cwd))
+	if strings.EqualFold(os.Getenv("RICOCHET_PROJECT_MEMORY"), "1") ||
+		strings.EqualFold(os.Getenv("RICOCHET_PROJECT_MEMORY"), "true") {
+		configDir = filepath.Join(cwd, ".ricochet")
+	}
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create config dir: %w", err)
 	}
@@ -87,6 +96,9 @@ func (m *Manager) save() error {
 
 // Set stores a memory
 func (m *Manager) Set(key, value string) error {
+	if LooksLikeSecret(key) || LooksLikeSecret(value) {
+		return fmt.Errorf("refusing to store secret-looking memory")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -97,6 +109,10 @@ func (m *Manager) Set(key, value string) error {
 	}
 
 	return m.save()
+}
+
+func LooksLikeSecret(value string) bool {
+	return secretLikePattern.MatchString(value)
 }
 
 // Get retrieves a memory exact match
@@ -132,6 +148,39 @@ func (m *Manager) Search(query string, limit int) []MemoryItem {
 		return results[:limit]
 	}
 
+	return results
+}
+
+func (m *Manager) SearchResults(scope, query string, limit int) []protocol.MemorySearchResult {
+	items := m.Search(query, limit)
+	results := make([]protocol.MemorySearchResult, 0, len(items))
+	queryLower := strings.ToLower(strings.TrimSpace(query))
+	for _, item := range items {
+		snippet := item.Value
+		if len(snippet) > 800 {
+			snippet = snippet[:800] + "..."
+		}
+		score := 0.5
+		if queryLower != "" {
+			keyLower := strings.ToLower(item.Key)
+			valueLower := strings.ToLower(item.Value)
+			if strings.Contains(keyLower, queryLower) {
+				score += 0.35
+			}
+			if strings.Contains(valueLower, queryLower) {
+				score += 0.15
+			}
+		}
+		results = append(results, protocol.MemorySearchResult{
+			Scope:     scope,
+			Key:       item.Key,
+			Path:      m.filePath,
+			Snippet:   snippet,
+			Score:     score,
+			Source:    "memory.json",
+			Timestamp: item.Timestamp.UnixMilli(),
+		})
+	}
 	return results
 }
 
@@ -175,7 +224,7 @@ func (m *Manager) GetSystemPromptPart() string {
 
 	var sb strings.Builder
 	sb.WriteString("\n\n### 🧠 Permanent Memory (Project Facts)\n")
-	sb.WriteString("Retrieved from .ricochet/memory.json:\n")
+	sb.WriteString("Retrieved from Ricochet workspace memory storage:\n")
 
 	// Limit to top 20 recent? Or just all for now.
 	// 50 items max to avoid polluting context too much.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -139,7 +140,7 @@ func main() {
 	log.SetOutput(os.Stderr)
 
 	fmt.Println("\n\n********************************************************")
-	fmt.Println("* RICOCHET CORE v2.0 - BUILD UPDATED: 2026-01-19 21:38 *")
+	fmt.Println("* RICOCHET CORE v2.0 - BUILD UPDATED: 2026-04-15 15:30 *")
 	fmt.Println("********************************************************")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -170,18 +171,41 @@ func main() {
 
 	settings := settingsStore.Get()
 
+	// Initialize ProvidersManager early to allow key resolution from .env.local
+	configPath := config.FindConfigFile()
+	pm, err := config.NewProvidersManager(configPath)
+	if err != nil {
+		log.Printf("Warning: Failed to initialize ProvidersManager: %v", err)
+	}
+
 	// Initialize default config (will be updated via settings)
 	cfg = &agent.Config{
 		Provider: agent.ProviderConfig{
-			Provider: settings.Provider.Provider,
-			Model:    settings.Provider.Model,
-			APIKey:   settings.Provider.APIKey,
+			Provider:    settings.Provider.Provider,
+			Model:       settings.Provider.Model,
+			APIKey:      settings.Provider.APIKey,
+			Temperature: settings.Provider.Temperature,
+			TopP:        settings.Provider.TopP,
+			MaxTokens:   settings.Provider.MaxTokens,
 		},
-		SystemPrompt:    prompts.BuildSystemPrompt(cwd),
-		MaxTokens:       4096, // Max tokens for response
-		ContextWindow:   128000,
-		EnableCodeIndex: settings.Context.EnableCodeIndex,
-		AutoApproval:    &settings.AutoApproval,
+		SystemPrompt:       prompts.BuildSystemPrompt(cwd),
+		MaxTokens:          4096, // Max tokens for response
+		ContextWindow:      128000,
+		EnableCodeIndex:    settings.Context.EnableCodeIndex,
+		Context:            settings.Context,
+		AutoApproval:       &settings.AutoApproval,
+		ModeModels:         settings.ModeModels,
+		Terminal:           settings.Terminal,
+		CustomInstructions: settings.CustomInstructions,
+	}
+
+	// Final API Key Resolution: Priority Settings.APIKey > ProvidersManager (Server Keys / .env.local)
+	if cfg.Provider.APIKey == "" && pm != nil {
+		resolvedKey := pm.GetAPIKey(cfg.Provider.Provider)
+		if resolvedKey != "" {
+			log.Printf("Resolved initial API Key for %s from ProvidersManager", cfg.Provider.Provider)
+			cfg.Provider.APIKey = resolvedKey
+		}
 	}
 
 	// Configure Embedding Provider if one is specified
@@ -213,6 +237,7 @@ func main() {
 	port := "5555"
 	isStdio := false
 	forceTui := false
+	isDaemon := false
 
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--server" {
@@ -224,13 +249,15 @@ func main() {
 			isStdio = true
 		} else if args[i] == "--tui" {
 			forceTui = true
+		} else if args[i] == "--daemon" {
+			isDaemon = true
 		}
 	}
 
-	if isServer {
-		runServerMode(ctx, cwd, port)
+	if isServer || isDaemon {
+		runServerMode(ctx, cwd, port, isDaemon, pm)
 	} else if isStdio {
-		runStdioMode(ctx, cwd)
+		runStdioMode(ctx, cwd, pm)
 	} else if forceTui || (len(args) == 0 && isatty.IsTerminal(os.Stdout.Fd()) && isatty.IsTerminal(os.Stdin.Fd())) {
 		// Default to Interactive Mode if TTY detected OR forced
 		runInteractiveMode(ctx, cwd)
@@ -241,7 +268,7 @@ func main() {
 }
 
 // runStdioMode runs as sidecar process communicating with extension via stdio
-func runStdioMode(ctx context.Context, cwd string) {
+func runStdioMode(ctx context.Context, cwd string, pm *config.ProvidersManager) {
 	log.Println("Starting in stdio mode...")
 
 	stdioHost := host.NewStdioHost(cwd)
@@ -324,9 +351,21 @@ func runStdioMode(ctx context.Context, cwd string) {
 		mcpHub,
 		cg,
 		wm,
-		nil,
+		pm,
 		liveCtrl,
 	)
+	handler.OnEvent = func(e agent.Event) {
+		sendMessage(protocol.RPCMessage{
+			Type:    string(e.Type),
+			Payload: protocol.EncodeRPC(e.Payload),
+		})
+	}
+	handler.OnBatchEvent = func(e protocol.BatchEvent) {
+		sendMessage(protocol.RPCMessage{
+			Type:    "batch_event",
+			Payload: protocol.EncodeRPC(e),
+		})
+	}
 	writer := &StdioWriter{}
 
 	// Send ready message
@@ -380,12 +419,38 @@ func runStdioMode(ctx context.Context, cwd string) {
 }
 
 // runServerMode runs as a WebSocket server (Dawn of the Daemon)
-func runServerMode(ctx context.Context, cwd, port string) {
-	log.Printf("Starting in Server Mode on port %s...", port)
+func runServerMode(ctx context.Context, cwd, port string, isDaemon bool, pm *config.ProvidersManager) {
+	if isDaemon {
+		log.Printf("Starting in Daemon Mode on port %s...", port)
+	} else {
+		log.Printf("Starting in Server Mode on port %s...", port)
+	}
 
-	// Server Host acts conceptually different than StdioHost,
-	// it might just log or broadcast UI requests.
-	// For now, let's reuse StdioHost logic but using logging
+	// PID file management
+	homeDir, _ := os.UserHomeDir()
+	pidFile := filepath.Join(homeDir, ".ricochet", "core.pid")
+	os.MkdirAll(filepath.Dir(pidFile), 0755)
+
+	// Check if already running
+	if oldPidData, err := os.ReadFile(pidFile); err == nil {
+		var oldPid int
+		fmt.Sscanf(string(oldPidData), "%d", &oldPid)
+		if process, err := os.FindProcess(oldPid); err == nil {
+			// On Unix, FindProcess always succeeds, so we need to send signal 0
+			if err := process.Signal(syscall.Signal(0)); err == nil {
+				log.Printf("Core is already running with PID %d. Use --force to restart or stop it first.", oldPid)
+				if isDaemon {
+					return
+				}
+			}
+		}
+	}
+
+	// Save current PID
+	os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
+	defer os.Remove(pidFile)
+
+	// Server Host acts conceptually different than StdioHost
 	headlessHost := host.NewStdioHost(cwd)
 
 	modesManager := modes.NewManager(cwd)
@@ -405,6 +470,9 @@ func runServerMode(ctx context.Context, cwd, port string) {
 		if err != nil {
 			log.Printf("Warning: Failed to create LiveMode controller: %v", err)
 		} else {
+			// Set daemon state so UI knows if we are persistent
+			liveCtrl.SetDaemon(isDaemon)
+
 			// Wire callbacks - using wsHub Broadcast
 			broadcastWriter := &BroadcastWriter{hub: wsHub}
 
@@ -448,9 +516,21 @@ func runServerMode(ctx context.Context, cwd, port string) {
 		mcpHub,
 		cg,
 		wm,
-		nil,
+		pm,
 		liveCtrl,
 	)
+	handler.OnEvent = func(e agent.Event) {
+		wsHub.Broadcast(protocol.RPCMessage{
+			Type:    string(e.Type),
+			Payload: protocol.EncodeRPC(e.Payload),
+		})
+	}
+	handler.OnBatchEvent = func(e protocol.BatchEvent) {
+		wsHub.Broadcast(protocol.RPCMessage{
+			Type:    "batch_event",
+			Payload: protocol.EncodeRPC(e),
+		})
+	}
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -563,6 +643,8 @@ func runInteractiveMode(_ context.Context, cwd string) {
 		MaxTokens:     4096,
 		ContextWindow: 128000,
 		AutoApproval:  &settings.AutoApproval,
+		ModeModels:    settings.ModeModels,
+		Terminal:      settings.Terminal,
 	}
 
 	// FORCE-ENABLE read ops for better UX (ignoring stale config if needed)
@@ -628,11 +710,11 @@ func runInteractiveMode(_ context.Context, cwd string) {
 			// 1. Output Mirroring (Agent -> Telegram) AND (Telegram -> TUI)
 			liveCtrl.SetOnChatUpdate(func(update agent.ChatUpdate) {
 				// Filter out technical updates (ContextStatus) that have no message content/role
-				if update.Message.Role == "" && update.Message.Content == "" {
+				if update.Message == nil || (update.Message.Role == "" && update.Message.Content == "") {
 					return
 				}
 				log.Printf("[MAIN] Forwarding ChatUpdate to TUI: %d chars", len(update.Message.Content))
-				msgChan <- tui.RemoteChatMsg{Message: update.Message}
+				msgChan <- tui.RemoteChatMsg{Message: *update.Message}
 			})
 
 			// 2. Input Control (Telegram -> TUI)

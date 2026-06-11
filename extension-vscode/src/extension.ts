@@ -2,10 +2,17 @@ import * as vscode from 'vscode';
 import { WebviewProvider } from './webview-provider';
 import { CoreProcess } from './core-process';
 import { LanguageService } from './services/language';
+import { PendingChangesTreeProvider } from './services/review/PendingChangesTree';
+import * as dns from 'node:dns';
 
 let coreProcess: CoreProcess | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
+    // Set default auto-select family attempt timeout to 1000ms
+    // This helps with "no such host" errors on some networks (Happy Eyeballs)
+    if ((dns as any).setDefaultAutoSelectFamilyAttemptTimeout) {
+        (dns as any).setDefaultAutoSelectFamilyAttemptTimeout(1000);
+    }
     console.log('Ricochet extension activating...');
 
     // Get workspace root path
@@ -28,6 +35,11 @@ export async function activate(context: vscode.ExtensionContext) {
             webviewProvider,
             { webviewOptions: { retainContextWhenHidden: true } }
         )
+    );
+
+    const pendingChangesProvider = new PendingChangesTreeProvider(context);
+    context.subscriptions.push(
+        vscode.window.registerTreeDataProvider('ricochet.pendingChanges', pendingChangesProvider)
     );
 
     // Register commands
@@ -58,6 +70,12 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('ricochet.openHistory', async () => {
             await webviewProvider.openHistory();
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ricochet.openAccount', async () => {
+            await webviewProvider.openAccount();
         })
     );
 

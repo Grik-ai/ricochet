@@ -6,11 +6,11 @@ package agent
 
 // NewMinimaxProvider creates a new MiniMax provider
 // MiniMax M2.1 supports OpenAI-compatible API
-func NewMinimaxProvider(apiKey, model string) Provider {
+func NewMinimaxProvider(apiKey, model string, timeoutMs int) Provider {
 	if model == "" {
 		model = "MiniMax-M2.1" // Default model
 	}
-	return NewOpenAIProvider(apiKey, model, "https://api.minimax.io/v1", "", "")
+	return NewOpenAIProvider(apiKey, model, "https://api.minimax.io/v1", "", "", timeoutMs)
 }
 
 // MiniMax model definitions for reference:

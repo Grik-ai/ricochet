@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,32 +37,47 @@ type CommandState struct {
 	Status    CommandLabel `json:"status"`
 	Output    string       `json:"output,omitempty"`
 	Error     string       `json:"error,omitempty"`
+	ExitCode  int          `json:"exit_code,omitempty"`
+	Truncated bool         `json:"truncated,omitempty"`
 	LogFile   string       `json:"log_file,omitempty"`
 	StartTime time.Time    `json:"start_time"`
 	EndTime   time.Time    `json:"end_time,omitempty"`
 }
 
 type CommandOrchestrator struct {
-	cwd      string
-	commands map[string]*CommandState
-	mu       sync.RWMutex
+	cwd             string
+	commands        map[string]*CommandState
+	outputLineLimit int
+	mu              sync.RWMutex
 }
 
 func NewCommandOrchestrator(cwd string) *CommandOrchestrator {
 	return &CommandOrchestrator{
-		cwd:      cwd,
-		commands: make(map[string]*CommandState),
+		cwd:             cwd,
+		commands:        make(map[string]*CommandState),
+		outputLineLimit: 500,
 	}
+}
+
+func (o *CommandOrchestrator) SetOutputLineLimit(limit int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if limit <= 0 {
+		limit = 500
+	}
+	o.outputLineLimit = limit
 }
 
 func (o *CommandOrchestrator) Execute(ctx context.Context, shellCmd string, background bool) (*CommandState, error) {
 	id := uuid.New().String()
+	startedAt := time.Now()
 	state := &CommandState{
 		ID:        id,
 		Command:   shellCmd,
 		Status:    StatusRunning,
-		StartTime: time.Now(),
+		StartTime: startedAt,
 	}
+	sink := CommandEventSinkFromContext(ctx)
 
 	o.mu.Lock()
 	o.commands[id] = state
@@ -89,25 +105,75 @@ func (o *CommandOrchestrator) Execute(ctx context.Context, shellCmd string, back
 		cmdCtx = ctx
 	}
 
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", shellCmd)
+	shellPath, shellArgs := commandShellArgs(shellCmd)
+	cmd := exec.CommandContext(cmdCtx, shellPath, shellArgs...)
 	cmd.Dir = o.cwd
 
 	if background {
-		go o.runCommand(cmd, state)
+		go o.runCommand(cmd, state, sink)
 		return state, nil
 	}
 
-	o.runCommand(cmd, state)
+	o.runCommand(cmd, state, sink)
 	return state, nil
 }
 
-func (o *CommandOrchestrator) runCommand(cmd *exec.Cmd, state *CommandState) {
+func commandShellArgs(shellCmd string) (string, []string) {
+	if _, err := os.Stat("/bin/bash"); err == nil {
+		return "/bin/bash", []string{"-o", "pipefail", "-c", shellCmd}
+	}
+	if bashPath, err := exec.LookPath("bash"); err == nil {
+		return bashPath, []string{"-o", "pipefail", "-c", shellCmd}
+	}
+	return "sh", []string{"-c", shellCmd}
+}
+
+type commandOutputWriter struct {
+	writer io.Writer
+	sink   CommandEventSink
+	state  *CommandState
+	cwd    string
+	mu     sync.Mutex
+}
+
+func (w *commandOutputWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	n, err := w.writer.Write(p)
+	w.mu.Unlock()
+
+	if w.sink != nil && len(p) > 0 {
+		w.sink(CommandOutputEvent{
+			ID:        w.state.ID,
+			Command:   w.state.Command,
+			Cwd:       w.cwd,
+			Output:    format.ProcessTerminalOutput(string(p)),
+			Status:    StatusRunning,
+			StartTime: w.state.StartTime,
+		})
+	}
+	return n, err
+}
+
+func (o *CommandOrchestrator) runCommand(cmd *exec.Cmd, state *CommandState, sink CommandEventSink) {
 	logFile, err := os.Create(state.LogFile)
 	if err != nil {
 		o.mu.Lock()
 		state.Status = StatusFailed
 		state.Error = fmt.Sprintf("failed to create log file: %v", err)
 		o.mu.Unlock()
+		if sink != nil {
+			now := time.Now()
+			sink(CommandOutputEvent{
+				ID:        state.ID,
+				Command:   state.Command,
+				Cwd:       o.cwd,
+				Status:    StatusFailed,
+				Error:     state.Error,
+				ExitCode:  state.ExitCode,
+				StartTime: state.StartTime,
+				EndTime:   now,
+			})
+		}
 		return
 	}
 	defer logFile.Close()
@@ -115,9 +181,15 @@ func (o *CommandOrchestrator) runCommand(cmd *exec.Cmd, state *CommandState) {
 	var buf bytes.Buffer
 	// MultiWriter to handle both in-memory buffer (for chat) and file log
 	mw := io.MultiWriter(logFile, &buf)
+	streamWriter := &commandOutputWriter{
+		writer: mw,
+		sink:   sink,
+		state:  state,
+		cwd:    o.cwd,
+	}
 
-	cmd.Stdout = mw
-	cmd.Stderr = mw
+	cmd.Stdout = streamWriter
+	cmd.Stderr = streamWriter
 
 	err = cmd.Run()
 
@@ -128,19 +200,63 @@ func (o *CommandOrchestrator) runCommand(cmd *exec.Cmd, state *CommandState) {
 	if err != nil {
 		state.Status = StatusFailed
 		state.Error = err.Error()
+		state.ExitCode = -1
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			state.ExitCode = exitErr.ExitCode()
+		}
 	} else {
 		state.Status = StatusCompleted
+		state.ExitCode = 0
 	}
 
 	output := buf.String()
 	// Apply terminal output polish for chat display
 	cleanOutput := format.ProcessTerminalOutput(output)
+	cleanOutput, lineTruncated := truncateCommandOutputLines(cleanOutput, o.outputLineLimit)
 
 	if len(cleanOutput) > MaxBufferSize {
 		state.Output = cleanOutput[:MaxBufferSize] + "\n... (output truncated, see log file for full output: " + state.LogFile + ")"
+		state.Truncated = true
 	} else {
 		state.Output = cleanOutput
+		state.Truncated = lineTruncated
 	}
+
+	if sink != nil {
+		sink(CommandOutputEvent{
+			ID:        state.ID,
+			Command:   state.Command,
+			Cwd:       o.cwd,
+			Status:    state.Status,
+			Error:     state.Error,
+			ExitCode:  state.ExitCode,
+			StartTime: state.StartTime,
+			EndTime:   state.EndTime,
+			Truncated: state.Truncated,
+		})
+	}
+}
+
+func truncateCommandOutputLines(output string, limit int) (string, bool) {
+	if limit <= 0 || strings.TrimSpace(output) == "" {
+		return output, false
+	}
+	lines := strings.Split(output, "\n")
+	if len(lines) <= limit {
+		return output, false
+	}
+	head := limit / 2
+	tail := limit - head
+	if head <= 0 {
+		head = 1
+		tail = limit - head
+	}
+	omitted := len(lines) - head - tail
+	truncated := make([]string, 0, limit+1)
+	truncated = append(truncated, lines[:head]...)
+	truncated = append(truncated, fmt.Sprintf("... (%d lines omitted; see command log for full output)", omitted))
+	truncated = append(truncated, lines[len(lines)-tail:]...)
+	return strings.Join(truncated, "\n"), true
 }
 
 func (o *CommandOrchestrator) GetStatus(id string) (*CommandState, bool) {

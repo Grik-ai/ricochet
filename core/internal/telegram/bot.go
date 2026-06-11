@@ -19,6 +19,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/igoryan-dao/ricochet/internal/bridge"
 	"github.com/igoryan-dao/ricochet/internal/bridge/proto"
+	"github.com/igoryan-dao/ricochet/internal/ether"
 	"github.com/igoryan-dao/ricochet/internal/format"
 	"github.com/igoryan-dao/ricochet/internal/state"
 	"github.com/igoryan-dao/ricochet/internal/whisper"
@@ -139,6 +140,12 @@ func New(token string, allowedIDs []int64, stateMgr *state.Manager) (*Bot, error
 			}
 		}))
 
+		// Increase timeout for initial getMe and verification
+		client := &http.Client{
+			Timeout: 10 * time.Second,
+		}
+		opts = append(opts, bot.WithHTTPClient(10*time.Second, client))
+
 		tgBot, err := bot.New(token, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create bot: %w", err)
@@ -208,19 +215,10 @@ func (b *Bot) Start(ctx context.Context) {
 	fileLock := flock.New(lockPath)
 	log.Printf("Starting Telegram bot [%s] (acquiring lock %s)...", b.token[:5]+"..."+b.token[len(b.token)-4:], lockPath)
 
-	// Try to acquire lock.
-	var locked bool
-	var err error
-	for i := 0; i < 10; i++ {
-		locked, err = fileLock.TryLock()
-		if locked || err != nil {
-			break
-		}
-		if i == 0 {
-			log.Println("⏳ Lock held by another process, waiting...")
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	// Try to acquire lock once. IDE startup should not spend seconds waiting
+	// for another window's Live Mode listener; users can re-enable Live Mode
+	// after closing the other instance.
+	locked, err := fileLock.TryLock()
 
 	if err != nil {
 		log.Printf("⚠️ Error while acquiring Telegram bot lock: %v", err)
@@ -229,7 +227,6 @@ func (b *Bot) Start(ctx context.Context) {
 	if !locked {
 		log.Printf("⚠️ Telegram bot [%s] is already running in another Ricochet instance.", tokenID)
 		log.Println("💡 Tip: Only one VS Code window can have Live Mode active at a time for the same bot token.")
-		<-ctx.Done()
 		return
 	}
 
@@ -267,6 +264,12 @@ func (b *Bot) handleUpdate(ctx context.Context, tgBot *bot.Bot, update *models.U
 	// Handle callback queries (button clicks)
 	if update.CallbackQuery != nil {
 		b.handleCallback(ctx, tgBot, update.CallbackQuery)
+		return
+	}
+
+	// Handle message reactions
+	if update.MessageReaction != nil {
+		b.handleReaction(ctx, tgBot, update.MessageReaction)
 		return
 	}
 
@@ -333,6 +336,20 @@ func (b *Bot) handleCallback(ctx context.Context, tgBot *bot.Bot, callback *mode
 		Data:      callback.Data,
 		MessageID: callback.Message.Message.ID,
 	}
+
+	// NEW: Enqueue callback in Ether as well
+	sessionID := b.GetActiveSession(chatID)
+	if sessionID != "" {
+		ether.Get().Enqueue(sessionID, ether.Event{
+			Type:      ether.EventUserMessage, // Buttons act as messages
+			Content:   "Callback: " + callback.Data,
+			Timestamp: time.Now(),
+			Metadata: map[string]string{
+				"callback_data": callback.Data,
+				"user_id":       fmt.Sprintf("%d", userID),
+			},
+		})
+	}
 }
 
 // SendToSession sends a message to a session listener or buffers it
@@ -391,6 +408,20 @@ func (b *Bot) handleMessage(ctx context.Context, _ *bot.Bot, message *models.Mes
 		Username:  message.From.Username,
 		MessageID: message.ID,
 		Timestamp: int64(message.Date),
+	}
+
+	// NEW: Enqueue in Ether if session is active
+	sessionID := b.GetActiveSession(chatID)
+	if sessionID != "" {
+		ether.Get().Enqueue(sessionID, ether.Event{
+			Type:      ether.EventUserMessage,
+			Content:   text,
+			Timestamp: time.Unix(int64(message.Date), 0),
+			Metadata: map[string]string{
+				"message_id": fmt.Sprintf("%d", message.ID),
+				"username":   message.From.Username,
+			},
+		})
 	}
 }
 
@@ -455,6 +486,13 @@ func (b *Bot) handleVoice(ctx context.Context, tgBot *bot.Bot, message *models.M
 
 	if sessionID != "" {
 		b.SendToSession(sessionID, "[Voice Message]: "+text)
+
+		// NEW: Enqueue in Ether
+		ether.Get().Enqueue(sessionID, ether.Event{
+			Type:      ether.EventUserMessage,
+			Content:   "[Voice Message]: " + text,
+			Timestamp: time.Now(),
+		})
 	} else {
 		b.responseCh <- &UserResponse{
 			ChatID:    chatID,
@@ -462,6 +500,37 @@ func (b *Bot) handleVoice(ctx context.Context, tgBot *bot.Bot, message *models.M
 			SessionID: sessionID,
 		}
 	}
+}
+
+// handleReaction processes emoji reactions to messages
+func (b *Bot) handleReaction(_ context.Context, _ *bot.Bot, reaction *models.MessageReactionUpdated) {
+	chatID := reaction.Chat.ID
+	userID := reaction.User.ID
+
+	// Check access
+	if len(b.allowedUserIDs) > 0 && !b.allowedUserIDs[userID] && !b.allowedUserIDs[chatID] {
+		return
+	}
+
+	sessionID := b.GetActiveSession(chatID)
+	if sessionID == "" {
+		return
+	}
+
+	// For now, we just log that a reaction happened to avoid library-specific compilation issues
+	// We can refine this later by inspecting the models.ReactionType properly
+	text := fmt.Sprintf("Reaction received by user %d", userID)
+	log.Printf("Reaction received in chat %d: %s", chatID, text)
+
+	ether.Get().Enqueue(sessionID, ether.Event{
+		Type:      ether.EventReaction,
+		Content:   text,
+		Timestamp: time.Now(),
+		Metadata: map[string]string{
+			"user_id": fmt.Sprintf("%d", userID),
+			"msg_id":  fmt.Sprintf("%d", reaction.MessageID),
+		},
+	})
 }
 
 // downloadFile downloads a file from Telegram servers
@@ -811,4 +880,21 @@ func (b *Bot) SendTyping(ctx context.Context, chatID int64) {
 		ChatID: chatID,
 		Action: models.ChatActionTyping,
 	})
+}
+
+// SendErrorActions sends an error message with Retry/Fix/Abort buttons
+func (b *Bot) SendErrorActions(ctx context.Context, chatID int64, sessionID string, errText string) error {
+	text := fmt.Sprintf("❌ **Ошибка выполнения**\n\n`%s`\n\nЧто вы хотите сделать?", errText)
+
+	buttons := [][]ButtonConfig{
+		{
+			{Text: "🔄 Повторить", Data: "veto:retry:" + sessionID},
+			{Text: "✍️ Исправить", Data: "veto:fix:" + sessionID},
+		},
+		{
+			{Text: "🛑 Остановить", Data: "veto:abort:" + sessionID},
+		},
+	}
+
+	return b.SendMessageWithButtons(ctx, chatID, text, buttons)
 }

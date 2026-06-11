@@ -1,4 +1,14 @@
 providers:
+  grik:
+    enabled: true
+    key: "${GRIKAI_ACCESS_TOKEN}"
+    base_url: "${GRIKAI_CODE_GATEWAY_URL}"
+    models:
+      - id: "ricochet-code"
+        name: "Grik Ricochet Code"
+        context_window: 200000
+        supports_tools: true
+
   deepseek:
     enabled: true
     key: "${DEEPSEEK_API_KEY}"
@@ -38,17 +48,51 @@ providers:
     key: "${ZHIPU_API_KEY}"
     base_url: "https://api.z.ai/api/paas/v4"
     models:
+      - id: "glm-5.1"
+        name: "GLM-5.1 (Flagship)"
+        context_window: 128000
+        input_price: 1.0
+        output_price: 2.0
+        supports_tools: true
+      - id: "glm-5-turbo"
+        name: "GLM-5 Turbo"
+        context_window: 128000
+        input_price: 0.3
+        output_price: 0.6
+        supports_tools: true
       - id: "glm-4.7"
         name: "GLM-4.7"
         context_window: 128000
-        input_price: 5.0
-        output_price: 10.0
+        input_price: 1.0
+        output_price: 1.0
         supports_tools: true
       - id: "glm-4.7-flash"
-        name: "GLM-4.7 Flash"
+        name: "GLM-4.7 Flash (Free)"
         context_window: 128000
-        input_price: 0.1
-        output_price: 0.1
+        free: true
+        supports_tools: true
+      - id: "glm-4.5-flash"
+        name: "GLM-4.5 Flash (Free)"
+        context_window: 128000
+        free: true
+        supports_tools: true
+
+  zhipu-coding:
+    enabled: true
+    key: "${ZHIPU_API_KEY}"
+    base_url: "https://api.z.ai/api/coding/paas/v4"
+    models:
+      - id: "glm-5.1"
+        name: "GLM-5.1 Coding"
+        context_window: 128000
+        input_price: 1.0
+        output_price: 2.0
+        supports_tools: true
+      - id: "glm-4.7"
+        name: "GLM-4.7 Coding"
+        context_window: 128000
+        input_price: 1.0
+        output_price: 1.0
         supports_tools: true
 
 #  gemini:
@@ -106,19 +150,59 @@ providers:
 #        output_price: 15.0
 #        supports_tools: true
 #
-#  minimax:
-#    enabled: true
-#    key: "${MINIMAX_API_KEY}"
-#    models:
-#      - id: "MiniMax-M2.1"
-#        name: "MiniMax M2.1"
-#        context_window: 200000
-#        input_price: 0.5
-#        output_price: 2.0
-#        supports_tools: true
+  openrouter:
+    enabled: true
+    key: "${OPENROUTER_API_KEY}"
+    base_url: "https://openrouter.ai/api/v1"
+    models:
+      - id: "qwen/qwen3-coder:free"
+        name: "Qwen 3 Coder (Free)"
+        context_window: 262000
+        free: true
+        supports_tools: true
+      - id: "google/gemma-4-26b-a4b-it:free"
+        name: "Gemma 4 26B (Free)"
+        context_window: 262144
+        free: true
+        supports_tools: true
+      - id: "google/gemma-4-31b-it:free"
+        name: "Gemma 4 31B (Free)"
+        context_window: 262144
+        free: true
+        supports_tools: true
+      - id: "meta-llama/llama-3.3-70b-instruct:free"
+        name: "Llama 3.3 70B (Free)"
+        context_window: 128000
+        free: true
+        supports_tools: true
+      - id: "nvidia/nemotron-3-super-120b-a12b:free"
+        name: "Nemotron 3 Super (Free)"
+        context_window: 262144
+        free: true
+        supports_tools: true
+      - id: "minimax/minimax-m2.5:free"
+        name: "MiniMax M2.5 (Free)"
+        context_window: 196608
+        free: true
+        supports_tools: true
+      - id: "arcee-ai/trinity-large-preview:free"
+        name: "Trinity Large (Free)"
+        context_window: 131000
+        free: true
+        supports_tools: true
+      - id: "liquid/lfm-2.5-1.2b-thinking:free"
+        name: "LFM 2.5 Thinking (Free)"
+        context_window: 32768
+        free: true
+        supports_tools: true
+      - id: "qwen/qwen3-next-80b-a3b-instruct:free"
+        name: "Qwen 3 Next (Free)"
+        context_window: 262144
+        free: true
+        supports_tools: true
 
-default_provider: "deepseek"
-default_model: "deepseek-chat"
+default_provider: "openrouter"
+default_model: "qwen/qwen3-coder:free"
 
 byok:
   enabled: true

@@ -1,5 +1,6 @@
-import * as vscode from 'vscode';
 import { McpServerManager } from './McpServerManager';
+import * as path from 'path';
+import * as fs from 'fs/promises';
 
 export class McpService {
     constructor(
@@ -17,6 +18,12 @@ export class McpService {
                 break;
             case 'call_mcp_tool':
                 await this.callTool(message.payload);
+                break;
+            case 'install_mcp':
+                await this.installMcp(message.payload);
+                break;
+            case 'uninstall_mcp':
+                await this.uninstallMcp(message.payload);
                 break;
         }
     }
@@ -62,6 +69,64 @@ export class McpService {
                     error: e.message
                 }
             });
+        }
+    }
+
+    private async installMcp(payload: { id: string, name: string, command: string, args: string[], env?: Record<string, string> }): Promise<void> {
+        try {
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders) return;
+            const workspaceRoot = workspaceFolders[0].uri.fsPath;
+            const configPath = path.join(workspaceRoot, 'mcp_settings.json');
+
+            let config: any = { mcpServers: {} };
+            try {
+                const existing = await fs.readFile(configPath, 'utf-8');
+                config = JSON.parse(existing);
+            } catch (e) {
+                // File might not exist
+            }
+
+            if (!config.mcpServers) config.mcpServers = {};
+            config.mcpServers[payload.id] = {
+                command: payload.command,
+                args: payload.args,
+                env: payload.env || {}
+            };
+
+            await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
+            vscode.window.showInformationMessage(`MCP Server ${payload.name} installed.`);
+
+            // Re-fetch to update UI status
+            await this.getServers();
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`Failed to install MCP: ${e.message}`);
+        }
+    }
+
+    private async uninstallMcp(payload: { id: string, name: string }): Promise<void> {
+        try {
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders) return;
+            const workspaceRoot = workspaceFolders[0].uri.fsPath;
+            const configPath = path.join(workspaceRoot, 'mcp_settings.json');
+
+            try {
+                const existing = await fs.readFile(configPath, 'utf-8');
+                const config = JSON.parse(existing);
+                if (config.mcpServers && config.mcpServers[payload.id]) {
+                    delete config.mcpServers[payload.id];
+                    await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
+                    vscode.window.showInformationMessage(`MCP Server ${payload.name} uninstalled.`);
+                }
+            } catch (e) {
+                // File might not exist
+            }
+
+            // Re-fetch to update UI status
+            await this.getServers();
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`Failed to uninstall MCP: ${e.message}`);
         }
     }
 }

@@ -3,25 +3,28 @@ package agent
 import (
 	"crypto/md5"
 	"fmt"
+	"strings"
 	"sync"
 )
 
 // LoopDetector detects repetitive content patterns that indicate agent is stuck
 type LoopDetector struct {
 	mu             sync.Mutex
-	toolSignatures []string // circular buffer of "ToolName:ArgsHash"
-	errorOutputs   []string // circular buffer of error messages
-	threshold      int      // max repetitions allowed
-	bufferSize     int
+	toolSignatures    []string // circular buffer of "ToolName:ArgsHash"
+	errorOutputs      []string // circular buffer of error messages
+	contentSignatures []string // circular buffer of textual content hashes
+	threshold         int      // max repetitions allowed
+	bufferSize        int
 }
 
 // NewLoopDetector creates a detector with given repetition threshold
 func NewLoopDetector(threshold int) *LoopDetector {
 	return &LoopDetector{
-		threshold:      threshold,
-		toolSignatures: make([]string, 0, 5), // Window of 5
-		errorOutputs:   make([]string, 0, 5), // Window of 5
-		bufferSize:     5,
+		threshold:         threshold,
+		toolSignatures:    make([]string, 0, 5), // Window of 5
+		errorOutputs:      make([]string, 0, 5), // Window of 5
+		contentSignatures: make([]string, 0, 5), // Window of 5
+		bufferSize:        5,
 	}
 }
 
@@ -96,10 +99,48 @@ func (d *LoopDetector) CheckError(output string) error {
 	return nil
 }
 
+// CheckContent checks for repetitive textual responses (Rule C)
+func (d *LoopDetector) CheckContent(content string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Trim and hash to normalize comparison
+	clean := strings.TrimSpace(content)
+	if len(clean) < 10 {
+		return nil // Ignore very short phrases (e.g. "Yes", "Ok")
+	}
+
+	hash := fmt.Sprintf("%x", md5.Sum([]byte(clean)))
+
+	// Add to buffer
+	if len(d.contentSignatures) >= d.bufferSize {
+		d.contentSignatures = d.contentSignatures[1:]
+	}
+	d.contentSignatures = append(d.contentSignatures, hash)
+
+	// Check for 3 consecutive repetitions
+	if len(d.contentSignatures) >= 3 {
+		last := d.contentSignatures[len(d.contentSignatures)-1]
+		count := 0
+		for i := len(d.contentSignatures) - 1; i >= len(d.contentSignatures)-3; i-- {
+			if d.contentSignatures[i] == last {
+				count++
+			}
+		}
+
+		if count >= 3 {
+			return fmt.Errorf("loop detected: you have repeated the same textual response 3 times. Please summarize progress and change approach.")
+		}
+	}
+
+	return nil
+}
+
 // Reset clears state
 func (d *LoopDetector) Reset() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.toolSignatures = make([]string, 0, d.bufferSize)
 	d.errorOutputs = make([]string, 0, d.bufferSize)
+	d.contentSignatures = make([]string, 0, d.bufferSize)
 }

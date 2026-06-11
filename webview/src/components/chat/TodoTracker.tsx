@@ -10,7 +10,7 @@ interface TodoTrackerProps {
 export function TodoTracker({ todos }: TodoTrackerProps) {
     if (todos.length === 0) return null;
 
-    const completed = todos.filter(t => t.status === 'completed').length;
+    const completed = todos.filter(t => t.status === 'completed' || t.status === 'cancelled').length;
     const percent = Math.round((completed / todos.length) * 100);
 
     return (
@@ -37,13 +37,15 @@ export function TodoTracker({ todos }: TodoTrackerProps) {
                         <div className="mt-0.5 shrink-0 text-[10px] font-black">
                             {todo.status === 'completed' ? (
                                 <span className="text-green-500">DONE</span>
+                            ) : todo.status === 'cancelled' ? (
+                                <span className="text-vscode-fg/25">SKIP</span>
                             ) : todo.status === 'current' ? (
                                 <span className="text-ricochet-primary animate-pulse">BUSY</span>
                             ) : (
                                 <span className="text-vscode-fg/20">WAIT</span>
                             )}
                         </div>
-                        <span className={`text-[11px] leading-relaxed transition-colors ${todo.status === 'completed' ? 'text-vscode-fg/40 line-through' :
+                        <span className={`text-[11px] leading-relaxed transition-colors ${todo.status === 'completed' || todo.status === 'cancelled' ? 'text-vscode-fg/40 line-through' :
                             todo.status === 'current' ? 'text-vscode-fg font-medium' :
                                 'text-vscode-fg/60'
                             }`}>

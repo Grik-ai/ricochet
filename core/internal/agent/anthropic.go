@@ -39,13 +39,15 @@ func (p *AnthropicProvider) Name() string {
 
 // anthropicRequest is the Anthropic API request format
 type anthropicRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	Messages  []anthropicMessage `json:"messages"`
-	System    string             `json:"system,omitempty"`
-	Tools     []anthropicTool    `json:"tools,omitempty"`
-	Thinking  *anthropicThinking `json:"thinking,omitempty"`
-	Stream    bool               `json:"stream,omitempty"`
+	Model       string             `json:"model"`
+	MaxTokens   int                `json:"max_tokens"`
+	Messages    []anthropicMessage `json:"messages"`
+	System      string             `json:"system,omitempty"`
+	Tools       []anthropicTool    `json:"tools,omitempty"`
+	Thinking    *anthropicThinking `json:"thinking,omitempty"`
+	Temperature float64            `json:"temperature,omitempty"`
+	TopP        float64            `json:"top_p,omitempty"`
+	Stream      bool               `json:"stream,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -91,8 +93,10 @@ type anthropicResponse struct {
 	StopReason   string                  `json:"stop_reason"`
 	StopSequence string                  `json:"stop_sequence,omitempty"`
 	Usage        struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 	} `json:"usage"`
 	Error *struct {
 		Type    string `json:"type"`
@@ -251,13 +255,15 @@ func (p *AnthropicProvider) buildRequest(req *ChatRequest, stream bool) *anthrop
 	}
 
 	return &anthropicRequest{
-		Model:     p.model,
-		MaxTokens: maxTokens,
-		Messages:  messages,
-		System:    req.SystemPrompt,
-		Tools:     tools,
-		Thinking:  thinking,
-		Stream:    stream,
+		Model:       p.model,
+		MaxTokens:   maxTokens,
+		Messages:    messages,
+		System:      req.SystemPrompt,
+		Tools:       tools,
+		Thinking:    thinking,
+		Temperature: req.Temperature,
+		TopP:        req.TopP,
+		Stream:      stream,
 	}
 }
 
@@ -285,8 +291,10 @@ func (p *AnthropicProvider) parseResponse(resp *anthropicResponse) *ChatResponse
 		ToolCalls:  toolCalls,
 		StopReason: resp.StopReason,
 		Usage: Usage{
-			InputTokens:  resp.Usage.InputTokens,
-			OutputTokens: resp.Usage.OutputTokens,
+			InputTokens:         resp.Usage.InputTokens,
+			OutputTokens:        resp.Usage.OutputTokens,
+			CachedInputTokens:   resp.Usage.CacheReadInputTokens,
+			CacheCreationTokens: resp.Usage.CacheCreationInputTokens,
 		},
 	}
 }
@@ -298,6 +306,12 @@ type anthropicStreamEvent struct {
 	Delta        json.RawMessage        `json:"delta,omitempty"`
 	ContentBlock *anthropicContentBlock `json:"content_block,omitempty"`
 	Message      *anthropicResponse     `json:"message,omitempty"`
+	Usage        *struct {
+		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	} `json:"usage,omitempty"`
 }
 
 func (p *AnthropicProvider) processStream(reader io.Reader, callback StreamCallback) error {
@@ -330,6 +344,18 @@ func (p *AnthropicProvider) processStream(reader io.Reader, callback StreamCallb
 		}
 
 		switch event.Type {
+		case "message_start":
+			if event.Message != nil {
+				callback(&StreamChunk{
+					Type: "usage",
+					Usage: &Usage{
+						InputTokens:         event.Message.Usage.InputTokens,
+						OutputTokens:        event.Message.Usage.OutputTokens,
+						CachedInputTokens:   event.Message.Usage.CacheReadInputTokens,
+						CacheCreationTokens: event.Message.Usage.CacheCreationInputTokens,
+					},
+				})
+			}
 		case "content_block_start":
 			if event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
 				currentToolUse = &protocol.ToolUseBlock{
@@ -374,12 +400,25 @@ func (p *AnthropicProvider) processStream(reader io.Reader, callback StreamCallb
 		case "message_delta":
 			var delta struct {
 				StopReason string `json:"stop_reason"`
+				Usage      *struct {
+					OutputTokens int `json:"output_tokens"`
+				} `json:"usage,omitempty"`
 			}
-			if err := json.Unmarshal(event.Delta, &delta); err == nil && delta.StopReason != "" {
-				callback(&StreamChunk{
-					Type:       "message_delta",
-					StopReason: delta.StopReason,
-				})
+			if err := json.Unmarshal(event.Delta, &delta); err == nil {
+				if delta.Usage != nil {
+					callback(&StreamChunk{
+						Type: "usage",
+						Usage: &Usage{
+							OutputTokens: delta.Usage.OutputTokens,
+						},
+					})
+				}
+				if delta.StopReason != "" {
+					callback(&StreamChunk{
+						Type:       "message_delta",
+						StopReason: delta.StopReason,
+					})
+				}
 			}
 		}
 	}

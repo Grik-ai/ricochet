@@ -41,6 +41,21 @@ type LiveModeProvider interface {
 	AskUserRemote(ctx context.Context, question string) (string, error)
 }
 
+// ActionAuditor interface for post-execution verification (Shadow Agent)
+type ActionAuditor interface {
+	AuditAction(ctx context.Context, goal string, toolName string, args string, result string, expectedOutcome string) (bool, string, error)
+}
+
+// SessionProvider interface to access session-specific data
+type SessionProvider interface {
+	GetFileTracker(sessionID string) *contextPkg.FileTracker
+}
+
+// SwarmProvider allows the executor to check status of autonomous sub-agents
+type SwarmProvider interface {
+	GetSubtaskStatus(id string) (string, bool)
+}
+
 // NativeExecutor implements Executor using a Host for OS operations and ModeManager for permissions
 type NativeExecutor struct {
 	host            host.Host
@@ -52,13 +67,17 @@ type NativeExecutor struct {
 	codegraph       *codegraph.Service
 	workflows       *workflow.Manager
 	livemode        LiveModeProvider
+	auditor         ActionAuditor
+	sessionProvider SessionProvider
 	shadowVerifier  *safeguard.ShadowVerifier
 	ptyManager      *host.PTYManager
 	memory          *memory.Manager
+	ignoreMatcher   *safeguard.IgnoreMatcher
 	dynamicTools    map[string]ToolDefinition // Support for dynamic tools (e.g. subtask)
 	dynamicHandlers map[string]interface {
 		Execute(context.Context, json.RawMessage) (string, error)
 	}
+	swarmProvider SwarmProvider
 }
 
 func NewNativeExecutor(h host.Host, m *modes.Manager, sg *safeguard.Manager, mcpHub *mcpHubPkg.Hub, idx *index.Indexer, cg *codegraph.Service, wm *workflow.Manager) *NativeExecutor {
@@ -74,6 +93,7 @@ func NewNativeExecutor(h host.Host, m *modes.Manager, sg *safeguard.Manager, mcp
 		shadowVerifier: safeguard.NewShadowVerifier(),
 		ptyManager:     host.NewPTYManager(),
 		memory:         mustCreateMemory(h.GetCWD()),
+		ignoreMatcher:  safeguard.NewIgnoreMatcher(h.GetCWD()),
 		dynamicTools:   make(map[string]ToolDefinition),
 		dynamicHandlers: make(map[string]interface {
 			Execute(context.Context, json.RawMessage) (string, error)
@@ -98,6 +118,18 @@ func (e *NativeExecutor) RegisterTool(t interface {
 // SetLiveMode sets the live mode provider for remote approval routing
 func (e *NativeExecutor) SetLiveMode(lm LiveModeProvider) {
 	e.livemode = lm
+}
+
+func (e *NativeExecutor) SetAuditor(a ActionAuditor) {
+	e.auditor = a
+}
+
+func (e *NativeExecutor) SetSessionProvider(sp SessionProvider) {
+	e.sessionProvider = sp
+}
+
+func (e *NativeExecutor) SetSwarmProvider(sp SwarmProvider) {
+	e.swarmProvider = sp
 }
 
 // Hook interface for intercepting tool execution
@@ -163,16 +195,23 @@ func (e *NativeExecutor) Execute(ctx context.Context, name string, args json.Raw
 		if err := json.Unmarshal(args, &payload); err != nil {
 			return "", err
 		}
-		index, err := e.host.AskUserChoice(payload.Question, payload.Choices)
+		index, err := e.host.AskUserChoice(protocol.GetSessionID(ctx), payload.Question, payload.Choices)
 		if err != nil {
+			if strings.Contains(err.Error(), "not implemented") {
+				return fmt.Sprintf(
+					"Interactive choice is not available in this execution host. Do not assume approval. Present the question and choices to the user in the final response and wait for an explicit follow-up.\n\nQuestion: %s\nChoices: %s",
+					payload.Question,
+					strings.Join(payload.Choices, ", "),
+				), nil
+			}
 			return "", err
 		}
 		return fmt.Sprintf("User selected choice %d: %s", index+1, payload.Choices[index]), nil
 
 	case "list_dir":
-		return e.ListDir(args)
+		return e.ListDir(ctx, args)
 	case "read_file":
-		return e.ReadFile(args)
+		return e.ReadFile(ctx, args)
 	case "write_file":
 		return e.WriteFile(ctx, args)
 	case "execute_command":
@@ -180,11 +219,11 @@ func (e *NativeExecutor) Execute(ctx context.Context, name string, args json.Raw
 	case "codebase_search":
 		return e.CodebaseSearch(ctx, args)
 	case "command_status":
-		return e.GetCommandStatus(args)
+		return e.GetCommandStatus(ctx, args)
 	case "restore_checkpoint":
-		return e.RestoreCheckpoint(args)
+		return e.RestoreCheckpoint(ctx, args)
 	case "read_definitions":
-		return e.ReadDefinitions(args)
+		return e.ReadDefinitions(ctx, args)
 	case "browser_open":
 		return e.BrowserOpen(ctx, args)
 	case "browser_screenshot":
@@ -197,24 +236,34 @@ func (e *NativeExecutor) Execute(ctx context.Context, name string, args json.Raw
 		return e.GetDiagnostics(ctx, args)
 	case "get_definitions":
 		return e.GetDefinitionsLSP(ctx, args)
+	case "get_references":
+		return e.GetReferencesLSP(ctx, args)
+	case "get_symbols":
+		return e.GetSymbolsLSP(ctx, args)
+	case "get_implementations":
+		return e.GetImplementationsLSP(ctx, args)
 	case "switch_mode":
-		return e.SwitchMode(args)
-	case "update_todos", "task_boundary", "update_plan":
+		return e.SwitchMode(ctx, args)
+	case "update_todos", "task_boundary", "update_plan", "submit_plan":
 		return "Interpreted by controller", nil
 	case "get_workflows":
 		return e.GetWorkflows(ctx, args)
-	case "start_task":
-		return e.handleStartTask(ctx, args)
+	case "subagent":
+		return "DELEGATED_TO_CONTROLLER", nil
+	case "read_scratchpad", "write_scratchpad":
+		return "DELEGATED_TO_CONTROLLER", nil
 
 	case "replace_file_content":
 		// This method is defined in fs_tools.go but called on NativeExecutor
 		return e.ReplaceFileContent(ctx, args)
+	case "batch_edit":
+		return e.BatchEdit(ctx, args)
 
 	case "execute_python":
 		return e.ExecutePythonTool(ctx, args)
 
 	case "create_checkpoint":
-		return e.CreateCheckpoint(args)
+		return e.CreateCheckpoint(ctx, args)
 
 	case "start_terminal":
 		return e.StartTerminal(ctx, args)
@@ -226,6 +275,9 @@ func (e *NativeExecutor) Execute(ctx context.Context, name string, args json.Raw
 		return e.Remember(ctx, args)
 	case "recall":
 		return e.Recall(ctx, args)
+	case "web_search":
+		wst := &WebSearchTool{}
+		return wst.Execute(ctx, args)
 
 	default:
 		// Check Dynamic Tools (Subtasks etc)
@@ -373,13 +425,13 @@ func (e *NativeExecutor) GetDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "command_status",
-			Description: "Check the status of a background command",
+			Description: "Check the status of a background command or subagent worker",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"id": map[string]interface{}{
 						"type":        "string",
-						"description": "Command ID returned by execute_command",
+						"description": "Command ID returned by execute_command, or subagent worker ID with or without the agent- prefix",
 					},
 				},
 				"required": []string{"id"},
@@ -405,7 +457,7 @@ func (e *NativeExecutor) GetDefinitions() []ToolDefinition {
 		},
 		{
 			Name:        "update_todos",
-			Description: "Update the list of todos/tasks for the current session. Use this to track progress and keep the user informed of your plan.",
+			Description: "Update the visible checklist for the current session. For complex work, keep 3-6 short milestones, mark one item current, and mark all items completed before the final answer.",
 			InputSchema: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -505,6 +557,33 @@ func (e *NativeExecutor) GetDefinitions() []ToolDefinition {
 		},
 	})
 
+	defs = append(defs, ToolDefinition{
+		Name:        "submit_plan",
+		Description: "Submit a first-class implementation plan artifact for user review. Use this instead of write_file for requested plans, planning-mode output, implementation plans, or plan-of-work deliverables. This does not edit the user's workspace.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"title": map[string]interface{}{
+					"type":        "string",
+					"description": "Short plan title. Defaults to Implementation Plan.",
+				},
+				"summary": map[string]interface{}{
+					"type":        "string",
+					"description": "One or two sentence summary shown in the plan card.",
+				},
+				"content": map[string]interface{}{
+					"type":        "string",
+					"description": "Full markdown plan content.",
+				},
+				"kind": map[string]interface{}{
+					"type":        "string",
+					"description": "Artifact kind. Use implementation_plan for implementation plans.",
+				},
+			},
+			"required": []string{"content"},
+		},
+	})
+
 	// Add LSP tools
 	defs = append(defs, ToolDefinition{
 		Name:        "get_diagnostics",
@@ -541,6 +620,40 @@ func (e *NativeExecutor) GetDefinitions() []ToolDefinition {
 			"required": []string{"path", "line", "character"},
 		},
 	}, ToolDefinition{
+		Name:        "get_references",
+		Description: "Find all references to a symbol via LSP.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path":      map[string]interface{}{"type": "string", "description": "File path"},
+				"line":      map[string]interface{}{"type": "integer", "description": "Line number (1-indexed)"},
+				"character": map[string]interface{}{"type": "integer", "description": "Character position (0-indexed)"},
+			},
+			"required": []string{"path", "line", "character"},
+		},
+	}, ToolDefinition{
+		Name:        "get_symbols",
+		Description: "Get all symbols (functions, classes, variables) in a file via LSP.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{"type": "string", "description": "File path"},
+			},
+			"required": []string{"path"},
+		},
+	}, ToolDefinition{
+		Name:        "get_implementations",
+		Description: "Find implementations of an interface or abstract method via LSP.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path":      map[string]interface{}{"type": "string", "description": "File path"},
+				"line":      map[string]interface{}{"type": "integer", "description": "Line number (1-indexed)"},
+				"character": map[string]interface{}{"type": "integer", "description": "Character position (0-indexed)"},
+			},
+			"required": []string{"path", "line", "character"},
+		},
+	}, ToolDefinition{
 		Name:        "get_workflows",
 		Description: "Get list of available workflow commands defined in .agent/workflows. Used for autocomplete.",
 		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
@@ -548,7 +661,7 @@ func (e *NativeExecutor) GetDefinitions() []ToolDefinition {
 
 	// Add Task Workspace tools
 	// StartSwarmTool and UpdatePlanTool are registered dynamically in Controller, so we don't add them here to avoid duplicates.
-	defs = append(defs, StartTaskTool, TaskBoundaryTool)
+	defs = append(defs, TaskBoundaryTool)
 
 	// Add browser tools
 	defs = append(defs, ToolDefinition{
@@ -686,6 +799,104 @@ func (e *NativeExecutor) GetDefinitions() []ToolDefinition {
 		},
 	})
 
+	// Add Web Search tool
+	defs = append(defs, ToolDefinition{
+		Name:        "web_search",
+		Description: "Search the web for information. Use this to find documentation, APIs, solutions to errors, or any external information needed.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{
+					"type":        "string",
+					"description": "Search query",
+				},
+				"max_results": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum number of results (1-10, default 5)",
+				},
+			},
+			"required": []string{"query"},
+		},
+	})
+
+	// Add Batch Edit tool
+	defs = append(defs, ToolDefinition{
+		Name:        "batch_edit",
+		Description: "Apply multiple file edits (write or search/replace) in a single atomic-like operation. This is efficient for large-scale changes.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"edits": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"path":                map[string]interface{}{"type": "string", "description": "File path"},
+							"type":                map[string]interface{}{"type": "string", "enum": []string{"write", "replace"}, "description": "Type of edit"},
+							"content":             map[string]interface{}{"type": "string", "description": "New content for type='write'"},
+							"target_content":      map[string]interface{}{"type": "string", "description": "Target content to find for type='replace'"},
+							"replacement_content": map[string]interface{}{"type": "string", "description": "Replacement content for type='replace'"},
+						},
+						"required": []string{"path", "type"},
+					},
+				},
+			},
+			"required": []string{"edits"},
+		},
+	})
+
+	// Add Subagent tool
+	defs = append(defs, ToolDefinition{
+		Name:        "subagent",
+		Description: "Delegate a complex task to a background worker agent. The worker operates autonomously and reports back once finished. Use this for parallel research or large-scale implementation.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"prompt": map[string]interface{}{
+					"type":        "string",
+					"description": "The detailed instructions for the worker agent.",
+				},
+				"description": map[string]interface{}{
+					"type":        "string",
+					"description": "Brief description of the task (for TUI).",
+				},
+				"task_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional: Link to a task ID from the Master Plan.",
+				},
+			},
+			"required": []string{"prompt"},
+		},
+	})
+
+	// Add Scratchpad tools
+	defs = append(defs, ToolDefinition{
+		Name:        "write_scratchpad",
+		Description: "Write or update a note in the shared scratchpad. Use this to share findings with other agents.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name": map[string]interface{}{
+					"type":        "string",
+					"description": "The name of the note (e.g. 'research_findings').",
+				},
+				"content": map[string]interface{}{
+					"type":        "string",
+					"description": "The content of the note.",
+				},
+			},
+			"required": []string{"name", "content"},
+		},
+	})
+
+	defs = append(defs, ToolDefinition{
+		Name:        "read_scratchpad",
+		Description: "Read all current notes from the shared scratchpad.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+		},
+	})
+
 	return defs
 }
 
@@ -815,7 +1026,7 @@ func (e *NativeExecutor) ExecutePythonTool(ctx context.Context, args json.RawMes
 	return ExecutePython(ctx, payload.Script)
 }
 
-func (e *NativeExecutor) SwitchMode(args json.RawMessage) (string, error) {
+func (e *NativeExecutor) SwitchMode(ctx context.Context, args json.RawMessage) (string, error) {
 	var payload struct {
 		Mode string `json:"mode"`
 	}
@@ -831,7 +1042,7 @@ func (e *NativeExecutor) SwitchMode(args json.RawMessage) (string, error) {
 	return fmt.Sprintf("Successfully switched to %s mode. Current role: %s", mode.Name, mode.RoleDefinition), nil
 }
 
-func (e *NativeExecutor) CreateCheckpoint(args json.RawMessage) (string, error) {
+func (e *NativeExecutor) CreateCheckpoint(ctx context.Context, args json.RawMessage) (string, error) {
 	if e.safeguard == nil {
 		return "", fmt.Errorf("safeguard not initialized")
 	}
@@ -851,7 +1062,7 @@ func (e *NativeExecutor) CreateCheckpoint(args json.RawMessage) (string, error) 
 	return fmt.Sprintf("Checkpoint created. Hash: %s", hash), nil
 }
 
-func (e *NativeExecutor) RestoreCheckpoint(args json.RawMessage) (string, error) {
+func (e *NativeExecutor) RestoreCheckpoint(ctx context.Context, args json.RawMessage) (string, error) {
 	if e.safeguard == nil {
 		return "", fmt.Errorf("safeguard not initialized")
 	}
@@ -870,15 +1081,20 @@ func (e *NativeExecutor) RestoreCheckpoint(args json.RawMessage) (string, error)
 	return fmt.Sprintf("Successfully restored to checkpoint %s", payload.Hash), nil
 }
 
-func (e *NativeExecutor) ReadDefinitions(args json.RawMessage) (string, error) {
+func (e *NativeExecutor) ReadDefinitions(ctx context.Context, args json.RawMessage) (string, error) {
 	var payload struct {
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal(args, &payload); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
+	if e.ignoreMatcher != nil {
+		if err := e.ignoreMatcher.CheckPath(payload.Path); err != nil {
+			return "", fmt.Errorf("ricochetignore: %w", err)
+		}
+	}
 
-	targetPath, err := e.resolvePath(payload.Path)
+	targetPath, err := e.resolvePath(ctx, payload.Path)
 	if err != nil {
 		return "", err
 	}
@@ -921,7 +1137,6 @@ func (e *NativeExecutor) ReadDefinitions(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("unsupported file type: %s (supported: .go, .js, .ts, .py, .rs)", ext)
 	}
 
-	ctx := context.Background()
 	langParser := contextPkg.NewLanguageParser()
 	defer langParser.Close()
 

@@ -10,16 +10,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	context_manager "github.com/igoryan-dao/ricochet/internal/context"
 	"github.com/igoryan-dao/ricochet/internal/protocol"
 )
 
 // SessionData is the persistable part of a session
 type SessionData struct {
-	ID        string             `json:"id"`
-	Messages  []protocol.Message `json:"messages"`
-	Todos     []protocol.Todo    `json:"todos"`
-	CreatedAt time.Time          `json:"created_at"`
+	ID                  string                   `json:"id"`
+	Messages            []protocol.Message       `json:"messages"`
+	Todos               []protocol.Todo          `json:"todos"`
+	MessageQueue        []protocol.QueuedMessage `json:"message_queue,omitempty"`
+	BatchWorkerID       string                   `json:"batch_worker_id,omitempty"`
+	AllowedRoot         string                   `json:"allowed_root,omitempty"`
+	ScopePaths          []string                 `json:"scope_paths,omitempty"`
+	IsolatedAutoApprove bool                     `json:"isolated_auto_approve,omitempty"`
+	PlanApproved        bool                     `json:"plan_approved"`
+	PlanReviewRequested bool                     `json:"plan_review_requested"`
+	CreatedAt           time.Time                `json:"created_at"`
 }
 
 // SessionManager handles concurrent agents and their persistence
@@ -31,7 +39,7 @@ type SessionManager struct {
 
 func NewSessionManager(storageDir string) *SessionManager {
 	if storageDir != "" {
-		if err := os.MkdirAll(storageDir, 0755); err != nil {
+		if err := os.MkdirAll(storageDir, 0700); err != nil {
 			log.Printf("Warning: failed to create storage dir: %v", err)
 		}
 	}
@@ -46,7 +54,7 @@ func NewSessionManager(storageDir string) *SessionManager {
 }
 
 func (m *SessionManager) CreateSession() *Session {
-	id := fmt.Sprintf("s_%d", time.Now().Unix())
+	id := "s_" + uuid.New().String()
 	return m.CreateSessionWithID(id)
 }
 
@@ -127,10 +135,17 @@ func (m *SessionManager) saveLocked(session *Session) error {
 	}
 
 	data := SessionData{
-		ID:        session.ID,
-		Messages:  session.StateHandler.GetMessages(),
-		Todos:     session.Todos,
-		CreatedAt: session.CreatedAt,
+		ID:                  session.ID,
+		Messages:            session.StateHandler.GetMessages(),
+		Todos:               session.Todos,
+		MessageQueue:        session.MessageQueue,
+		BatchWorkerID:       session.BatchWorkerID,
+		AllowedRoot:         session.AllowedRoot,
+		ScopePaths:          session.ScopePaths,
+		IsolatedAutoApprove: session.IsolatedAutoApprove,
+		PlanApproved:        session.PlanApproved,
+		PlanReviewRequested: session.PlanReviewRequested,
+		CreatedAt:           session.CreatedAt,
 	}
 
 	bytes, err := json.MarshalIndent(data, "", "  ")
@@ -139,7 +154,36 @@ func (m *SessionManager) saveLocked(session *Session) error {
 	}
 
 	path := filepath.Join(m.storageDir, session.ID+".json")
-	return os.WriteFile(path, bytes, 0644)
+	return atomicWriteSessionFile(path, bytes, 0600)
+}
+
+func atomicWriteSessionFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func (m *SessionManager) LoadAll() {
@@ -165,11 +209,18 @@ func (m *SessionManager) LoadAll() {
 			}
 
 			session := &Session{
-				ID:           sd.ID,
-				StateHandler: NewMessageStateHandler(sd.ID),
-				FileTracker:  context_manager.NewFileTracker(),
-				Todos:        sd.Todos,
-				CreatedAt:    sd.CreatedAt,
+				ID:                  sd.ID,
+				StateHandler:        NewMessageStateHandler(sd.ID),
+				FileTracker:         context_manager.NewFileTracker(),
+				Todos:               sd.Todos,
+				MessageQueue:        sd.MessageQueue,
+				BatchWorkerID:       sd.BatchWorkerID,
+				AllowedRoot:         sd.AllowedRoot,
+				ScopePaths:          sd.ScopePaths,
+				IsolatedAutoApprove: sd.IsolatedAutoApprove,
+				PlanApproved:        sd.PlanApproved,
+				PlanReviewRequested: sd.PlanReviewRequested,
+				CreatedAt:           sd.CreatedAt,
 			}
 			session.StateHandler.SetMessages(sd.Messages)
 
@@ -177,6 +228,15 @@ func (m *SessionManager) LoadAll() {
 			m.sessions[sd.ID] = session
 			m.mu.Unlock()
 		}
+	}
+}
+
+func (m *SessionManager) SaveAll() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, s := range m.sessions {
+		m.saveLocked(s)
 	}
 }
 

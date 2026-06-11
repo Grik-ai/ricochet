@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,12 @@ type contextKey string
 
 const chatIDKey contextKey = "chatID"
 
+// Callback data constants for Veto Loop (Sprint 4.0)
+const (
+	CallbackVetoRetry  = "veto:retry"
+	CallbackVetoIgnore = "veto:ignore"
+)
+
 // Controller manages Live Mode - bridging Telegram/Discord with the AI agent
 type Controller struct {
 	mu sync.RWMutex
@@ -31,6 +38,8 @@ type Controller struct {
 
 	// Cancellation for the listener goroutine
 	cancel context.CancelFunc
+
+	isDaemon bool
 
 	// Callback for status updates
 	onStatusUpdate func(Status)
@@ -52,6 +61,12 @@ type Controller struct {
 
 	// Throttling for streaming updates to prevent webview crash
 	lastChatUpdateTime time.Time
+
+	// Draft Messages for Telegram status updates (chatID -> messageID)
+	draftMessages map[int64]int
+
+	// Track last request for retry functionality
+	lastRequests map[int64]*agent.ChatRequestInput
 }
 
 // SetMainSessionID sets the primary session ID for binding
@@ -100,6 +115,7 @@ type Status struct {
 	ConnectedVia string `json:"connectedVia,omitempty"` // "telegram", "discord", or nil
 	LastActivity string `json:"lastActivity,omitempty"`
 	SessionID    string `json:"sessionId,omitempty"`
+	IsDaemon     bool   `json:"isDaemon"`
 }
 
 // EtherActivity represents real-time activity for UI mirroring
@@ -138,9 +154,11 @@ func New(cfg *Config, agentCtrl *agent.Controller) (*Controller, error) {
 	}
 
 	ctrl := &Controller{
-		agent:    agentCtrl,
-		stateMgr: stateMgr,
-		chatID:   cfg.TelegramChatID,
+		agent:         agentCtrl,
+		stateMgr:      stateMgr,
+		chatID:        cfg.TelegramChatID,
+		draftMessages: make(map[int64]int),
+		lastRequests:  make(map[int64]*agent.ChatRequestInput),
 	}
 
 	// Create Telegram bot if token provided
@@ -244,7 +262,8 @@ func (c *Controller) GetStatus() *Status {
 
 func (c *Controller) getStatusLocked() *Status {
 	status := &Status{
-		Enabled: c.enabled,
+		Enabled:  c.enabled,
+		IsDaemon: c.isDaemon,
 	}
 	if c.enabled {
 		if c.tgBot != nil {
@@ -254,6 +273,14 @@ func (c *Controller) getStatusLocked() *Status {
 		}
 	}
 	return status
+}
+
+// SetDaemon marks the controller as running in background mode
+func (c *Controller) SetDaemon(isDaemon bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.isDaemon = isDaemon
+	c.broadcastStatus()
 }
 
 // listenForMessages handles incoming Telegram messages and forwards to agent
@@ -377,7 +404,7 @@ func (c *Controller) handleTelegramMessage(ctx context.Context, resp *telegram.U
 	// Forward user message to IDE
 	c.emitChatUpdate(agent.ChatUpdate{
 		SessionID: sessionID, // Propagate session ID for TUI Sync
-		Message: agent.ChatMessage{
+		Message: &agent.ChatMessage{
 			ID:        fmt.Sprintf("tg-%d-%d", resp.ChatID, resp.MessageID),
 			Role:      "user",
 			Content:   resp.Text,
@@ -410,6 +437,26 @@ func (c *Controller) handleTelegramMessage(ctx context.Context, resp *telegram.U
 		return
 	}
 
+	// Handle /status command
+	if resp.Text == "/status" {
+		if c.agent != nil {
+			pm := c.agent.GetPlanManager()
+			if pm != nil {
+				statusText := pm.GenerateContext()
+				if statusText == "" {
+					statusText = "📭 **No active plan found.**"
+				} else {
+					// Add a header for Telegram
+					statusText = "📊 **Current Status & Plan**\n" + statusText
+				}
+				c.tgBot.SendMessage(ctx, resp.ChatID, statusText)
+				return
+			}
+		}
+		c.tgBot.SendMessage(ctx, resp.ChatID, "⚠️ Agent or Plan Manager not ready.")
+		return
+	}
+
 	// Stream response to Telegram
 
 	// Inject ChatID into context so tools (AskUserRemote) know where to reply
@@ -418,20 +465,64 @@ func (c *Controller) handleTelegramMessage(ctx context.Context, resp *telegram.U
 	// Stream response to Shell, send final to Telegram
 	var currentContent string
 
-	err := c.agent.Chat(chatCtx, agent.ChatRequestInput{
+	// Store request for potential retry
+	req := agent.ChatRequestInput{
 		SessionID: sessionID,
 		Content:   resp.Text,
 		Via:       "telegram",
-	}, func(update interface{}) {
-		// Handle TaskProgress for Shell
+	}
+	c.mu.Lock()
+	if c.lastRequests == nil {
+		c.lastRequests = make(map[int64]*agent.ChatRequestInput)
+	}
+	c.lastRequests[resp.ChatID] = &req
+	c.mu.Unlock()
+
+	err := c.agent.Chat(chatCtx, req, func(update interface{}) {
+		// Handle TaskProgress for Shell AND Telegram Status Update
 		if tp, ok := update.(protocol.TaskProgress); ok {
 			c.emitTaskProgress(tp)
+
+			// Update Telegram Draft Status
+			if c.tgBot != nil {
+				c.mu.Lock()
+				draftID, hasDraft := c.draftMessages[resp.ChatID]
+				c.mu.Unlock()
+
+				statusText := fmt.Sprintf("🤖 **%s**\n\n_%s_", tp.Status, tp.Summary)
+				if len(tp.Steps) > 0 {
+					statusText += "\n\n**Progress:**\n"
+					lastSteps := tp.Steps
+					if len(lastSteps) > 5 {
+						lastSteps = lastSteps[len(lastSteps)-5:]
+					}
+					for i, step := range lastSteps {
+						statusText += fmt.Sprintf("• %s\n", step)
+						if i == len(lastSteps)-1 {
+							statusText += "   └─ ⚡️ _current process_\n"
+						}
+					}
+				}
+
+				if !hasDraft {
+					// Create new draft message
+					newID, err := c.tgBot.SendMessageAndTrack(ctx, resp.ChatID, statusText)
+					if err == nil {
+						c.mu.Lock()
+						c.draftMessages[resp.ChatID] = newID
+						c.mu.Unlock()
+					}
+				} else {
+					// Edit existing draft
+					_ = c.tgBot.EditMessage(ctx, resp.ChatID, draftID, statusText)
+				}
+			}
 			return
 		}
 
 		// Only handle ChatUpdate for Shell
 		chatUpdate, ok := update.(agent.ChatUpdate)
-		if !ok {
+		if !ok || chatUpdate.Message == nil {
 			return
 		}
 
@@ -445,25 +536,76 @@ func (c *Controller) handleTelegramMessage(ctx context.Context, resp *telegram.U
 
 	// After the Agent is done, send a SINGLE message to Telegram
 	if currentContent != "" {
-		_, sendErr := c.tgBot.SendMessageAndTrack(ctx, resp.ChatID, currentContent)
-		if sendErr != nil {
-			log.Printf("Failed to send final message to Telegram: %v", sendErr)
+		// Clear draft first
+		c.mu.Lock()
+		draftID, hasDraft := c.draftMessages[resp.ChatID]
+		delete(c.draftMessages, resp.ChatID)
+		c.mu.Unlock()
+
+		if hasDraft && c.tgBot != nil {
+			// Final results can be large, we might want to edit the draft or send new.
+			// Re-use draft for final content to keep chat clean.
+			err := c.tgBot.EditMessage(ctx, resp.ChatID, draftID, currentContent)
+			if err != nil {
+				// Fallback to new message
+				_, _ = c.tgBot.SendMessageAndTrack(ctx, resp.ChatID, currentContent)
+			}
+		} else if c.tgBot != nil {
+			_, sendErr := c.tgBot.SendMessageAndTrack(ctx, resp.ChatID, currentContent)
+			if sendErr != nil {
+				log.Printf("Failed to send final message to Telegram: %v", sendErr)
+			}
 		}
 	} else if err != nil {
-		c.tgBot.SendMessage(ctx, resp.ChatID, fmt.Sprintf("❌ Error: %v", err))
+		c.tgBot.SendErrorActions(ctx, resp.ChatID, sessionID, err.Error())
 	}
 
 	// Emit responding activity (done)
 	c.emitActivity("responding", "telegram", resp.Username, "")
-
-	if err != nil {
-		c.tgBot.SendMessage(ctx, resp.ChatID, fmt.Sprintf("❌ Error: %v", err))
-	}
 }
 
 // handleTelegramCallback processes button clicks
 func (c *Controller) handleTelegramCallback(ctx context.Context, callback *telegram.CallbackEvent) {
 	log.Printf("Live Mode received callback: %s from chat %d", callback.Data, callback.ChatID)
+
+	// Veto / Error Handling
+	if strings.HasPrefix(callback.Data, "veto:") {
+		parts := strings.Split(callback.Data, ":")
+		if len(parts) < 3 {
+			return
+		}
+		action := parts[1]
+		_ = parts[2] // sessionID is present but not used yet for direct state manipulation
+
+		switch action {
+		case "retry":
+			c.tgBot.SendMessage(ctx, callback.ChatID, "🔄 **Перезапуск последней задачи...**")
+
+			c.mu.RLock()
+			lastReq := c.lastRequests[callback.ChatID]
+			c.mu.RUnlock()
+
+			if lastReq != nil {
+				// Re-run the message handler with the last request info
+				go func() {
+					mockResp := &telegram.UserResponse{
+						ChatID:    callback.ChatID,
+						Text:      lastReq.Content,
+						Timestamp: time.Now().UnixMilli(),
+						Username:  "User (Retry)",
+					}
+					c.handleTelegramMessage(context.Background(), mockResp)
+				}()
+			} else {
+				c.tgBot.SendMessage(ctx, callback.ChatID, "⚠️ Ошибка: не удалось найти параметры последнего запроса.")
+			}
+		case "fix":
+			c.tgBot.SendMessage(ctx, callback.ChatID, "✍️ **Режим исправления активирован.**\nОтправьте сообщение с исправленной командой или инструкцией. Агент подхватит его в следующем цикле.")
+		case "abort":
+			c.tgBot.SendMessage(ctx, callback.ChatID, "🛑 **Задача отменена.**")
+		}
+		return
+	}
 
 	// Session Switching
 	if strings.HasPrefix(callback.Data, "session:") {
@@ -538,14 +680,109 @@ func (c *Controller) handleTelegramCallback(ctx context.Context, callback *teleg
 		} else {
 			c.tgBot.SendMessage(ctx, callback.ChatID, "⚠️ Agent not ready.")
 		}
+
+	case CallbackVetoRetry:
+		c.tgBot.SendMessage(ctx, callback.ChatID, "🔄 **Retry requested.** Agent is fixing issues...")
+		go c.InjectUserMessage(ctx, callback.ChatID, "The quality checks failed. Please fix the reported issues and try again.")
+
+	case CallbackVetoIgnore:
+		c.tgBot.SendMessage(ctx, callback.ChatID, "🛡️ **Veto ignored.** Agent is proceeding...")
+		go c.InjectUserMessage(ctx, callback.ChatID, "I have reviewed the quality checks and I want you to proceed anyway. Ignore the last veto and finalize the task.")
 	}
 }
 
-// SetAgent sets the agent controller (for deferred initialization)
-func (c *Controller) SetAgent(agent *agent.Controller) {
+// InjectUserMessage submits a hidden user instruction to the active session
+func (c *Controller) InjectUserMessage(ctx context.Context, chatID int64, text string) {
+	c.mu.RLock()
+	a := c.agent
+	c.mu.RUnlock()
+
+	if a == nil {
+		return
+	}
+
+	sessionID := c.tgBot.GetActiveSession(chatID)
+	if sessionID == "" {
+		// FALLBACK: User wants to resume the latest session
+		sessions := a.ListSessions()
+		if len(sessions) > 0 {
+			sessionID = sessions[0].ID
+		}
+	}
+
+	if sessionID == "" {
+		return
+	}
+
+	// We use the standard handleTelegramMessage logic but with synthetic response
+	c.handleTelegramMessage(ctx, &telegram.UserResponse{
+		ChatID:    chatID,
+		Text:      text,
+		SessionID: sessionID,
+		Username:  "System (Admin Override)",
+		Timestamp: time.Now().Unix(),
+	})
+}
+
+// SetAgent sets the agent controller and subscribes to its autonomous events
+func (c *Controller) SetAgent(agentPtr *agent.Controller) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.agent = agent
+	c.agent = agentPtr
+	c.mu.Unlock()
+
+	if agentPtr != nil {
+		agentPtr.Subscribe(c.handleAgentEvent)
+		log.Println("📬 Live Mode subscribed to Agent Event Bus")
+	}
+}
+
+// handleAgentEvent processes proactive signals from the agent
+func (c *Controller) handleAgentEvent(evt agent.Event) {
+	c.mu.RLock()
+	chatID := c.chatID
+	enabled := c.enabled
+	tgBot := c.tgBot
+	c.mu.RUnlock()
+
+	if !enabled || tgBot == nil || chatID == 0 {
+		return
+	}
+
+	ctx := context.Background()
+
+	switch evt.Type {
+	case agent.EventTaskStarted:
+		title, _ := evt.Payload["title"].(string)
+		text := fmt.Sprintf("🏗️ **Task Started**\n\nI've begun working on: `%s`", title)
+		tgBot.SendMessage(ctx, chatID, text)
+		log.Printf("Proactive Task Started Alert sent to Telegram chat %d", chatID)
+
+	case agent.EventTaskFinished:
+		title, _ := evt.Payload["title"].(string)
+		summary, _ := evt.Payload["summary"].(string)
+		text := fmt.Sprintf("✅ **Task Finished**\n\n**Goal:** `%s`\n\n**Summary:**\n%s", title, summary)
+		tgBot.SendMessage(ctx, chatID, text)
+		log.Printf("Proactive Task Finished Alert sent to Telegram chat %d", chatID)
+
+	case agent.EventVetoed:
+		errMsg, _ := evt.Payload["error"].(string)
+		text := fmt.Sprintf("🚨 **VETO ALERT**\n\nA quality check hook blocked the task completion.\n\n**Issue:**\n`%s`\n\nHow should I proceed?", errMsg)
+
+		buttons := [][]telegram.ButtonConfig{
+			{
+				{Text: "🔄 Retry (Apply Fix)", Data: CallbackVetoRetry},
+				{Text: "🛡️ Ignore (Proceed)", Data: CallbackVetoIgnore},
+			},
+		}
+
+		tgBot.SendMessageWithButtons(ctx, chatID, text, buttons)
+		log.Printf("Proactive Veto Alert sent to Telegram chat %d", chatID)
+
+	case agent.EventFileChanged:
+		filename, _ := evt.Payload["file"].(string)
+		text := fmt.Sprintf("👁️ **File Changed Externally**\n\nI detected an external edit to `%s`. Should I re-index or adjust context?", filename)
+		tgBot.SendMessage(ctx, chatID, text)
+	}
 }
 
 // SetChatID sets the primary Telegram chat ID
@@ -655,6 +892,10 @@ func (c *Controller) AskUserRemote(ctx context.Context, question string) (string
 		return "", fmt.Errorf("telegram chat ID not set")
 	}
 
+	approvalID := "RA-" + strings.ToUpper(strconv.FormatInt(time.Now().UnixNano()%0xffffff, 36))
+	question = fmt.Sprintf("Approval `%s`\n\n%s", approvalID, question)
+	c.emitActivity("approval_requested", "telegram", "", approvalID)
+
 	// Use the bot's AskUser method which handles inline buttons
 	// Prefer context chatID if available (dynamic routing)
 	var response string
@@ -679,7 +920,7 @@ func (c *Controller) AskUserRemote(ctx context.Context, question string) (string
 		default:
 			status = "Received: " + response
 		}
-		c.emitActivity("approved", "telegram", "", status)
+		c.emitActivity("approved", "telegram", "", approvalID+" "+status)
 	}
 
 	return response, err

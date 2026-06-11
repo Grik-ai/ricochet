@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	ricochetContext "github.com/igoryan-dao/ricochet/internal/context"
 )
@@ -18,12 +19,15 @@ type Embedder interface {
 
 // Indexer handles the codebase indexing process
 type Indexer struct {
-	mu            sync.RWMutex
-	store         VectorStore
-	provider      Embedder
-	parser        *ricochetContext.LanguageParser
-	workspaceRoot string
-	isIndexing    bool
+	mu             sync.RWMutex
+	store          VectorStore
+	provider       Embedder
+	parser         *ricochetContext.LanguageParser
+	workspaceRoot  string
+	isIndexing     bool
+	lastError      string
+	lastIndexedAt  int64
+	lastDurationMs int64
 }
 
 func NewIndexer(store VectorStore, provider Embedder, workspaceRoot string) *Indexer {
@@ -35,19 +39,43 @@ func NewIndexer(store VectorStore, provider Embedder, workspaceRoot string) *Ind
 	}
 }
 
-// IndexAll performs a full scan of the workspace
-func (idx *Indexer) IndexAll(ctx context.Context) error {
+func (idx *Indexer) SetProvider(provider Embedder) {
 	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.provider = provider
+}
+
+// IndexAll performs a full scan of the workspace
+func (idx *Indexer) IndexAll(ctx context.Context) (returnErr error) {
+	start := time.Now()
+
+	idx.mu.Lock()
+	if idx.provider == nil {
+		returnErr = fmt.Errorf("semantic index disabled: no embedding provider configured")
+		idx.lastError = returnErr.Error()
+		idx.mu.Unlock()
+		return returnErr
+	}
+
 	if idx.isIndexing {
 		idx.mu.Unlock()
 		return fmt.Errorf("indexing already in progress")
 	}
+	provider := idx.provider
 	idx.isIndexing = true
+	idx.lastError = ""
 	idx.mu.Unlock()
 
 	defer func() {
 		idx.mu.Lock()
 		idx.isIndexing = false
+		idx.lastDurationMs = time.Since(start).Milliseconds()
+		if returnErr != nil {
+			idx.lastError = returnErr.Error()
+		} else {
+			idx.lastError = ""
+			idx.lastIndexedAt = time.Now().UnixMilli()
+		}
 		idx.mu.Unlock()
 	}()
 
@@ -116,7 +144,7 @@ func (idx *Indexer) IndexAll(ctx context.Context) error {
 				batchTexts = append(batchTexts, d.Content)
 			}
 
-			embeddings, err := idx.provider.Embed(ctx, batchTexts)
+			embeddings, err := provider.Embed(ctx, batchTexts)
 			if err != nil {
 				return fmt.Errorf("failed to generate embeddings: %w", err)
 			}
@@ -237,6 +265,10 @@ func (idx *Indexer) chunkSimpleWithImports(relPath, content string, imports []st
 }
 
 func (idx *Indexer) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
+	if idx.provider == nil {
+		return nil, fmt.Errorf("semantic search disabled: no embedding provider configured")
+	}
+
 	emb, err := idx.provider.Embed(ctx, []string{query})
 	if err != nil {
 		return nil, err
@@ -281,4 +313,27 @@ func (idx *Indexer) Search(ctx context.Context, query string, limit int) ([]Sear
 	}
 
 	return results, nil
+}
+
+type IndexStatus struct {
+	IsIndexing         bool   `json:"is_indexing"`
+	TotalDocs          int    `json:"total_docs"`
+	ProviderConfigured bool   `json:"provider_configured"`
+	LastIndexedAt      int64  `json:"last_indexed_at,omitempty"`
+	DurationMs         int64  `json:"duration_ms,omitempty"`
+	Error              string `json:"error,omitempty"`
+}
+
+func (idx *Indexer) GetStatus() IndexStatus {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	return IndexStatus{
+		IsIndexing:         idx.isIndexing,
+		TotalDocs:          idx.store.Count(),
+		ProviderConfigured: idx.provider != nil,
+		LastIndexedAt:      idx.lastIndexedAt,
+		DurationMs:         idx.lastDurationMs,
+		Error:              idx.lastError,
+	}
 }

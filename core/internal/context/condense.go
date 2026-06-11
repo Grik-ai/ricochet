@@ -64,6 +64,8 @@ func (cm *CondenseManager) Condense(ctx context.Context, messages []protocol.Mes
 		Messages:     messages,
 		WasCondensed: false,
 	}
+	messages = InjectSyntheticToolResults(messages)
+	result.Messages = messages
 
 	if len(messages) <= cm.KeepRecent {
 		return result, nil
@@ -144,6 +146,78 @@ func stripThinking(text string) string {
 	return text
 }
 
+// InjectSyntheticToolResults keeps provider-facing history valid when a prior
+// compaction, import, or interrupted stream left assistant tool calls without a
+// matching tool result message. The synthetic result is explicit so the model
+// knows the original output is unavailable.
+func InjectSyntheticToolResults(messages []protocol.Message) []protocol.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	resultIDs := make(map[string]bool)
+	for _, msg := range messages {
+		for _, tr := range msg.ToolResults {
+			if tr.ToolUseID != "" {
+				resultIDs[tr.ToolUseID] = true
+			}
+		}
+	}
+
+	out := make([]protocol.Message, 0, len(messages))
+	for _, msg := range messages {
+		out = append(out, msg)
+		if msg.Role != "assistant" || len(msg.ToolUse) == 0 {
+			continue
+		}
+
+		synthetic := make([]protocol.ToolResultBlock, 0)
+		for _, tu := range msg.ToolUse {
+			if tu.ID == "" || resultIDs[tu.ID] {
+				continue
+			}
+			synthetic = append(synthetic, protocol.ToolResultBlock{
+				ToolUseID: tu.ID,
+				Content:   fmt.Sprintf("[Synthetic Ricochet tool result: output for %s was unavailable after context compaction or interrupted execution. Re-run the tool if the exact output is needed.]", tu.Name),
+				IsError:   true,
+			})
+			resultIDs[tu.ID] = true
+		}
+		if len(synthetic) > 0 {
+			out = append(out, protocol.Message{Role: "user", ToolResults: synthetic})
+		}
+	}
+	return out
+}
+
+func ExtractActiveCommandBlocks(messages []protocol.Message) []string {
+	commands := make([]string, 0)
+	for _, msg := range messages {
+		content := msg.Content
+		for {
+			start := strings.Index(content, "<command>")
+			if start == -1 {
+				break
+			}
+			remaining := content[start+len("<command>"):]
+			end := strings.Index(remaining, "</command>")
+			if end == -1 {
+				cmd := strings.TrimSpace(remaining)
+				if cmd != "" {
+					commands = append(commands, cmd)
+				}
+				break
+			}
+			cmd := strings.TrimSpace(remaining[:end])
+			if cmd != "" {
+				commands = append(commands, cmd)
+			}
+			content = remaining[end+len("</command>"):]
+		}
+	}
+	return commands
+}
+
 // buildCondensePrompt creates the prompt for LLM summarization
 func (cm *CondenseManager) buildCondensePrompt(messages []protocol.Message) string {
 	var sb strings.Builder
@@ -199,6 +273,25 @@ Keep the summary concise but informative.
 			for _, tu := range msg.ToolUse {
 				sb.WriteString(fmt.Sprintf("  - Used tool: %s\n", tu.Name))
 			}
+		}
+		if len(msg.ToolResults) > 0 {
+			for _, tr := range msg.ToolResults {
+				preview := stripThinking(tr.Content)
+				if len(preview) > 500 {
+					preview = preview[:500] + "... [tool result truncated for summary prompt]"
+				}
+				sb.WriteString(fmt.Sprintf("  - Tool result for %s: %s\n", tr.ToolUseID, preview))
+			}
+		}
+	}
+
+	if commands := ExtractActiveCommandBlocks(messages); len(commands) > 0 {
+		sb.WriteString("\n=== Active Command Blocks To Preserve ===\n")
+		for _, cmd := range commands {
+			if len(cmd) > 500 {
+				cmd = cmd[:500] + "... [command truncated]"
+			}
+			sb.WriteString("- " + cmd + "\n")
 		}
 	}
 
