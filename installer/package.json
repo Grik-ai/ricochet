@@ -1,0 +1,25 @@
+{
+  "name": "@grik-ai/ricochet-installer",
+  "version": "0.1.0",
+  "description": "Installer for the Ricochet VS Code-compatible extension.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Grik-ai/ricochet.git",
+    "directory": "installer"
+  },
+  "bin": {
+    "ricochet-install": "bin/ricochet-install.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

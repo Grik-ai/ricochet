@@ -3,142 +3,378 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
+  id-token: write
+
+env:
+  NODE_VERSION: "24"
+  EXTENSION_ID: grik.ricochet
+  GITHUB_RELEASE_REPO: Grik-ai/ricochet
+  HOMEBREW_TAP_REPO: grik-ai/homebrew-tap
 
 jobs:
+  validate:
+    name: Validate Release Inputs
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    env:
+      HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
+      HAS_HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+    steps:
+      - name: Resolve Version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+
+          if [[ "${TAG}" == "${VERSION}" ]]; then
+            echo "::error::Release tags must start with v, for example v0.2.0."
+            exit 1
+          fi
+
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag ${TAG} is not a SemVer tag like v0.2.0."
+            exit 1
+          fi
+
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate Channel Secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+
+          if [[ "${HAS_OVSX_PAT}" != "true" ]]; then
+            echo "::error::Missing OVSX_PAT. Create the grik namespace on Open VSX once, then add an Open VSX access token as this repository secret."
+            missing=1
+          fi
+
+          if [[ "${HAS_HOMEBREW_TAP_TOKEN}" != "true" ]]; then
+            echo "::error::Missing HOMEBREW_TAP_TOKEN. Add a GitHub token that can push branches and open PRs in ${HOMEBREW_TAP_REPO}."
+            missing=1
+          fi
+
+          exit "${missing}"
+
+  test:
+    name: Test Release Build
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Test Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd core
+          go test ./...
+
+      - name: Test Webview
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd webview
+          npm ci
+          npm run build
+          npm test -- --run
+
+      - name: Test Extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd extension-vscode
+          npm ci
+          npm run build
+          npm test -- --run
+
+      - name: Test Installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd installer
+          npm test
+
   build-core:
     name: Build Core (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - runner: ubuntu-24.04
             target: linux-x64
             goos: linux
             goarch: amd64
             ext: ""
-          - os: windows-latest
+          - runner: windows-latest
             target: win32-x64
             goos: windows
             goarch: amd64
             ext: ".exe"
-          - os: macos-latest
+          - runner: macos-15-intel
             target: darwin-x64
             goos: darwin
             goarch: amd64
             ext: ""
-          - os: macos-latest
+          - runner: macos-15
             target: darwin-arm64
             goos: darwin
             goarch: arm64
             ext: ""
 
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
 
-      - name: Install Dependencies
+      - name: Add Windows C Toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          cd core
-          go mod download
+          "C:\msys64\mingw64\bin" | Out-File -Append $env:GITHUB_PATH
 
       - name: Build Binary
         shell: bash
         run: |
+          set -euo pipefail
           cd core
-          mkdir -p ../extension-vscode/bin/${{ matrix.target }}
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=1 go build -ldflags="-s -w" -o ../extension-vscode/bin/${{ matrix.target }}/ricochet-core${{ matrix.ext }} ./cmd/ricochet
 
-      - name: Upload Artifact
+          VERSION="${GITHUB_REF_NAME#v}"
+          COMMIT="${GITHUB_SHA::12}"
+          BUILD_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          LDFLAGS="-s -w -X github.com/igoryan-dao/ricochet/internal/version.Version=${VERSION} -X github.com/igoryan-dao/ricochet/internal/version.Commit=${COMMIT} -X github.com/igoryan-dao/ricochet/internal/version.BuildTime=${BUILD_TIME}"
+
+          mkdir -p "../extension-vscode/bin/${{ matrix.target }}"
+          CGO_ENABLED=1 GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" go build \
+            -ldflags="${LDFLAGS}" \
+            -o "../extension-vscode/bin/${{ matrix.target }}/ricochet-core${{ matrix.ext }}" \
+            ./cmd/ricochet
+
+          if [[ "${{ matrix.ext }}" != ".exe" ]]; then
+            chmod +x "../extension-vscode/bin/${{ matrix.target }}/ricochet-core"
+          fi
+
+      - name: Upload Core Artifact
         uses: actions/upload-artifact@v4
         with:
           name: core-${{ matrix.target }}
           path: extension-vscode/bin/${{ matrix.target }}
+          if-no-files-found: error
 
   package-and-release:
-    name: Package Extension & Release
-    needs: build-core
-    runs-on: ubuntu-latest
+    name: Package, Publish, and Release
+    needs:
+      - validate
+      - build-core
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      TAG: ${{ needs.validate.outputs.tag }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
 
       - name: Install Webview Dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           cd webview
           npm ci
 
       - name: Build Webview
+        shell: bash
         run: |
+          set -euo pipefail
           cd webview
           npm run build
 
       - name: Install Extension Dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           cd extension-vscode
           npm ci
 
       - name: Download Core Binaries
         uses: actions/download-artifact@v4
         with:
+          pattern: core-*
           path: extension-vscode/bin
 
       - name: Organize Binaries
+        shell: bash
         run: |
+          set -euo pipefail
           cd extension-vscode/bin
-          # Move artifacts from subfolders to proper structure if needed
-          # download-artifact puts them in folders named by 'name'
-          # e.g. extension-vscode/bin/core-linux-x64/ricochet-core
-          # We need extension-vscode/bin/linux-x64/ricochet-core
-          
+
           mkdir -p linux-x64 win32-x64 darwin-x64 darwin-arm64
-          
-          mv core-linux-x64/* linux-x64/ || true
-          mv core-win32-x64/* win32-x64/ || true
-          mv core-darwin-x64/* darwin-x64/ || true
-          mv core-darwin-arm64/* darwin-arm64/ || true
-          
+          mv core-linux-x64/* linux-x64/
+          mv core-win32-x64/* win32-x64/
+          mv core-darwin-x64/* darwin-x64/
+          mv core-darwin-arm64/* darwin-arm64/
           rm -rf core-*
-          chmod +x */ricochet-core*
+          chmod +x linux-x64/ricochet-core darwin-x64/ricochet-core darwin-arm64/ricochet-core
+
+          test -x linux-x64/ricochet-core
+          test -f win32-x64/ricochet-core.exe
+          test -x darwin-x64/ricochet-core
+          test -x darwin-arm64/ricochet-core
 
       - name: Prepare Package Assets
+        shell: bash
         run: |
-          # Copy README and License to extension folder so vsce sees them
+          set -euo pipefail
           cp README.md extension-vscode/
           cp LICENSE extension-vscode/
           cp GOVERNANCE.md extension-vscode/ || true
-          
-          # Ensure assets exist
-          ls -F extension-vscode/assets/ricochet.png
+          test -f extension-vscode/assets/ricochet.png
 
-      - name: Set Version from Tag
+      - name: Set Package Versions
+        shell: bash
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          echo "Setting version to $VERSION"
+          set -euo pipefail
           cd extension-vscode
-          npm version $VERSION --no-git-tag-version --allow-same-version
+          npm version "${VERSION}" --no-git-tag-version --allow-same-version
+
+          cd ../installer
+          npm version "${VERSION}" --no-git-tag-version --allow-same-version
 
       - name: Package VSIX
+        shell: bash
         run: |
+          set -euo pipefail
           cd extension-vscode
           npm run build
-          npx vsce package --no-dependencies
+          npx @vscode/vsce package --no-dependencies --out "ricochet-${VERSION}.vsix"
 
-      - name: Create Release
+      - name: Create Release Manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd extension-vscode
+
+          VSIX="ricochet-${VERSION}.vsix"
+          SHA256="$(sha256sum "${VSIX}" | awk '{print $1}')"
+
+          {
+            printf '{\n'
+            printf '  "version": "%s",\n' "${VERSION}"
+            printf '  "marketplace_id": "%s",\n' "${EXTENSION_ID}"
+            printf '  "vsix_url": "https://github.com/%s/releases/download/%s/%s",\n' "${GITHUB_REPOSITORY}" "${TAG}" "${VSIX}"
+            printf '  "sha256": "%s",\n' "${SHA256}"
+            printf '  "supported_editors": ["code", "cursor", "windsurf"]\n'
+            printf '}\n'
+          } > latest.json
+
+          cp ../installer/install.sh install.sh
+          sha256sum "${VSIX}" latest.json install.sh > SHA256SUMS
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: extension-vscode/*.vsix
+          files: |
+            extension-vscode/ricochet-*.vsix
+            extension-vscode/latest.json
+            extension-vscode/SHA256SUMS
+            extension-vscode/install.sh
           generate_release_notes: true
+
+      - name: Publish NPM Installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd installer
+          npm publish --access public --provenance
+
+      - name: Publish Open VSX
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd extension-vscode
+          npx ovsx publish "ricochet-${VERSION}.vsix" -p "${OVSX_PAT}"
+
+      - name: Update Homebrew Tap
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TAP_DIR="$(mktemp -d)"
+          BRANCH="ricochet-${TAG}"
+
+          git clone "https://github.com/${HOMEBREW_TAP_REPO}.git" "${TAP_DIR}"
+          mkdir -p "${TAP_DIR}/Formula"
+          cp packaging/homebrew/Formula/ricochet.rb "${TAP_DIR}/Formula/ricochet.rb"
+
+          cd "${TAP_DIR}"
+          perl -0pi -e "s/tag: \"v[^\"]+\"/tag: \"${TAG}\"/" Formula/ricochet.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${BRANCH}"
+          git add Formula/ricochet.rb
+
+          if git diff --cached --quiet; then
+            echo "Homebrew tap is already updated for ${TAG}."
+            exit 0
+          fi
+
+          git commit -m "Update ricochet to ${TAG}"
+          git remote set-url origin "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git"
+          git push --force-with-lease origin "HEAD:${BRANCH}"
+
+          if ! gh pr create \
+            --repo "${HOMEBREW_TAP_REPO}" \
+            --head "${BRANCH}" \
+            --base main \
+            --title "Update ricochet to ${TAG}" \
+            --body "Automated Ricochet release update for ${TAG}."; then
+            EXISTING_PR="$(gh pr list --repo "${HOMEBREW_TAP_REPO}" --head "${BRANCH}" --json url --jq '.[0].url // empty')"
+            if [[ -z "${EXISTING_PR}" ]]; then
+              echo "::error::Failed to create Homebrew tap PR and no existing PR was found for ${BRANCH}."
+              exit 1
+            fi
+            echo "Homebrew tap PR already exists: ${EXISTING_PR}"
+          fi
