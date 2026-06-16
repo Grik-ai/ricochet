@@ -11,12 +11,13 @@ long-lived Marketplace PATs.
 
 ## One-Time Setup
 
-Required GitHub repository secrets:
+Optional GitHub repository secrets:
 
 | Secret | Purpose |
 | --- | --- |
-| `OVSX_PAT` | Open VSX publish token for the `grik` namespace. |
-| `HOMEBREW_TAP_TOKEN` | GitHub token with access to push branches and open PRs in `grik-ai/homebrew-tap`. |
+| `NPM_TOKEN` | npm automation token for publishing `@grik-ai/ricochet-installer`. If missing, npm publish is skipped. |
+| `OVSX_PAT` | Open VSX publish token for the `grik` namespace. If missing, Open VSX publish is skipped. |
+| `HOMEBREW_TAP_TOKEN` | GitHub token with access to push branches and open PRs in `grik-ai/homebrew-tap`. If missing, Homebrew update is skipped. |
 
 Required external setup:
 
@@ -28,9 +29,8 @@ Required external setup:
    the VS Code Marketplace publisher.
 5. Create or confirm the Open VSX namespace `grik`, then add its token as
    `OVSX_PAT`.
-6. Configure npm Trusted Publishing for `@grik-ai/ricochet-installer`:
-   provider `GitHub Actions`, repository `Grik-ai/ricochet`, workflow
-   `.github/workflows/release.yml`, allowed action `npm publish`.
+6. Add `NPM_TOKEN`, or configure npm Trusted Publishing later and update the
+   workflow to use OIDC provenance publishing.
 7. Create or confirm `grik-ai/homebrew-tap` with a `Formula/` directory.
 8. Deploy the Grik frontend route `/ricochet/install`; it serves the latest
    release `install.sh` asset.

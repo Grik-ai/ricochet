@@ -13,5 +13,6 @@ brew install grik-ai/tap/ricochet
 ricochet-install
 ```
 
-The workflow requires the `HOMEBREW_TAP_TOKEN` GitHub Actions secret with access
-to push branches and open pull requests in `grik-ai/homebrew-tap`.
+The workflow uses the `HOMEBREW_TAP_TOKEN` GitHub Actions secret when it is
+configured. Without that secret, GitHub Release creation still succeeds and the
+Homebrew tap update is skipped.

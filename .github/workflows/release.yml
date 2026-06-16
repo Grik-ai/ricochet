@@ -29,6 +29,7 @@ jobs:
     env:
       HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
       HAS_HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
     steps:
       - name: Resolve Version
         id: version
@@ -51,23 +52,25 @@ jobs:
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
 
-      - name: Validate Channel Secrets
+      - name: Report Optional Publish Channels
         shell: bash
         run: |
           set -euo pipefail
-          missing=0
+          echo "OVSX_PAT configured: ${HAS_OVSX_PAT}"
+          echo "NPM_TOKEN configured: ${HAS_NPM_TOKEN}"
+          echo "HOMEBREW_TAP_TOKEN configured: ${HAS_HOMEBREW_TAP_TOKEN}"
 
           if [[ "${HAS_OVSX_PAT}" != "true" ]]; then
-            echo "::error::Missing OVSX_PAT. Create the grik namespace on Open VSX once, then add an Open VSX access token as this repository secret."
-            missing=1
+            echo "::warning::Missing OVSX_PAT. The GitHub Release will still be created, but Open VSX publish will be skipped."
+          fi
+
+          if [[ "${HAS_NPM_TOKEN}" != "true" ]]; then
+            echo "::warning::Missing NPM_TOKEN. The GitHub Release will still be created, but npm publish will be skipped."
           fi
 
           if [[ "${HAS_HOMEBREW_TAP_TOKEN}" != "true" ]]; then
-            echo "::error::Missing HOMEBREW_TAP_TOKEN. Add a GitHub token that can push branches and open PRs in ${HOMEBREW_TAP_REPO}."
-            missing=1
+            echo "::warning::Missing HOMEBREW_TAP_TOKEN. The GitHub Release will still be created, but Homebrew tap PR will be skipped."
           fi
-
-          exit "${missing}"
 
   test:
     name: Test Release Build
@@ -202,8 +205,9 @@ jobs:
     env:
       VERSION: ${{ needs.validate.outputs.version }}
       TAG: ${{ needs.validate.outputs.tag }}
-      OVSX_PAT: ${{ secrets.OVSX_PAT }}
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
+      HAS_HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -321,23 +325,43 @@ jobs:
           generate_release_notes: true
 
       - name: Publish NPM Installer
+        if: env.HAS_NPM_TOKEN == 'true'
         shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           cd installer
-          npm publish --access public --provenance
+          npm publish --access public
+
+      - name: Skip NPM Publish
+        if: env.HAS_NPM_TOKEN != 'true'
+        shell: bash
+        run: |
+          echo "::warning::NPM_TOKEN is not configured; skipping npm publish."
 
       - name: Publish Open VSX
+        if: env.HAS_OVSX_PAT == 'true'
         shell: bash
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
           set -euo pipefail
           cd extension-vscode
           npx ovsx publish "ricochet-${VERSION}.vsix" -p "${OVSX_PAT}"
 
+      - name: Skip Open VSX Publish
+        if: env.HAS_OVSX_PAT != 'true'
+        shell: bash
+        run: |
+          echo "::warning::OVSX_PAT is not configured; skipping Open VSX publish."
+
       - name: Update Homebrew Tap
+        if: env.HAS_HOMEBREW_TAP_TOKEN == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -378,3 +402,9 @@ jobs:
             fi
             echo "Homebrew tap PR already exists: ${EXISTING_PR}"
           fi
+
+      - name: Skip Homebrew Tap Update
+        if: env.HAS_HOMEBREW_TAP_TOKEN != 'true'
+        shell: bash
+        run: |
+          echo "::warning::HOMEBREW_TAP_TOKEN is not configured; skipping Homebrew tap update."
