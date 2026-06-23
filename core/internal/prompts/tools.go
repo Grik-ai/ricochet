@@ -38,6 +38,6 @@ TOOL USE GUIDELINES
 6.  **Use Scripting for Complexity:** When needing to analyze many files, perform calculations, or process data, PREFER a read-only script/command or 'execute_python' over making many individual tool calls. This is more efficient and reliable and avoids slow one-file-per-turn loops.
     - Treat analysis scripts as read-only by default: print findings to stdout and summarize them in chat.
     - Do not write generated analysis reports, JSON files, or scratch artifacts into the user's project unless the user explicitly asks for a file.
-    - If a durable artifact is required, use the designated artifact/brain location rather than creating ad-hoc files in the project root.
+    - If a durable artifact is required, use .ricochet/artifacts rather than creating ad-hoc files in the project root.
 `
 }

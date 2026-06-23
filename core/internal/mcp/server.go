@@ -83,6 +83,14 @@ func (s *Server) SetBridge(c *bridge.Client) {
 func (s *Server) listenBridge() {
 	log.Println("Listening for events from Cloud Bridge...")
 	for event := range s.bridgeClient.Incoming() {
+		if msg := event.GetInboundMessage(); msg != nil {
+			log.Printf("Bridge: Received v2 message from %s: %s", msg.GetEnvelope().GetPlatform(), msg.GetText())
+			if event.SessionId != "" {
+				s.tgBot.SendToSession(event.SessionId, msg.GetText())
+				_ = s.bridgeClient.AckEvent(msg.GetEnvelope().GetEventId(), "received", "")
+			}
+			continue
+		}
 		if msg := event.GetIncomingMessage(); msg != nil {
 			log.Printf("Bridge: Received message from %s: %s", msg.Platform, msg.Body)
 			// Route to session
@@ -365,13 +373,31 @@ func (s *Server) handleNotify(ctx context.Context, request mcp.CallToolRequest) 
 // sendMessage sends a message to the user, routing through bridge if available
 func (s *Server) sendMessage(ctx context.Context, sessionID, text string, buttons [][]telegram.ButtonConfig) error {
 	if s.bridgeClient != nil {
+		buttonRows := make([]*proto.ButtonRow, 0, len(buttons))
+		for _, row := range buttons {
+			buttonRow := &proto.ButtonRow{}
+			for _, btn := range row {
+				buttonRow.Buttons = append(buttonRow.Buttons, &proto.Button{
+					Text: btn.Text,
+					Data: btn.Data,
+				})
+			}
+			if len(buttonRow.Buttons) > 0 {
+				buttonRows = append(buttonRows, buttonRow)
+			}
+		}
 		return s.bridgeClient.Send(&proto.BridgeEvent{
 			SessionId: sessionID,
-			Payload: &proto.BridgeEvent_OutgoingMessage{
-				OutgoingMessage: &proto.OutgoingMessage{
-					ChatId:   s.chatID,
-					Body:     text,
-					Platform: "telegram",
+			Payload: &proto.BridgeEvent_OutboundMessage{
+				OutboundMessage: &proto.OutboundMessage{
+					Envelope: &proto.Envelope{
+						SessionId: sessionID,
+						Platform:  "telegram",
+						ChatId:    s.chatID,
+					},
+					Text:       text,
+					ParseMode:  "HTML",
+					ButtonRows: buttonRows,
 				},
 			},
 		})

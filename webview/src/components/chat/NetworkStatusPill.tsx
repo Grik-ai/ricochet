@@ -34,18 +34,22 @@ function formatPing(value?: number): string {
     return value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${Math.round(value)} ms`;
 }
 
-function statusToneClass(tone: NetworkDisplayStatus['tone']) {
+function statusToneClass(_tone: NetworkDisplayStatus['tone']) {
+    return 'text-vscode-fg/58 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg/84';
+}
+
+function statusIconToneClass(tone: NetworkDisplayStatus['tone']) {
     switch (tone) {
         case 'good':
-            return 'text-emerald-300/85 bg-emerald-500/10 border-emerald-500/15 hover:bg-emerald-500/15';
+            return 'text-emerald-300/82';
         case 'slow':
-            return 'text-amber-200/90 bg-amber-500/10 border-amber-500/20 hover:bg-amber-500/15';
+            return 'text-amber-200/86';
         case 'bad':
-            return 'text-rose-200/90 bg-rose-500/10 border-rose-500/25 hover:bg-rose-500/15';
+            return 'text-rose-200/88';
         case 'working':
-            return 'text-sky-200/90 bg-sky-500/10 border-sky-500/20 hover:bg-sky-500/15';
+            return 'text-sky-200/86';
         default:
-            return 'text-vscode-fg/55 bg-vscode-editor-background border-vscode-border hover:bg-vscode-list-hoverBackground';
+            return 'text-vscode-fg/45';
     }
 }
 
@@ -116,10 +120,12 @@ export function NetworkStatusPill({ status }: { status: NetworkDisplayStatus }) 
             <button
                 type="button"
                 onClick={() => setOpen(prev => !prev)}
-                className={`inline-flex h-6 max-w-full items-center gap-1.5 rounded-md border px-2 text-[11px] leading-none transition-colors ${statusToneClass(status.tone)}`}
+                className={`inline-flex h-6 max-w-full items-center gap-1.5 rounded-md px-1.5 text-[11px] leading-none transition-colors ${statusToneClass(status.tone)}`}
                 title={status.message || 'Network status'}
             >
-                <StatusIcon status={status} />
+                <span className={statusIconToneClass(status.tone)}>
+                    <StatusIcon status={status} />
+                </span>
                 <span className="truncate font-medium">{status.label}</span>
             </button>
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
     Brain,
     CheckCircle,
@@ -9,20 +10,24 @@ import {
     Copy,
     CreditCard,
     Database,
+    ExternalLink,
     Gauge,
     Github,
     Heart,
+    HelpCircle,
     Info,
     Key,
     LayoutGrid,
     Linkedin,
     Loader2,
+    RefreshCw,
     Search,
     Shield,
     ShieldCheck,
     SlidersHorizontal,
     Terminal,
     Twitter,
+    UserCircle,
     XCircle,
 } from 'lucide-react';
 import { RicochetLogo } from '../icons/RicochetLogo';
@@ -36,6 +41,19 @@ import { PermissionsTab } from './PermissionsTab';
 import { useUsage } from '../../hooks/useUsage';
 import { useSessions } from '../../hooks/useSessions';
 import {
+    budgetNumber,
+    entitlementCancelAtPeriodEnd,
+    entitlementCancellationEffectiveAt,
+    entitlementPeriodEnd,
+    formatGrikCredits,
+    formatGrikDate,
+    getPrimaryGrikEntitlement,
+    getRicochetCreditBalance,
+    isHostedSubscriptionAccess,
+    type GrikAccountController,
+    type GrikAccountSummary,
+} from '../../hooks/useGrikAccount';
+import {
     hasUsageData,
     keySourceLabel,
     mergeUsageSnapshots,
@@ -48,6 +66,8 @@ import type { ContextCompactionEventPayload, ContextStatus } from '../../types/p
 
 interface SettingsProps {
     onClose: () => void;
+    initialTab?: string;
+    grikAccount?: GrikAccountController;
 }
 
 interface ModelInfo {
@@ -60,6 +80,13 @@ interface ModelInfo {
     supportsTools: boolean;
     description?: string;
     recommended?: boolean;
+    accessMode?: 'free' | 'byok' | 'subscription';
+    keySource?: 'server' | 'user' | 'hosted' | 'none';
+    requiresSubscription?: boolean;
+    billingSku?: string;
+    limited?: boolean;
+    deprecated?: boolean;
+    apiType?: string;
 }
 
 interface ProviderInfo {
@@ -67,7 +94,8 @@ interface ProviderInfo {
     name: string;
     hasKey: boolean;
     hasUserKey?: boolean;
-    keySource?: 'server' | 'user' | 'none';
+    keySource?: 'server' | 'user' | 'hosted' | 'none';
+    accessMode?: 'free' | 'byok' | 'subscription';
     available: boolean;
     models: ModelInfo[];
 }
@@ -134,6 +162,15 @@ interface SettingsSnapshot {
     terminal: TerminalSettings;
     telegramToken: string;
     telegramChatId: string;
+    discordToken: string;
+    discordApplicationId: string;
+    discordGuildId: string;
+    discordAllowedUserIds: string;
+    discordAllowedChannelIds: string;
+    discordRequireMention: boolean;
+    discordTextMode: boolean;
+    discordTestChannelId: string;
+    allowRemoteSessionStart: boolean;
     contextSettings: ContextSettings;
     autoApproval: AutoApprovalSettings;
     temperature: number;
@@ -152,7 +189,7 @@ const TABS = [
     { id: 'terminal', label: 'Terminal', icon: Terminal, keywords: 'command output terminal limit' },
     { id: 'usage', label: 'Usage', icon: Gauge, keywords: 'tokens cost requests billing usage' },
     { id: 'skills', label: 'Skills', icon: Shield, keywords: 'skills knowledge instructions prompt' },
-    { id: 'integrations', label: 'Integrations', icon: LayoutGrid, keywords: 'ether telegram mcp marketplace bot' },
+    { id: 'integrations', label: 'Integrations', icon: LayoutGrid, keywords: 'ether telegram discord mcp marketplace bot' },
     { id: 'about', label: 'About', icon: Info, keywords: 'version github support donate' },
 ] as const;
 
@@ -161,16 +198,17 @@ type ModelFilter = 'all' | 'free' | 'recommended';
 
 const FALLBACK_MODELS: Record<string, ModelInfo[]> = {
     gemini: [{ id: 'gemini-3-flash', name: 'Gemini 3 Flash', contextWindow: 1_000_000, inputPrice: 0, outputPrice: 0, isFree: true, supportsTools: true, recommended: true }],
-    anthropic: [{ id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4', contextWindow: 200_000, inputPrice: 3, outputPrice: 15, isFree: false, supportsTools: true, recommended: true }],
-    openai: [{ id: 'gpt-4o', name: 'GPT-4o', contextWindow: 128_000, inputPrice: 2.5, outputPrice: 10, isFree: false, supportsTools: true, recommended: true }],
-    xai: [{ id: 'grok-code-fast-1', name: 'Grok Code Fast', contextWindow: 128_000, inputPrice: 0.15, outputPrice: 0.6, isFree: false, supportsTools: true }],
-    deepseek: [{ id: 'deepseek-chat', name: 'DeepSeek V3.2', contextWindow: 128_000, inputPrice: 0.27, outputPrice: 1.1, isFree: false, supportsTools: true, recommended: true }],
-    minimax: [{ id: 'MiniMax-M2.1', name: 'MiniMax M2.1', contextWindow: 200_000, inputPrice: 0.5, outputPrice: 2, isFree: false, supportsTools: true }],
+    anthropic: [{ id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 1_000_000, inputPrice: 3, outputPrice: 15, isFree: false, supportsTools: true, recommended: true, accessMode: 'byok' }],
+    openai: [{ id: 'gpt-5.5', name: 'GPT-5.5', contextWindow: 1_000_000, inputPrice: 5, outputPrice: 30, isFree: false, supportsTools: true, recommended: true, accessMode: 'byok', apiType: 'responses' }],
+    xai: [{ id: 'grok-4.3', name: 'Grok 4.3', contextWindow: 1_000_000, inputPrice: 1.25, outputPrice: 2.5, isFree: false, supportsTools: true, recommended: true, accessMode: 'byok' }],
+    deepseek: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', contextWindow: 1_000_000, inputPrice: 0.14, outputPrice: 0.28, isFree: false, supportsTools: true, recommended: true, accessMode: 'byok' }],
+    minimax: [{ id: 'MiniMax-M3', name: 'MiniMax M3', contextWindow: 1_000_000, inputPrice: 1, outputPrice: 2, isFree: false, supportsTools: true, accessMode: 'byok' }],
     mistral: [
         { id: 'codestral-latest', name: 'Codestral', contextWindow: 32_000, inputPrice: 0, outputPrice: 0, isFree: true, supportsTools: true },
         { id: 'ministral-8b-latest', name: 'Ministral 8B', contextWindow: 128_000, inputPrice: 0, outputPrice: 0, isFree: true, supportsTools: true },
     ],
-    openrouter: [{ id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', contextWindow: 200_000, inputPrice: 3, outputPrice: 15, isFree: false, supportsTools: true }],
+    openrouter: [{ id: 'qwen/qwen3-coder:free', name: 'Qwen 3 Coder (Free)', contextWindow: 262_000, inputPrice: 0, outputPrice: 0, isFree: true, supportsTools: true, recommended: true, accessMode: 'free' }],
+    grik: [{ id: 'openai/gpt-5.5', name: 'GPT-5.5 (Subscription)', contextWindow: 1_000_000, inputPrice: 5, outputPrice: 30, isFree: false, supportsTools: true, recommended: true, accessMode: 'subscription', keySource: 'hosted', requiresSubscription: true, apiType: 'responses' }],
 };
 
 const DEFAULT_AUTO_APPROVAL: AutoApprovalSettings = {
@@ -293,15 +331,33 @@ function formatContextWindow(tokens?: number): string {
 }
 
 function keyStatusLabel(p: ProviderInfo): string {
+    if (p.keySource === 'hosted' || p.accessMode === 'subscription') return 'Subscription';
     if (p.keySource === 'user' || p.hasUserKey) return 'User key';
     if (p.keySource === 'server' || p.hasKey) return 'Server key';
     return 'No key';
 }
 
 function keyStatusTone(p: ProviderInfo): string {
+    if (p.keySource === 'hosted' || p.accessMode === 'subscription') return 'text-violet-300 bg-violet-400/10';
     if (p.keySource === 'user' || p.hasUserKey) return 'text-green-400 bg-green-400/10';
     if (p.keySource === 'server' || p.hasKey) return 'text-blue-400 bg-blue-400/10';
     return 'text-[#888] bg-white/5';
+}
+
+function modelAccessLabel(model: ModelInfo): string {
+    if (model.limited) return 'Limited';
+    if (model.deprecated) return 'Deprecated';
+    if (model.isFree || model.accessMode === 'free') return 'Free';
+    if (model.requiresSubscription || model.accessMode === 'subscription') return 'Subscription';
+    return 'BYOK';
+}
+
+function modelAccessTone(model: ModelInfo): string {
+    if (model.limited) return 'bg-amber-400/10 text-amber-300';
+    if (model.deprecated) return 'bg-red-400/10 text-red-300';
+    if (model.isFree || model.accessMode === 'free') return 'bg-green-400/10 text-green-400';
+    if (model.requiresSubscription || model.accessMode === 'subscription') return 'bg-violet-400/10 text-violet-300';
+    return 'bg-white/5 text-[#999]';
 }
 
 function normalizeContext(value: Partial<ContextSettings>): ContextSettings {
@@ -328,13 +384,179 @@ function stableStringify(value: unknown): string {
     return JSON.stringify(value);
 }
 
-export function Settings({ onClose }: SettingsProps) {
-    const [activeTab, setActiveTab] = useState<TabId>('models');
+function splitDiscordIds(value: string): string[] {
+    return value
+        .split(/[,\s]+/)
+        .map(item => item.trim())
+        .filter(Boolean);
+}
+
+const DISCORD_INSTALL_PERMISSIONS = '311385246720';
+
+export function buildDiscordInstallUrl(applicationId: string): string {
+    const clientId = applicationId.trim();
+    if (!clientId) return '';
+    return `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(clientId)}&permissions=${DISCORD_INSTALL_PERMISSIONS}&scope=bot%20applications.commands`;
+}
+
+export function buildDiscordSetupSteps(applicationId: string): string {
+    const installUrl = buildDiscordInstallUrl(applicationId);
+    return [
+        'Ricochet Discord setup',
+        '',
+        installUrl ? `1. Install the bot in your Discord server: ${installUrl}` : '1. Paste the Discord Application ID in Ricochet Settings, then open the generated install link.',
+        '2. In Ricochet Settings, save the Discord Bot Token and enable Live Mode.',
+        '3. In Discord, run /ricochet new in the server channel where you want Ricochet to work.',
+        '4. Open the Ricochet-created thread and write directly there; no @Ricochet mention is needed inside that thread.',
+        '5. In normal server channels, use /ricochet commands or @Ricochet when Require mention is enabled.',
+        '',
+        'DMs are also supported when Discord allows the user to open a direct message with the bot.',
+    ].join('\n');
+}
+
+function HostedProviderAccess({ provider, account }: { provider: ProviderInfo; account?: GrikAccountController }) {
+    const fallbackSummary: GrikAccountSummary = {
+        label: provider.available ? 'Subscription' : 'Sign in required',
+        detail: 'Hosted Ricochet models use your Grik account subscription.',
+        tone: provider.available ? 'success' : 'idle',
+        actionLabel: provider.available ? 'Manage' : 'Sign in',
+        hostedAccess: provider.available,
+        authenticated: provider.available,
+        accessState: provider.available ? 'available' : 'signed_out',
+        accessLabel: provider.available ? 'Available' : 'Sign in required',
+    };
+    const summary = account?.summary || fallbackSummary;
+    const credits = account ? getRicochetCreditBalance(account.billingState) : null;
+    const entitlement = account ? getPrimaryGrikEntitlement(account.billingState) : null;
+    const cancelingAtPeriodEnd = entitlementCancelAtPeriodEnd(entitlement);
+    const periodEndValue = cancelingAtPeriodEnd ? entitlementCancellationEffectiveAt(entitlement) : entitlementPeriodEnd(entitlement);
+    const periodEnd = periodEndValue ? formatGrikDate(periodEndValue) : '';
+    const windowRemaining = account ? budgetNumber(account.billingState.budget, 'window_remaining', 'windowRemaining') : undefined;
+    const entitlementStatus = String(entitlement?.status || '').toLowerCase();
+    const canManageSubscription = Boolean(account?.authState.authenticated && entitlement?.id && ['active', 'trialing'].includes(entitlementStatus));
+
+    const handlePrimaryAction = () => {
+        if (!account) return;
+        if (summary.hostedAccess) {
+            account.openBilling({ target: 'subscription', product: 'ricochet_code' });
+            return;
+        }
+        if (account.authState.authenticated) {
+            account.openBilling({ target: 'credits', product: 'ricochet_code' });
+            return;
+        }
+        account.signIn();
+    };
+    const handleSubscriptionAction = () => {
+        if (!account || !entitlement?.id) return;
+        if (cancelingAtPeriodEnd) {
+            account.resumeSubscription(entitlement.id);
+            return;
+        }
+        account.cancelSubscription(entitlement.id, 'user_requested');
+    };
+
+    return (
+        <div className="rounded-md bg-white/[0.025] px-3 py-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex items-start gap-3">
+                    <UserCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#9cc7ff]" />
+                    <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-medium text-[#ddd]">Grik account</span>
+                            <span className="text-[10px] text-[#9aa]">{summary.label}</span>
+                        </div>
+                        <p className="mt-1 text-[11px] leading-5 text-[#888]">{summary.detail}</p>
+                        {summary.quotaWarning && (
+                            <p className={`mt-1 text-[11px] leading-5 ${summary.quotaWarning.tone === 'danger' ? 'text-rose-200/85' : 'text-amber-200/85'}`}>
+                                {summary.quotaWarning.label}: {summary.quotaWarning.detail}
+                            </p>
+                        )}
+                    </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={account?.refresh}
+                        disabled={!account || account.isBusy}
+                        className="h-7 w-7 inline-flex items-center justify-center rounded text-[#888] hover:bg-white/[0.05] hover:text-[#ddd] disabled:opacity-50"
+                        title="Refresh Grik account"
+                        aria-label="Refresh Grik account"
+                    >
+                        <RefreshCw className={`h-3.5 w-3.5 ${account?.isBusy ? 'animate-spin' : ''}`} />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={handlePrimaryAction}
+                        disabled={!account}
+                        className="h-7 rounded bg-[#0e639c] px-2.5 text-[11px] font-medium text-white hover:bg-[#1177bb] disabled:opacity-50"
+                    >
+                        {summary.hostedAccess ? 'Manage subscription' : account?.authState.authenticated ? 'Upgrade' : 'Sign in'}
+                    </button>
+                    {canManageSubscription && (
+                        <button
+                            type="button"
+                            onClick={handleSubscriptionAction}
+                            disabled={!account || account.isBusy}
+                            className="h-7 inline-flex items-center gap-1 rounded border border-white/10 px-2.5 text-[11px] font-medium text-[#ccc] hover:border-white/25 hover:bg-white/[0.04] disabled:opacity-50"
+                        >
+                            {cancelingAtPeriodEnd ? <CheckCircle className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+                            {cancelingAtPeriodEnd ? 'Resume plan' : 'Cancel plan'}
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                <ProviderMetric icon={<CreditCard className="h-3.5 w-3.5" />} label="Credits" value={formatGrikCredits(credits?.balance)} />
+                <ProviderMetric label="Access" value={summary.accessLabel} />
+                <ProviderMetric label="Models" value={`${provider.models.length}`} />
+                <ProviderMetric label={cancelingAtPeriodEnd ? 'Ends' : 'Renews / ends'} value={periodEnd || 'Dashboard'} />
+                {windowRemaining !== undefined && <ProviderMetric label="Window left" value={formatGrikCredits(windowRemaining)} />}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] text-[#777]">
+                <span>API keys are not required for hosted Grik models.</span>
+                <button
+                    type="button"
+                    onClick={() => account?.openBilling({ target: 'dashboard' })}
+                    disabled={!account?.authState.authenticated}
+                    className="inline-flex items-center gap-1 text-[#9cc7ff] hover:underline disabled:pointer-events-none disabled:opacity-45"
+                >
+                    <ExternalLink className="h-3 w-3" />
+                    Open Grik dashboard
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function ProviderMetric({ icon, label, value }: { icon?: ReactNode; label: string; value: string }) {
+    return (
+        <div className="rounded bg-white/[0.025] px-2.5 py-2">
+            <div className="flex items-center gap-1.5 text-[10px] text-[#777]">
+                {icon}
+                {label}
+            </div>
+            <div className="mt-1 truncate text-[12px] font-medium text-[#ddd]">{value}</div>
+        </div>
+    );
+}
+
+export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
+    const [activeTab, setActiveTab] = useState<TabId>(
+        TABS.some(tab => tab.id === initialTab) ? initialTab as TabId : 'models'
+    );
     const [settingsSearch, setSettingsSearch] = useState('');
     const [modelSearch, setModelSearch] = useState('');
     const [modelFilter, setModelFilter] = useState<ModelFilter>('recommended');
     const [openProviderIds, setOpenProviderIds] = useState<Set<string>>(new Set());
     const [advancedOpen, setAdvancedOpen] = useState(false);
+
+    useEffect(() => {
+        if (TABS.some(tab => tab.id === initialTab)) {
+            setActiveTab(initialTab as TabId);
+        }
+    }, [initialTab]);
 
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     const [provider, setProvider] = useState<string>('deepseek');
@@ -352,6 +574,19 @@ export function Settings({ onClose }: SettingsProps) {
     const [botInfo, setBotInfo] = useState<BotInfo | null>(null);
     const [isVerifying, setIsVerifying] = useState(false);
     const [testStatus, setTestStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
+    const [discordToken, setDiscordToken] = useState('');
+    const [discordApplicationId, setDiscordApplicationId] = useState('');
+    const [discordGuildId, setDiscordGuildId] = useState('');
+    const [discordAllowedUserIds, setDiscordAllowedUserIds] = useState('');
+    const [discordAllowedChannelIds, setDiscordAllowedChannelIds] = useState('');
+    const [discordRequireMention, setDiscordRequireMention] = useState(true);
+    const [discordTextMode, setDiscordTextMode] = useState(false);
+    const [discordTestChannelId, setDiscordTestChannelId] = useState('');
+    const [discordBotInfo, setDiscordBotInfo] = useState<BotInfo | null>(null);
+    const [isVerifyingDiscord, setIsVerifyingDiscord] = useState(false);
+    const [discordTestStatus, setDiscordTestStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
+    const [discordSetupNotice, setDiscordSetupNotice] = useState<string | null>(null);
+    const [allowRemoteSessionStart, setAllowRemoteSessionStart] = useState(false);
 
     const [autoApproval, setAutoApproval] = useState<AutoApprovalSettings>(DEFAULT_AUTO_APPROVAL);
     const [contextSettings, setContextSettings] = useState<ContextSettings>(DEFAULT_CONTEXT);
@@ -402,6 +637,8 @@ export function Settings({ onClose }: SettingsProps) {
     const activeContextSuggestions = activeContextStatus?.suggestions || activeContextStatus?.report?.suggestions || [];
     const activeCheckpointStatus = activeContextStatus?.checkpoint_status;
     const thresholdPreset = contextThresholdPreset(contextSettings.condense_threshold);
+    const discordInstallUrl = useMemo(() => buildDiscordInstallUrl(discordApplicationId), [discordApplicationId]);
+    const discordSetupSteps = useMemo(() => buildDiscordSetupSteps(discordApplicationId), [discordApplicationId]);
 
     const providerOptions = useMemo<ProviderInfo[]>(() => {
         if (providers.length > 0) return providers;
@@ -441,7 +678,10 @@ export function Settings({ onClose }: SettingsProps) {
                 models,
                 totalCount: p.models.length,
                 freeCount: p.models.filter(item => item.isFree).length,
-                paidCount: p.models.filter(item => !item.isFree).length,
+                subscriptionCount: p.models.filter(item => item.requiresSubscription || item.accessMode === 'subscription').length,
+                limitedCount: p.models.filter(item => item.limited).length,
+                deprecatedCount: p.models.filter(item => item.deprecated).length,
+                paidCount: p.models.filter(item => !item.isFree && item.accessMode !== 'subscription').length,
             };
         });
 
@@ -470,6 +710,15 @@ export function Settings({ onClose }: SettingsProps) {
         terminal,
         telegramToken,
         telegramChatId,
+        discordToken,
+        discordApplicationId,
+        discordGuildId,
+        discordAllowedUserIds,
+        discordAllowedChannelIds,
+        discordRequireMention,
+        discordTextMode,
+        discordTestChannelId,
+        allowRemoteSessionStart,
         contextSettings: normalizeContext(contextSettings),
         autoApproval: normalizeAutoApproval(autoApproval),
         temperature,
@@ -496,6 +745,15 @@ export function Settings({ onClose }: SettingsProps) {
         setProvider(nextProvider);
         setModel(nextModel);
         setOpenProviderIds(prev => new Set(prev).add(nextProvider));
+    };
+
+    const copyDiscordSetupText = async (text: string, label: string) => {
+        try {
+            await navigator.clipboard.writeText(text);
+            setDiscordSetupNotice(`${label} copied.`);
+        } catch (error) {
+            setDiscordSetupNotice(error instanceof Error ? error.message : `Could not copy ${label.toLowerCase()}.`);
+        }
     };
 
     const toggleProviderGroup = (providerId: string) => {
@@ -558,6 +816,15 @@ export function Settings({ onClose }: SettingsProps) {
                     terminal: loadedTerminal,
                     telegramToken: (s.telegramToken as string) || '',
                     telegramChatId: s.telegramChatId ? String(s.telegramChatId) : '',
+                    discordToken: (s.discordToken as string) || '',
+                    discordApplicationId: (s.discordApplicationId as string) || '',
+                    discordGuildId: (s.discordGuildId as string) || '',
+                    discordAllowedUserIds: Array.isArray(s.discordAllowedUserIds) ? (s.discordAllowedUserIds as string[]).join(', ') : '',
+                    discordAllowedChannelIds: Array.isArray(s.discordAllowedChannelIds) ? (s.discordAllowedChannelIds as string[]).join(', ') : '',
+                    discordRequireMention: Boolean(s.discordRequireMention ?? true),
+                    discordTextMode: Boolean(s.discordTextMode ?? false),
+                    discordTestChannelId: '',
+                    allowRemoteSessionStart: Boolean(s.allowRemoteSessionStart ?? false),
                     contextSettings: loadedContext,
                     autoApproval: loadedAutoApproval,
                     temperature: Number(s.temperature ?? 0),
@@ -572,6 +839,15 @@ export function Settings({ onClose }: SettingsProps) {
                 setTerminal(snapshot.terminal);
                 setTelegramToken(snapshot.telegramToken);
                 setTelegramChatId(snapshot.telegramChatId);
+                setDiscordToken(snapshot.discordToken);
+                setDiscordApplicationId(snapshot.discordApplicationId);
+                setDiscordGuildId(snapshot.discordGuildId);
+                setDiscordAllowedUserIds(snapshot.discordAllowedUserIds);
+                setDiscordAllowedChannelIds(snapshot.discordAllowedChannelIds);
+                setDiscordRequireMention(snapshot.discordRequireMention);
+                setDiscordTextMode(snapshot.discordTextMode);
+                setDiscordTestChannelId(snapshot.discordTestChannelId);
+                setAllowRemoteSessionStart(snapshot.allowRemoteSessionStart);
                 setContextSettings(snapshot.contextSettings);
                 setAutoApproval(snapshot.autoApproval);
                 setTemperature(snapshot.temperature);
@@ -592,6 +868,14 @@ export function Settings({ onClose }: SettingsProps) {
             if (message.type === 'test_telegram_result') {
                 const result = message.payload as { ok: boolean };
                 setTestStatus(result.ok ? 'success' : 'error');
+            }
+            if (message.type === 'discord_bot_verification_result') {
+                setDiscordBotInfo(message.payload as BotInfo);
+                setIsVerifyingDiscord(false);
+            }
+            if (message.type === 'test_discord_result') {
+                const result = message.payload as { ok: boolean };
+                setDiscordTestStatus(result.ok ? 'success' : 'error');
             }
             if (message.type === 'mcp_servers') {
                 const result = message.payload as { servers: any[] };
@@ -636,6 +920,18 @@ export function Settings({ onClose }: SettingsProps) {
         return () => clearTimeout(timeout);
     }, [postMessage, telegramToken]);
 
+    useEffect(() => {
+        if (!discordToken || discordToken.length < 20) {
+            setDiscordBotInfo(null);
+            return;
+        }
+        const timeout = setTimeout(() => {
+            setIsVerifyingDiscord(true);
+            postMessage({ type: 'verify_discord_token', payload: { token: discordToken } });
+        }, 500);
+        return () => clearTimeout(timeout);
+    }, [discordToken, postMessage]);
+
     const saveSnapshot = () => {
         const snapshot = buildSnapshot();
         postMessage({
@@ -648,6 +944,14 @@ export function Settings({ onClose }: SettingsProps) {
                 terminal: snapshot.terminal,
                 telegramToken: snapshot.telegramToken,
                 telegramChatId: snapshot.telegramChatId ? parseInt(snapshot.telegramChatId, 10) : 0,
+                discordToken: snapshot.discordToken,
+                discordApplicationId: snapshot.discordApplicationId,
+                discordGuildId: snapshot.discordGuildId,
+                discordAllowedUserIds: splitDiscordIds(snapshot.discordAllowedUserIds),
+                discordAllowedChannelIds: splitDiscordIds(snapshot.discordAllowedChannelIds),
+                discordRequireMention: snapshot.discordRequireMention,
+                discordTextMode: snapshot.discordTextMode,
+                allowRemoteSessionStart: snapshot.allowRemoteSessionStart,
                 context: snapshot.contextSettings,
                 auto_approval: snapshot.autoApproval,
                 temperature: snapshot.temperature,
@@ -668,6 +972,15 @@ export function Settings({ onClose }: SettingsProps) {
         setTerminal(snapshot.terminal);
         setTelegramToken(snapshot.telegramToken);
         setTelegramChatId(snapshot.telegramChatId);
+        setDiscordToken(snapshot.discordToken);
+        setDiscordApplicationId(snapshot.discordApplicationId);
+        setDiscordGuildId(snapshot.discordGuildId);
+        setDiscordAllowedUserIds(snapshot.discordAllowedUserIds);
+        setDiscordAllowedChannelIds(snapshot.discordAllowedChannelIds);
+        setDiscordRequireMention(snapshot.discordRequireMention);
+        setDiscordTextMode(snapshot.discordTextMode);
+        setDiscordTestChannelId(snapshot.discordTestChannelId);
+        setAllowRemoteSessionStart(snapshot.allowRemoteSessionStart);
         setContextSettings(snapshot.contextSettings);
         setAutoApproval(snapshot.autoApproval);
         setTemperature(snapshot.temperature);
@@ -837,7 +1150,7 @@ export function Settings({ onClose }: SettingsProps) {
                                             <SelectContent>
                                                 {providerOptions.map(p => (
                                                     <SelectItem key={p.id} value={p.id}>
-                                                        {p.name} {p.available ? '' : '(no key)'}
+                                                        {p.name} {p.available ? '' : isHostedSubscriptionAccess(p.accessMode, p.keySource) ? '(sign in)' : '(no key)'}
                                                     </SelectItem>
                                                 ))}
                                             </SelectContent>
@@ -925,7 +1238,10 @@ export function Settings({ onClose }: SettingsProps) {
                                                     <span className="flex shrink-0 flex-wrap justify-end gap-1.5 text-[10px]">
                                                         <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">{group.models.length}/{group.totalCount} models</span>
                                                         {group.freeCount > 0 && <span className="rounded bg-green-400/10 px-1.5 py-0.5 text-green-400">{group.freeCount} free</span>}
-                                                        {group.paidCount > 0 && <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">{group.paidCount} paid</span>}
+                                                        {group.subscriptionCount > 0 && <span className="rounded bg-violet-400/10 px-1.5 py-0.5 text-violet-300">{group.subscriptionCount} sub</span>}
+                                                        {group.limitedCount > 0 && <span className="rounded bg-amber-400/10 px-1.5 py-0.5 text-amber-300">{group.limitedCount} limited</span>}
+                                                        {group.deprecatedCount > 0 && <span className="rounded bg-red-400/10 px-1.5 py-0.5 text-red-300">{group.deprecatedCount} old</span>}
+                                                        {group.paidCount > 0 && <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">{group.paidCount} byok</span>}
                                                         <span className={`rounded px-1.5 py-0.5 ${keyStatusTone(group.provider)}`}>{keyStatusLabel(group.provider)}</span>
                                                     </span>
                                                 </button>
@@ -951,9 +1267,24 @@ export function Settings({ onClose }: SettingsProps) {
                                                                             </div>
                                                                             <div className="mt-3 flex flex-wrap gap-1.5 text-[10px]">
                                                                                 <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">{formatContextWindow(item.contextWindow)} ctx</span>
-                                                                                <span className={`rounded px-1.5 py-0.5 ${item.isFree ? 'bg-green-400/10 text-green-400' : 'bg-white/5 text-[#999]'}`}>
-                                                                                    {item.isFree ? 'Free' : `$${item.inputPrice}/${item.outputPrice}`}
+                                                                                <span className={`rounded px-1.5 py-0.5 ${modelAccessTone(item)}`}>
+                                                                                    {modelAccessLabel(item)}
                                                                                 </span>
+                                                                                {!item.isFree && item.inputPrice > 0 && (
+                                                                                    <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">
+                                                                                        ${item.inputPrice}/${item.outputPrice}
+                                                                                    </span>
+                                                                                )}
+                                                                                {item.apiType && (
+                                                                                    <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">
+                                                                                        {item.apiType}
+                                                                                    </span>
+                                                                                )}
+                                                                                {item.deprecated && (
+                                                                                    <span className="rounded bg-red-400/10 px-1.5 py-0.5 text-red-300">
+                                                                                        deprecated
+                                                                                    </span>
+                                                                                )}
                                                                                 <span className={`rounded px-1.5 py-0.5 ${item.supportsTools ? 'bg-blue-400/10 text-blue-400' : 'bg-white/5 text-[#999]'}`}>
                                                                                     {item.supportsTools ? 'Tools' : 'No tools'}
                                                                                 </span>
@@ -1037,31 +1368,40 @@ export function Settings({ onClose }: SettingsProps) {
                     {activeTab === 'providers' && (
                         <div className="mx-auto max-w-3xl space-y-5">
                             <section>
-                                <h3 className="text-xs font-medium uppercase tracking-wide text-[#888]">Provider Keys</h3>
-                                <p className="mt-1 text-[11px] text-[#777]">Server keys work without BYOK. User keys override server keys for that provider.</p>
+                                <h3 className="text-xs font-medium uppercase tracking-wide text-[#888]">Provider Access</h3>
+                                <p className="mt-1 text-[11px] text-[#777]">Hosted subscription providers use account sign in. BYOK providers still use local API keys.</p>
                             </section>
                             <div className="space-y-3">
-                                {providerOptions.map(p => (
-                                    <details key={p.id} className="rounded border border-white/10 bg-white/[0.03] p-3" open={p.id === provider}>
-                                        <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-                                            <span className="flex min-w-0 items-center gap-2">
-                                                <span className={`h-2 w-2 rounded-full ${p.available ? 'bg-green-500' : 'bg-[#555]'}`} />
-                                                <span className="truncate text-sm font-medium text-[#ddd]">{p.name}</span>
-                                            </span>
-                                            <span className={`shrink-0 rounded px-2 py-0.5 text-[10px] ${keyStatusTone(p)}`}>{keyStatusLabel(p)}</span>
-                                        </summary>
-                                        <div className="mt-3 space-y-2">
-                                            <Input
-                                                type="password"
-                                                value={apiKeys[p.id] || ''}
-                                                onChange={(event) => setApiKeys(prev => ({ ...prev, [p.id]: event.target.value }))}
-                                                placeholder={`Enter ${p.name} API key`}
-                                                className="text-xs"
-                                            />
-                                            <p className="text-[10px] text-[#777]">{p.models.length} models listed. Empty user key falls back to server key when available.</p>
-                                        </div>
-                                    </details>
-                                ))}
+                                {providerOptions.map(p => {
+                                    const usesAccount = isHostedSubscriptionAccess(p.accessMode, p.keySource);
+                                    return (
+                                        <details key={p.id} className="rounded border border-white/10 bg-white/[0.03] p-3" open={p.id === provider || usesAccount}>
+                                            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                                                <span className="flex min-w-0 items-center gap-2">
+                                                    <span className={`h-2 w-2 rounded-full ${p.available ? 'bg-green-500' : 'bg-[#555]'}`} />
+                                                    <span className="truncate text-sm font-medium text-[#ddd]">{p.name}</span>
+                                                </span>
+                                                <span className={`shrink-0 rounded px-2 py-0.5 text-[10px] ${keyStatusTone(p)}`}>{keyStatusLabel(p)}</span>
+                                            </summary>
+                                            <div className="mt-3 space-y-2">
+                                                {usesAccount ? (
+                                                    <HostedProviderAccess provider={p} account={grikAccount} />
+                                                ) : (
+                                                    <>
+                                                        <Input
+                                                            type="password"
+                                                            value={apiKeys[p.id] || ''}
+                                                            onChange={(event) => setApiKeys(prev => ({ ...prev, [p.id]: event.target.value }))}
+                                                            placeholder={`Enter ${p.name} API key`}
+                                                            className="text-xs"
+                                                        />
+                                                        <p className="text-[10px] text-[#777]">{p.models.length} models listed. Empty user key falls back to server key when available.</p>
+                                                    </>
+                                                )}
+                                            </div>
+                                        </details>
+                                    );
+                                })}
                             </div>
                         </div>
                     )}
@@ -1618,8 +1958,27 @@ export function Settings({ onClose }: SettingsProps) {
                                 <div className="rounded border border-white/10 bg-white/[0.03] p-3">
                                     <div className="flex items-start gap-2">
                                         <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#888]" />
-                                        <p className="text-xs text-[#888]">Ether lets you control Ricochet from Telegram when you are away from your computer.</p>
+                                        <p className="text-xs text-[#888]">Ether Gateway lets Telegram and Discord control Ricochet through sent messages and explicit button actions. It does not read drafts or typing in other apps.</p>
                                     </div>
+                                </div>
+                                <div className="rounded border border-white/10 bg-white/[0.03] p-3">
+                                    <label className="flex items-start gap-3">
+                                        <input
+                                            type="checkbox"
+                                            checked={allowRemoteSessionStart}
+                                            onChange={(event) => setAllowRemoteSessionStart(event.target.checked)}
+                                            className="mt-0.5"
+                                        />
+                                        <span className="min-w-0">
+                                            <span className="flex items-center gap-1.5 text-xs font-medium text-[#ddd]">
+                                                <span>Allow remote messages to wake Ether and start sessions</span>
+                                                <span title="When disabled, Telegram and Discord can only control already linked sessions. /new or first unbound sent messages will be rejected.">
+                                                    <HelpCircle className="h-3 w-3 text-[#777]" />
+                                                </span>
+                                            </span>
+                                            <span className="mt-1 block text-[11px] leading-relaxed text-[#888]">Keep this off until Telegram chat IDs or Discord user/channel allowlists are set. Remote start uses sent messages only, never draft text or typing activity.</span>
+                                        </span>
+                                    </label>
                                 </div>
                                 <div className="space-y-2">
                                     <label className="text-xs text-[#888]">Telegram Bot Token</label>
@@ -1650,6 +2009,131 @@ export function Settings({ onClose }: SettingsProps) {
                                     </div>
                                     {testStatus === 'success' && <div className="flex items-center gap-2 text-xs text-green-400"><CheckCircle className="h-3 w-3" /><span>Test message sent.</span></div>}
                                     {testStatus === 'error' && <div className="flex items-center gap-2 text-xs text-red-400"><XCircle className="h-3 w-3" /><span>Failed to send. Check Chat ID.</span></div>}
+                                </div>
+                                <div className="space-y-3 border-t border-[#333] pt-4">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div className="flex items-center gap-2">
+                                            <h4 className="text-xs font-medium uppercase tracking-wide text-[#888]">Discord</h4>
+                                            <span title="Install Ricochet into a Discord server, then use /ricochet new to create a session thread. Server channels require /ricochet commands or @Ricochet when Require mention is enabled. Ricochet-created threads and DMs accept direct text. Allowed User IDs use Discord user IDs; Allowed Channel IDs use the channel ID or parent channel ID for threads.">
+                                                <HelpCircle className="h-3.5 w-3.5 text-[#777]" />
+                                            </span>
+                                        </div>
+                                        {discordBotInfo?.ok && <span className="text-[10px] text-[#777]">Installed separately through Discord OAuth link</span>}
+                                    </div>
+                                    <div className="rounded border border-[#5865f2]/25 bg-[#5865f2]/10 p-3">
+                                        <div className="flex items-start gap-2">
+                                            <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#9aa3ff]" />
+                                            <div className="min-w-0 flex-1 space-y-2">
+                                                <p className="text-xs text-[#d9dcff]">Best path: install bot to your Discord server, run <span className="font-mono">/ricochet new</span>, then write directly in the created thread.</p>
+                                                <div className="flex flex-wrap gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => discordInstallUrl && postMessage({ type: 'open_external', payload: { url: discordInstallUrl } })}
+                                                        disabled={!discordInstallUrl}
+                                                        title={discordInstallUrl ? 'Open Discord bot install flow' : 'Paste the Discord Application ID from Discord Developer Portal first.'}
+                                                        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded bg-[#5865f2] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#6c75f4] disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                        <ExternalLink className="h-3 w-3" />
+                                                        Install in Discord
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => discordInstallUrl && copyDiscordSetupText(discordInstallUrl, 'Install URL')}
+                                                        disabled={!discordInstallUrl}
+                                                        title={discordInstallUrl ? 'Copy generated Discord install URL' : 'Paste the Discord Application ID first.'}
+                                                        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-[#ddd] transition-colors hover:bg-white/[0.07] disabled:cursor-not-allowed disabled:opacity-50"
+                                                    >
+                                                        <Copy className="h-3 w-3" />
+                                                        Copy Install URL
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => copyDiscordSetupText(discordSetupSteps, 'Setup steps')}
+                                                        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-[#ddd] transition-colors hover:bg-white/[0.07]"
+                                                    >
+                                                        <Copy className="h-3 w-3" />
+                                                        Copy My Setup Steps
+                                                    </button>
+                                                </div>
+                                                {discordSetupNotice && <div className="text-[11px] text-[#9aa3ff]">{discordSetupNotice}</div>}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-xs text-[#888]">Discord Bot Token</label>
+                                        <Input type="password" value={discordToken} onChange={(event) => setDiscordToken(event.target.value)} placeholder="Bot token from Discord Developer Portal" />
+                                        {isVerifyingDiscord && <div className="flex items-center gap-2 text-xs text-blue-400"><Loader2 className="h-3 w-3 animate-spin" /><span>Verifying Discord token...</span></div>}
+                                        {discordBotInfo && !isVerifyingDiscord && (
+                                            <div className={`flex items-center gap-2 text-xs ${discordBotInfo.ok ? 'text-green-400' : 'text-red-400'}`}>
+                                                {discordBotInfo.ok ? <CheckCircle className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+                                                <span>{discordBotInfo.ok ? `Connected: @${discordBotInfo.username} (${discordBotInfo.firstName})` : discordBotInfo.error}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="grid gap-3 md:grid-cols-2">
+                                        <div className="space-y-2">
+                                            <label className="flex items-center gap-1.5 text-xs text-[#888]">
+                                                <span>Discord Application ID</span>
+                                                <span title="Required for the Install in Discord link. Copy it from Discord Developer Portal → Applications → Ricochet → General Information.">
+                                                    <HelpCircle className="h-3 w-3 text-[#777]" />
+                                                </span>
+                                            </label>
+                                            <Input value={discordApplicationId} onChange={(event) => setDiscordApplicationId(event.target.value)} placeholder="optional" />
+                                        </div>
+                                        <div className="space-y-2">
+                                            <label className="text-xs text-[#888]">Discord Guild ID</label>
+                                            <Input value={discordGuildId} onChange={(event) => setDiscordGuildId(event.target.value)} placeholder="optional server restriction" />
+                                        </div>
+                                    </div>
+                                    <div className="grid gap-3 md:grid-cols-2">
+                                        <div className="space-y-2">
+                                            <label className="text-xs text-[#888]">Allowed Discord User IDs</label>
+                                            <Input value={discordAllowedUserIds} onChange={(event) => setDiscordAllowedUserIds(event.target.value)} placeholder="comma separated, blank allows all" />
+                                        </div>
+                                        <div className="space-y-2">
+                                            <label className="text-xs text-[#888]">Allowed Discord Channel IDs</label>
+                                            <Input value={discordAllowedChannelIds} onChange={(event) => setDiscordAllowedChannelIds(event.target.value)} placeholder="comma separated, blank allows all" />
+                                        </div>
+                                    </div>
+                                    {allowRemoteSessionStart && (
+                                        <div className="rounded border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
+                                            Remote session start is enabled. Sent Telegram or Discord messages can wake Ether and start agent sessions. Use chat restrictions and user/channel allowlists so only trusted people can control this IDE.
+                                        </div>
+                                    )}
+                                    <div className="flex flex-wrap gap-4 text-xs text-[#ccc]">
+                                        <label className="flex items-center gap-2">
+                                            <input type="checkbox" checked={discordRequireMention} onChange={(event) => setDiscordRequireMention(event.target.checked)} />
+                                            <span>Require mention in guild text mode</span>
+                                        </label>
+                                        <label className="flex items-center gap-2">
+                                            <input type="checkbox" checked={discordTextMode} onChange={(event) => setDiscordTextMode(event.target.checked)} />
+                                            <span>Enable ordinary message text mode</span>
+                                        </label>
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="flex items-center gap-1.5 text-xs text-[#888]">
+                                            <span>Discord Test Channel ID</span>
+                                            <span title="Use a channel or thread where the installed bot can Send Messages. For Ricochet-created threads, the parent channel can be allowlisted.">
+                                                <HelpCircle className="h-3 w-3 text-[#777]" />
+                                            </span>
+                                        </label>
+                                        <div className="flex gap-2">
+                                            <Input value={discordTestChannelId} onChange={(event) => setDiscordTestChannelId(event.target.value)} placeholder="channel id for test message" className="flex-1" />
+                                            <button
+                                                onClick={() => {
+                                                    if (!discordToken || !discordTestChannelId) return;
+                                                    setDiscordTestStatus('sending');
+                                                    postMessage({ type: 'test_discord', payload: { token: discordToken, channelId: discordTestChannelId } });
+                                                }}
+                                                disabled={!discordToken || !discordTestChannelId || discordTestStatus === 'sending'}
+                                                className="whitespace-nowrap rounded bg-[#5865f2] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#6c75f4] disabled:cursor-not-allowed disabled:opacity-50"
+                                            >
+                                                {discordTestStatus === 'sending' ? '...' : 'Send Test'}
+                                            </button>
+                                        </div>
+                                        {discordTestStatus === 'success' && <div className="flex items-center gap-2 text-xs text-green-400"><CheckCircle className="h-3 w-3" /><span>Discord test message sent.</span></div>}
+                                        {discordTestStatus === 'error' && <div className="flex items-center gap-2 text-xs text-red-400"><XCircle className="h-3 w-3" /><span>Failed to send. Check bot permissions and channel ID.</span></div>}
+                                    </div>
                                 </div>
                             </section>
                             <section className="space-y-4 border-t border-[#333] pt-6">

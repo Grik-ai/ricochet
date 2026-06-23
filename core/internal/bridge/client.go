@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
@@ -22,6 +23,7 @@ type Client struct {
 	sessionID string
 	session   *yamux.Session
 	grpcConn  *grpc.ClientConn
+	rpcCtx    context.Context
 
 	bridgeClient proto.BridgeServiceClient
 	chatClient   proto.ChatServiceClient
@@ -29,6 +31,7 @@ type Client struct {
 
 	eventStream proto.ChatService_StreamEventsClient
 	incomingCh  chan *proto.BridgeEvent
+	streamDone  chan error
 }
 
 func NewClient(cloudURL, sessionID string) *Client {
@@ -81,9 +84,11 @@ func (c *Client) Start(ctx context.Context) error {
 	// Add auth secret to metadata
 	secret := os.Getenv("RICOCHET_BRIDGE_SECRET")
 	ctx = metadata.AppendToOutgoingContext(ctx, "x-bridge-secret", secret)
+	ctx = metadata.AppendToOutgoingContext(ctx, "x-ricochet-session-id", c.sessionID)
 	if accessToken := os.Getenv("GRIKAI_ACCESS_TOKEN"); accessToken != "" {
 		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+accessToken)
 	}
+	c.rpcCtx = ctx
 
 	// 1. Handshake
 	resp, err := c.bridgeClient.Handshake(ctx, &proto.HandshakeRequest{
@@ -105,6 +110,7 @@ func (c *Client) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("stream events failed: %w", err)
 	}
+	c.streamDone = make(chan error, 1)
 
 	// Start listening for incoming events
 	go c.listenLoop()
@@ -117,9 +123,40 @@ func (c *Client) listenLoop() {
 		event, err := c.eventStream.Recv()
 		if err != nil {
 			log.Printf("Bridge stream closed: %v", err)
+			if c.streamDone != nil {
+				c.streamDone <- err
+			}
 			return
 		}
 		c.incomingCh <- event
+	}
+}
+
+func (c *Client) Run(ctx context.Context) {
+	backoff := time.Second
+	for {
+		if err := c.Start(ctx); err != nil {
+			log.Printf("Cloud bridge connection failed: %v", err)
+		} else {
+			backoff = time.Second
+			select {
+			case <-ctx.Done():
+				c.Close()
+				return
+			case <-c.streamDone:
+				c.Close()
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			c.Close()
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
 	}
 }
 
@@ -127,11 +164,39 @@ func (c *Client) Send(event *proto.BridgeEvent) error {
 	// For backward compatibility, we still have Send, but it should ideally use SendMessage
 	// If the payload is an outgoing message, we route it to chatClient
 	if msg := event.GetOutgoingMessage(); msg != nil {
-		_, err := c.chatClient.SendMessage(context.Background(), msg)
+		ctx := c.rpcCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		_, err := c.chatClient.SendMessage(ctx, msg)
+		return err
+	}
+	if msg := event.GetOutboundMessage(); msg != nil {
+		ctx := c.rpcCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		_, err := c.chatClient.SendOutbound(ctx, msg)
 		return err
 	}
 
 	return fmt.Errorf("direct send of event type not implemented via ChatService yet")
+}
+
+func (c *Client) AckEvent(eventID, status, errorText string) error {
+	if eventID == "" {
+		return nil
+	}
+	ctx := c.rpcCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, err := c.chatClient.AckEvent(ctx, &proto.DeliveryAck{
+		EventId: eventID,
+		Status:  status,
+		Error:   errorText,
+	})
+	return err
 }
 
 func (c *Client) Incoming() <-chan *proto.BridgeEvent {

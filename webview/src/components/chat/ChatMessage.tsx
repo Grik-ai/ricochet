@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef, memo } from 'react';
-import { ChatMessage as ChatMessageType, ToolCall, ActivityItem, WorkEvent, WorkSummary, normalizeWorkCommentaryText } from '@hooks/useChat';
+import { ChatMessage as ChatMessageType, ToolCall, ActivityItem, ActivityEntry, WorkEvent, WorkSummary, QueuedTurnState, normalizeWorkCommentaryText } from '@hooks/useChat';
 import { useVSCodeApi } from '@hooks/useVSCodeApi';
 import { DiffView, parseDiff, FileDiff, DiffLine } from '../diff/DiffView';
 import ReactMarkdown from 'react-markdown';
@@ -12,6 +12,10 @@ import {
     isRenderableChatMessage
 } from '../../utils/chatVisibility';
 import { FileGlyph } from '../common/FileGlyph';
+import { MessengerIcon, messengerLabel } from './MessengerIcon';
+import type { ContextFilePayload } from '../../types/protocol';
+import { ChangedFilesSummary, type ChangedFileItem } from './ChangedFilesSummary';
+import { Folder, Search } from 'lucide-react';
 
 // --- Types ---
 
@@ -24,6 +28,105 @@ const parseContent = (content: string) => {
         artifacts: [] as any[]
     };
 };
+
+function basename(path = '') {
+    return path.replace(/\\/g, '/').split('/').filter(Boolean).pop() || path;
+}
+
+export function formatTimelineLineRange(raw?: string): string {
+    const value = (raw || '').trim().replace(/^#/, '');
+    if (!value) return '';
+    const range = value.match(/^L?(\d+)\s*[-–—:]\s*L?(\d+)$/i);
+    if (range) return `L${range[1]}-L${range[2]}`;
+    const single = value.match(/^L?(\d+)$/i);
+    if (single) return `L${single[1]}`;
+    return value.startsWith('L') ? value : `L${value}`;
+}
+
+const TimelineGlyph = ({
+    path,
+    type,
+    size = 'sm',
+}: {
+    path?: string;
+    type: 'folder' | 'file' | 'search';
+    size?: 'xs' | 'sm';
+}) => {
+    if (type === 'folder') {
+        return (
+            <span
+                aria-hidden="true"
+                title={path || 'folder'}
+                className="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center text-sky-300/90 drop-shadow-[0_0_8px_rgba(125,211,252,0.16)]"
+            >
+                <Folder className="h-[15px] w-[15px] stroke-[1.9]" />
+            </span>
+        );
+    }
+
+    if (type === 'search') {
+        return (
+            <span
+                aria-hidden="true"
+                title={path || 'search'}
+                className="inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center text-blue-300/80"
+            >
+                <Search className="h-[14px] w-[14px] stroke-[1.9]" />
+            </span>
+        );
+    }
+
+    return <FileGlyph path={path} type={type} size={size} />;
+};
+
+export function extractLegacyContextFiles(content: string): { content: string; contextFiles: ContextFilePayload[] } {
+    const lines = (content || '').split(/\r?\n/);
+    const contextFiles: ContextFilePayload[] = [];
+    const kept: string[] = [];
+    let inContextBlock = false;
+
+    lines.forEach(line => {
+        const trimmed = line.trim();
+        if (!inContextBlock && /^Context Files:?$/i.test(trimmed)) {
+            inContextBlock = true;
+            return;
+        }
+        if (inContextBlock) {
+            if (!trimmed) return;
+            if (trimmed.startsWith('@')) {
+                const path = trimmed.slice(1).trim();
+                if (path) {
+                    contextFiles.push({
+                        path,
+                        name: basename(path),
+                        kind: 'file',
+                        source: path.includes('.ricochet/attachments/') ? 'attachment' : 'workspace',
+                    });
+                }
+                return;
+            }
+            inContextBlock = false;
+        }
+        kept.push(line);
+    });
+
+    return {
+        content: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
+        contextFiles,
+    };
+}
+
+function contextFileDisplayName(file: ContextFilePayload): string {
+    return file.name || basename(file.stagedPath || file.path) || 'attachment';
+}
+
+function contextFileMeta(file: ContextFilePayload): string {
+    const details = [
+        file.source === 'attachment' ? 'Attachment' : 'Workspace file',
+        file.size && file.size > 0 ? `${Math.round(file.size / 1024)} KB` : '',
+    ].filter(Boolean);
+    return details.join(' · ');
+}
 
 const splitMessageIntoBlocks = (text: string) => {
     const blocks: { type: 'text' | 'thinking', content: string }[] = [];
@@ -55,7 +158,15 @@ const splitMessageIntoBlocks = (text: string) => {
 
 // --- Sub-components ---
 
-const CopyButton = ({ code }: { code: string }) => {
+const CopyButton = ({
+    code,
+    title = 'Copy code',
+    className = '',
+}: {
+    code: string;
+    title?: string;
+    className?: string;
+}) => {
     const [copied, setCopied] = useState(false);
     const handleCopy = (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -67,8 +178,9 @@ const CopyButton = ({ code }: { code: string }) => {
     return (
         <button
             onClick={handleCopy}
-            className="flex h-6 w-6 items-center justify-center rounded text-vscode-fg/45 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg/80"
-            title={copied ? 'Copied' : 'Copy code'}
+            className={`flex h-6 w-6 items-center justify-center rounded text-vscode-fg/45 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg/80 ${className}`}
+            title={copied ? 'Copied' : title}
+            aria-label={copied ? 'Copied' : title}
         >
             {copied ? <span className="codicon codicon-check w-3 h-3 text-green-400" /> : <span className="codicon codicon-copy w-3 h-3" />}
         </button>
@@ -95,7 +207,7 @@ export const ThinkingRow = memo(({ content, active = false }: { content: string;
                 <span className={`codicon codicon-chevron-right ml-auto text-[11px] text-vscode-fg/35 transition-transform duration-200 ease-out motion-reduce:transition-none ${expanded ? 'rotate-90' : ''}`} />
             </button>
             <AnimatedDisclosure open={expanded}>
-                <div className="ml-4 mt-1 border-l border-vscode-border/45 pl-2">
+                <div className="ml-4 mt-1 rounded-md bg-vscode-input-bg/18 px-2 py-1.5">
                     <pre className="custom-scrollbar max-h-[180px] overflow-auto whitespace-pre-wrap break-words font-sans text-[11.5px] leading-[1.5] text-vscode-fg/50">
                         {trimmed}
                     </pre>
@@ -191,11 +303,24 @@ const useVSCodeThemeKind = () => {
 };
 
 export const looksLikePathReference = (line: string) => {
-    const trimmed = line.trim().replace(/^`|`$/g, '').replace(/,$/, '');
+    const trimmed = line.trim().replace(/^`|`$/g, '').replace(/^<|>$/g, '').replace(/,$/, '');
     if (!trimmed) return false;
+    if (/^https?:\/\/\S+$/i.test(trimmed)) return true;
+    if (/^[\w@.-]+\/$/.test(trimmed)) return true;
     if (/^[./~\w@-]+(?:[\\/][.\w@ -]+)+\/?$/.test(trimmed)) return true;
-    return /^[\w@.-]+(?:\.(?:rs|go|ts|tsx|js|jsx|json|md|toml|yaml|yml|py|sh|css|html))(?::\d+)?$/.test(trimmed);
+    return /^[\w@.-]+(?:\.(?:rs|go|ts|tsx|js|jsx|mjs|cjs|json|md|mdx|toml|yaml|yml|py|sh|bash|zsh|css|scss|sass|html|htm|sql|db|sqlite|sqlite3|lock))(?::\d+)?$/i.test(trimmed);
 };
+
+function looksLikeUrlReference(line: string) {
+    return /^https?:\/\/\S+$/i.test(line.trim().replace(/^<|>$/g, '').replace(/,$/, ''));
+}
+
+function inlineReference(ref: string) {
+    const cleaned = ref.trim().replace(/^`|`$/g, '').replace(/^<|>$/g, '').replace(/,$/, '');
+    if (!cleaned) return ref;
+    if (looksLikeUrlReference(cleaned)) return `<${cleaned}>`;
+    return `\`${cleaned}\``;
+}
 
 export const looksLikeIdentifierReference = (line: string) => {
     const trimmed = line.trim().replace(/^`|`$/g, '').replace(/,$/, '');
@@ -207,12 +332,17 @@ export const normalizeParenthesizedPathReferences = (text: string) => {
     return text.replace(/\(\s*\n[ \t]*(?:`([^`\n]+)`|([^()\n]+?))[ \t]*\n[ \t]*\)/g, (match, backtickedPath, rawPath) => {
         const path = String(backtickedPath || rawPath || '').trim().replace(/,$/, '');
         if (!looksLikePathReference(path)) return match;
-        return `(\`${path}\`)`;
+        return `(${inlineReference(path)})`;
     });
 };
 
 export const normalizeBrokenReferenceLines = (text: string) => {
     return text
+        .replace(/(^|\n)([ \t]*(?:[-*+]\s+|\d+\.\s+)?[^:\n]{1,96}:\s*)\n[ \t]*(?:`([^`\n]+)`|([^`\n]+))[ \t]*\n[ \t]*[-–—]\s+/g, (match, lineStart, label, backtickedRef, rawRef) => {
+            const ref = String(backtickedRef || rawRef || '').trim();
+            const labelWithSpace = /\s$/.test(label) ? label : `${label} `;
+            return looksLikePathReference(ref) ? `${lineStart}${labelWithSpace}${inlineReference(ref)} - ` : match;
+        })
         .replace(/(^|\n)([ \t]*(?:[-*+]\s+|\d+\.\s+)?)(`[^`\n]{1,140}`)\s*\n[ \t]*(:\s*)/g, '$1$2$3$4')
         .replace(/(^|\n)([ \t]*(?:[-*+]\s+|\d+\.\s+)?)([./~\w@-]+(?:[\\/][.\w@ -]+)+(?:\.[A-Za-z0-9]+)?\/?)\s*\n[ \t]*(:\s*)/g, (_match, lineStart, prefix, ref, colon) => {
             return looksLikePathReference(ref) ? `${lineStart}${prefix}\`${ref}\`${colon}` : _match;
@@ -428,18 +558,26 @@ const CodeBlock = memo(({ language, code, onExecuteCommand }: { language: string
 const InlineCode = ({ children, ...props }: { children: React.ReactNode }) => {
     const value = String(children).trim();
     const isPath = looksLikePathReference(value);
-    const isIdentifier = looksLikeIdentifierReference(value);
     return (
         <code
-            className="inline-flex max-w-full items-center gap-1 rounded-md bg-vscode-input-bg/70 px-1.5 py-0.5 align-baseline font-mono text-[0.92em] text-vscode-fg/80"
-            title={isPath || isIdentifier ? value : undefined}
+            className="inline rounded-md bg-vscode-input-bg/70 px-1.5 py-0.5 align-baseline box-decoration-clone font-mono text-[0.92em] text-vscode-fg/80"
+            title={isPath ? value : undefined}
             {...props}
         >
-            {isPath && <FileGlyph path={value} type={value.endsWith('/') ? 'folder' : 'file'} size="xs" />}
-            {!isPath && isIdentifier && <FileGlyph path={value} type="symbol" size="xs" mono />}
-            <span className="min-w-0 truncate">{children}</span>
+            {isPath && <FileGlyph path={value} type={value.endsWith('/') ? 'folder' : 'file'} size="xs" className="mr-1 align-[-0.15em]" />}
+            {children}
         </code>
     );
+};
+
+const isInlineMarkdownCode = (inline: unknown, className: string | undefined, node: any, code: string) => {
+    if (typeof inline === 'boolean') return inline;
+    if (className) return false;
+    const position = node?.position;
+    if (position?.start?.line && position?.end?.line) {
+        return position.start.line === position.end.line;
+    }
+    return !code.includes('\n');
 };
 
 const MarkdownContent = memo(({ content, onExecuteCommand }: { content: string; onExecuteCommand?: (cmd: string) => void }) => {
@@ -451,7 +589,7 @@ const MarkdownContent = memo(({ content, onExecuteCommand }: { content: string; 
             const match = /language-(\w+)/.exec(className || '');
             const codeString = String(children).replace(/\n$/, '');
 
-            if (!inline) {
+            if (!isInlineMarkdownCode(inline, className, node, codeString)) {
                 return (
                     <CodeBlock
                         language={match ? match[1] : 'text'}
@@ -529,11 +667,12 @@ const TimelineMarkdownContent = memo(({ content }: { content: string }) => {
     const normalizedContent = useMemo(() => normalizeAssistantMarkdown(content), [content]);
 
     const components = useMemo(() => ({
-        code: ({ inline, children, ...props }: any) => {
-            if (!inline) {
+        code: ({ node, inline, className, children, ...props }: any) => {
+            const codeString = String(children).replace(/\n$/, '');
+            if (!isInlineMarkdownCode(inline, className, node, codeString)) {
                 return (
                     <pre className="my-1.5 max-h-[180px] overflow-auto rounded-md bg-vscode-editor-background px-2 py-1.5 font-mono text-[11px] leading-[1.45] text-vscode-fg/68">
-                        <code {...props}>{String(children).replace(/\n$/, '')}</code>
+                        <code {...props}>{codeString}</code>
                     </pre>
                 );
             }
@@ -542,15 +681,15 @@ const TimelineMarkdownContent = memo(({ content }: { content: string }) => {
                 <InlineCode {...props}>{children}</InlineCode>
             );
         },
-        p: ({ children }: any) => <p className="mb-1.5 last:mb-0 leading-[1.5] text-vscode-fg/76">{children}</p>,
-        ul: ({ children }: any) => <ul className="mb-1.5 ml-4 list-disc space-y-0.5 last:mb-0">{children}</ul>,
-        ol: ({ children }: any) => <ol className="mb-1.5 ml-4 list-decimal space-y-0.5 last:mb-0">{children}</ol>,
-        li: ({ children }: any) => <li className="pl-0.5 leading-[1.45] text-vscode-fg/74">{children}</li>,
-        h1: ({ children }: any) => <h1 className="mb-1.5 mt-2 text-[12.5px] font-semibold text-vscode-fg/82 first:mt-0">{children}</h1>,
-        h2: ({ children }: any) => <h2 className="mb-1.5 mt-2 text-[12px] font-semibold text-vscode-fg/80 first:mt-0">{children}</h2>,
-        h3: ({ children }: any) => <h3 className="mb-1 mt-1.5 text-[11.5px] font-semibold text-vscode-fg/76 first:mt-0">{children}</h3>,
-        strong: ({ children }: any) => <strong className="font-semibold text-vscode-fg/88">{children}</strong>,
-        em: ({ children }: any) => <em className="text-vscode-fg/70">{children}</em>,
+        p: ({ children }: any) => <p className="mb-1.5 last:mb-0 leading-[1.5] text-vscode-fg/58">{children}</p>,
+        ul: ({ children }: any) => <ul className="mb-1.5 ml-4 list-disc space-y-0.5 text-vscode-fg/58 last:mb-0">{children}</ul>,
+        ol: ({ children }: any) => <ol className="mb-1.5 ml-4 list-decimal space-y-0.5 text-vscode-fg/58 last:mb-0">{children}</ol>,
+        li: ({ children }: any) => <li className="pl-0.5 leading-[1.45] text-vscode-fg/56">{children}</li>,
+        h1: ({ children }: any) => <h1 className="mb-1.5 mt-2 text-[12.5px] font-semibold text-vscode-fg/64 first:mt-0">{children}</h1>,
+        h2: ({ children }: any) => <h2 className="mb-1.5 mt-2 text-[12px] font-semibold text-vscode-fg/62 first:mt-0">{children}</h2>,
+        h3: ({ children }: any) => <h3 className="mb-1 mt-1.5 text-[11.5px] font-semibold text-vscode-fg/60 first:mt-0">{children}</h3>,
+        strong: ({ children }: any) => <strong className="font-semibold text-vscode-fg/68">{children}</strong>,
+        em: ({ children }: any) => <em className="text-vscode-fg/54">{children}</em>,
         a: ({ node, ...props }: any) => {
             const href = props.href || '';
             const isFile = href.startsWith('file:') || href.startsWith('/') || looksLikePathReference(href);
@@ -568,7 +707,7 @@ const TimelineMarkdownContent = memo(({ content }: { content: string }) => {
             );
         },
         blockquote: ({ children }: any) => (
-            <blockquote className="my-1.5 border-l border-vscode-border pl-2 text-vscode-fg/58">
+            <blockquote className="my-1.5 rounded-md bg-vscode-input-bg/20 px-2 py-1 text-vscode-fg/52">
                 {children}
             </blockquote>
         ),
@@ -591,16 +730,38 @@ export const CompletionMarkdownCard = memo(({ content, onExecuteCommand }: { con
     if (!trimmed) return null;
 
     return (
-        <div className="my-1.5 overflow-hidden rounded-md border border-vscode-border bg-vscode-input-bg/28 shadow-[0_1px_0_rgba(255,255,255,0.025)]" data-testid="completion-markdown-card">
-            <div className="flex items-center gap-2 px-3 py-2">
+        <div className="ricochet-result-card ricochet-result-card--completed my-1.5 overflow-hidden rounded-lg" data-testid="completion-markdown-card">
+            <div className="ricochet-result-card__header flex items-center gap-2 px-3 py-2">
                 <span className="flex h-[18px] w-[18px] items-center justify-center rounded-full text-emerald-300/80">
                     <span className="codicon codicon-check text-[12px]" />
                 </span>
                 <div className="min-w-0 flex-1 text-[12px] font-semibold leading-5 text-vscode-fg/78">Task completed</div>
                 <CopyButton code={trimmed} />
             </div>
-            <div className="border-t border-vscode-border/45 px-3 pb-3 pt-2">
+            <div className="ricochet-result-card__body px-3 pb-3 pt-1.5">
                 <div className="prose prose-sm max-w-none text-vscode-fg/88 [&_p]:text-[12.75px] [&_li]:text-[12.75px] [&_h1]:mt-1 [&_h2]:mt-2">
+                    <MarkdownContent content={trimmed} onExecuteCommand={onExecuteCommand} />
+                </div>
+            </div>
+        </div>
+    );
+});
+
+export const DraftMarkdownCard = memo(({ content, onExecuteCommand }: { content: string; onExecuteCommand?: (cmd: string) => void }) => {
+    const trimmed = content.trim();
+    if (!trimmed) return null;
+
+    return (
+        <div className="ricochet-result-card ricochet-result-card--draft my-1.5 overflow-hidden rounded-lg" data-testid="draft-result-card">
+            <div className="ricochet-result-card__header flex items-center gap-2 px-3 py-2">
+                <span className="flex h-[18px] w-[18px] items-center justify-center rounded-full text-vscode-fg/52">
+                    <span className="codicon codicon-edit text-[12px]" />
+                </span>
+                <div className="min-w-0 flex-1 text-[12px] font-semibold leading-5 text-vscode-fg/66">Interim answer</div>
+                <CopyButton code={trimmed} title="Copy interim answer" className="opacity-55 hover:opacity-100" />
+            </div>
+            <div className="ricochet-result-card__body px-3 pb-3 pt-1.5">
+                <div className="prose prose-sm max-w-none text-vscode-fg/78 [&_p]:text-[12.75px] [&_li]:text-[12.75px] [&_h1]:mt-1 [&_h2]:mt-2">
                     <MarkdownContent content={trimmed} onExecuteCommand={onExecuteCommand} />
                 </div>
             </div>
@@ -665,7 +826,7 @@ export const WorkedStatus = ({
             </button>
 
             {expanded && (
-                <div className="mt-1.5 ml-1 border-l border-vscode-border pl-3 flex flex-col gap-1.5 animate-in fade-in slide-in-from-left-2 duration-300">
+                <div className="mt-1.5 ml-1 rounded-md bg-vscode-input-bg/25 px-2 py-1.5 flex flex-col gap-1.5 ricochet-message-enter">
                     <div className="flex flex-col gap-1">
                         {children}
                     </div>
@@ -677,65 +838,194 @@ export const WorkedStatus = ({
 
 
 
-export const TerminalBlock = ({ command, result, status, isBackground }: { command: string, result?: string, status: string, isBackground?: boolean }) => {
-    const [expanded, setExpanded] = useState(false);
+export const ProcessEventBlock = ({
+    command,
+    output,
+    status,
+    isBackground,
+    cwd,
+    shell,
+    script,
+    scriptLabel = 'Script',
+    outputLabel = 'Output',
+    exitCode,
+    durationMs,
+    actionLabel,
+    defaultExpanded,
+}: {
+    command: string;
+    output?: string;
+    status?: string;
+    isBackground?: boolean;
+    cwd?: string;
+    shell?: string;
+    script?: string;
+    scriptLabel?: string;
+    outputLabel?: string;
+    exitCode?: number;
+    durationMs?: number;
+    actionLabel?: string;
+    defaultExpanded?: boolean;
+}) => {
+    const isRunning = status === 'running';
+    const isWaiting = status === 'waiting';
+    const isFailed = status === 'failed' || status === 'error' || (typeof exitCode === 'number' && exitCode !== 0);
+    const userToggledRef = useRef(false);
     const [copied, setCopied] = useState(false);
-    const workspacePath = '~/GRIKAI/Ricochet'; // Placeholder, could be dynamic
-    const hasOutput = Boolean((result || '').trim());
+    const trimmedCommand = command.trim();
+    const trimmedOutput = (output || '').trimEnd();
+    const trimmedScript = (script || '').trimEnd();
+    const hasDetails = Boolean(trimmedOutput || trimmedScript || isRunning || cwd || shell);
+    const inferredShell = shell || (/^python(?:3)?\b|<script>/i.test(trimmedCommand) ? 'python' : 'bash');
+    const shellLabel = inferredShell === 'python' ? 'python' : inferredShell === 'bash' || inferredShell === 'sh' ? 'bash' : inferredShell;
+    const initialExpanded = defaultExpanded ?? (isRunning || isWaiting || isFailed);
+    const [expanded, setExpanded] = useState(initialExpanded);
+    const friendlyCommand = (() => {
+        if (/retrieve_context_original/i.test(trimmedCommand)) return 'Context retrieval';
+        if (/^graph_status\b/i.test(trimmedCommand)) return 'Command graph_status';
+        if (isBackground) return `Background ${trimmedCommand}`;
+        if (actionLabel && actionLabel !== 'Command' && actionLabel !== 'Python script') return actionLabel;
+        return trimmedCommand;
+    })();
+    const statusLabel = isWaiting
+        ? 'Waiting for approval'
+        : isRunning
+            ? 'Running'
+            : isFailed
+                ? typeof exitCode === 'number' ? `Failed exit ${exitCode}` : 'Failed'
+                : typeof durationMs === 'number' && durationMs > 0
+                    ? `Completed ${formatWorkDuration(durationMs)}`
+                    : 'Completed';
+    const statusTone = isWaiting ? 'text-blue-300/70' : isRunning ? 'text-vscode-fg/56' : isFailed ? 'text-rose-300/78' : 'text-vscode-fg/44';
+    const cardTone = isWaiting
+        ? 'ricochet-command-card--waiting'
+        : isRunning
+            ? 'ricochet-command-card--running'
+            : isFailed
+                ? 'ricochet-command-card--failed'
+                : 'ricochet-command-card--completed';
+    const copyText = [trimmedCommand, trimmedScript, trimmedOutput].filter(Boolean).join('\n\n');
 
     const handleCopy = (e: React.MouseEvent) => {
         e.stopPropagation();
-        navigator.clipboard.writeText(command);
+        navigator.clipboard.writeText(copyText || trimmedCommand);
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
     };
 
+    useEffect(() => {
+        if (isRunning && !userToggledRef.current) setExpanded(true);
+    }, [isRunning]);
+
+    if (!trimmedCommand) return null;
+
     return (
-        <div className="flex flex-col gap-1 my-1 w-full max-w-[98%]">
+        <div data-testid="ricochet-process-event" className={`ricochet-command-card ${cardTone} my-1.5 w-full max-w-full rounded-lg px-2.5 py-2 text-[12px]`}>
             <button
-                onClick={() => setExpanded(!expanded)}
-                className="flex items-center gap-2 px-2 py-1.5 transition-colors text-left group hover:bg-vscode-list-hoverBackground rounded-md"
+                type="button"
+                disabled={!hasDetails}
+                aria-expanded={hasDetails ? expanded : undefined}
+                onClick={() => {
+                    if (!hasDetails) return;
+                    userToggledRef.current = true;
+                    setExpanded(open => !open);
+                }}
+                className={`flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors ${hasDetails ? 'hover:bg-vscode-list-hoverBackground/30' : 'cursor-default'}`}
             >
-                <span className="text-[10px] text-vscode-fg/45 font-medium">
-                    {isBackground ? 'Ran background command' : 'Ran command'}
+                <span className={`codicon ${isRunning ? 'codicon-loading codicon-modifier-spin' : isWaiting ? 'codicon-shield' : isFailed ? 'codicon-error' : 'codicon-terminal'} shrink-0 text-[13px] ${isWaiting ? 'text-blue-300/65' : isFailed ? 'text-rose-300/70' : 'text-vscode-fg/42'}`} />
+                <span className="shrink-0 font-mono text-[11.5px] font-semibold text-vscode-fg/50">
+                    {shellLabel}
                 </span>
-                <span className={`codicon codicon-chevron-down w-3 h-3 text-vscode-fg/30 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+                <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] leading-5 text-vscode-fg/74">
+                    {friendlyCommand}
+                </span>
+                <span className={`shrink-0 text-[10.5px] font-medium ${statusTone}`}>
+                    {statusLabel}
+                </span>
+                {hasDetails && (
+                    <span className={`codicon codicon-chevron-right shrink-0 text-[11px] text-vscode-fg/32 transition-transform duration-200 ease-out motion-reduce:transition-none ${expanded ? 'rotate-90' : ''}`} />
+                )}
             </button>
 
-            {expanded && (
-                <div className="flex flex-col bg-vscode-input-bg rounded-md border border-vscode-border overflow-hidden shadow-sm animate-in zoom-in-95 duration-200">
-                    {/* Header/Prompt Line */}
-                    <div className="flex items-center gap-2 px-3 py-2.5 bg-vscode-editor-background border-b border-vscode-border">
-                        <div className="flex items-center gap-2 font-mono text-[11.5px] flex-1 truncate">
-                            <span className="text-vscode-fg/45">{workspacePath} $</span>
-                            <span className="text-vscode-fg/75 truncate">{command}</span>
-                        </div>
-                        <button onClick={handleCopy} className="ml-2 p-1.5 hover:bg-vscode-list-hoverBackground rounded transition-colors">
-                            {copied ? <span className="codicon codicon-check text-emerald-400 w-3.5 h-3.5" /> : <span className="codicon codicon-copy text-vscode-fg/45 w-3.5 h-3.5" />}
-                        </button>
+            {hasDetails && (
+                <AnimatedDisclosure open={expanded} className="mt-1">
+                    <div className="space-y-2 px-1 pb-1 pt-1">
+                        {(cwd || shell) && (
+                            <div className="flex min-w-0 flex-wrap items-center gap-2 px-1 text-[10px] text-vscode-fg/34">
+                                <span className="font-medium">{shellLabel}</span>
+                                {cwd && <span className="min-w-0 truncate font-mono">{cwd}</span>}
+                            </div>
+                        )}
+                        {trimmedScript && (
+                            <div className="ricochet-command-card__panel rounded-md px-2.5 py-2">
+                                <div className="mb-1 flex items-center gap-2">
+                                    <span className="text-[10px] font-medium text-vscode-fg/36">{scriptLabel}</span>
+                                    <span className="ml-auto" />
+                                    <button
+                                        type="button"
+                                        onClick={handleCopy}
+                                        className="flex h-5 w-5 items-center justify-center rounded text-vscode-fg/38 hover:bg-vscode-list-hoverBackground/45 hover:text-vscode-fg/70"
+                                        title={copied ? 'Copied' : 'Copy'}
+                                    >
+                                        {copied ? <span className="codicon codicon-check text-[12px]" /> : <span className="codicon codicon-copy text-[12px]" />}
+                                    </button>
+                                </div>
+                                <pre className="custom-scrollbar max-h-[260px] overflow-auto whitespace-pre-wrap break-words font-mono text-[10.5px] leading-[1.45] text-vscode-fg/58 selection:bg-vscode-editor-selectionBackground">
+                                    {trimmedScript}
+                                </pre>
+                            </div>
+                        )}
+                        {(trimmedOutput || isRunning) && (
+                            <div className="ricochet-command-card__panel rounded-md px-2.5 py-2">
+                                <div className="mb-1 flex items-center gap-2">
+                                    <span className="text-[10px] font-medium text-vscode-fg/36">{outputLabel}</span>
+                                    <span className="ml-auto" />
+                                    {!trimmedScript && (
+                                        <button
+                                            type="button"
+                                            onClick={handleCopy}
+                                            className="flex h-5 w-5 items-center justify-center rounded text-vscode-fg/38 hover:bg-vscode-list-hoverBackground/45 hover:text-vscode-fg/70"
+                                            title={copied ? 'Copied' : 'Copy'}
+                                        >
+                                            {copied ? <span className="codicon codicon-check text-[12px]" /> : <span className="codicon codicon-copy text-[12px]" />}
+                                        </button>
+                                    )}
+                                </div>
+                                <pre className="custom-scrollbar max-h-[360px] overflow-auto whitespace-pre-wrap break-words font-mono text-[11.5px] leading-[1.5] text-vscode-fg/64 selection:bg-vscode-editor-selectionBackground">
+                                    {trimmedOutput || 'Waiting for output...'}
+                                </pre>
+                            </div>
+                        )}
+                        {!trimmedScript && !trimmedOutput && !isRunning && (
+                            <div className="flex justify-end px-1">
+                                <button
+                                    type="button"
+                                    onClick={handleCopy}
+                                    className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-vscode-fg/38 hover:bg-vscode-list-hoverBackground/45 hover:text-vscode-fg/68"
+                                >
+                                    {copied ? <span className="codicon codicon-check text-[12px]" /> : <span className="codicon codicon-copy text-[12px]" />}
+                                    {copied ? 'Copied' : 'Copy'}
+                                </button>
+                            </div>
+                        )}
                     </div>
-
-                    {(hasOutput || status === 'running') && (
-                        <div className="p-3 font-mono text-[11px] leading-relaxed text-vscode-fg/65 whitespace-pre-wrap break-all custom-scrollbar max-h-[400px] overflow-y-auto selection:bg-vscode-editor-selectionBackground">
-                            {hasOutput ? result : "Running..."}
-                        </div>
-                    )}
-
-                    {/* Footer */}
-                    <div className="flex items-center justify-between px-3 py-2 bg-vscode-editor-background border-t border-vscode-border text-[9.5px] font-medium text-vscode-fg/35">
-                        <div className="flex items-center gap-1.5 hover:text-vscode-fg/60 cursor-pointer transition-colors">
-                            <span>Always run</span>
-                            <span className="codicon codicon-chevron-up w-3 h-3" />
-                        </div>
-                        <div className="flex items-center gap-2">
-                            {status === 'error' && <span className="text-rose-500/50">Command Failed</span>}
-                            {status !== 'running' && <span>{status === 'error' ? '✕ Failed' : '✓ Success'}</span>}
-                            {status === 'running' && <span>Running...</span>}
-                        </div>
-                    </div>
-                </div>
+                </AnimatedDisclosure>
             )}
         </div>
+    );
+};
+
+export const TerminalBlock = ({ command, result, status, isBackground, cwd }: { command: string, result?: string, status: string, isBackground?: boolean, cwd?: string }) => {
+    return (
+        <ProcessEventBlock
+            command={command}
+            output={result}
+            status={status}
+            isBackground={isBackground}
+            cwd={cwd}
+            actionLabel={isBackground ? 'Background command' : 'Command'}
+            defaultExpanded={status === 'running'}
+        />
     );
 };
 
@@ -752,7 +1042,6 @@ export const ToolRow = ({ tool, hideSummary = false, pendingPermission, onRespon
 
     // If pending permission, we show diff by default
     const [showDiff, setShowDiff] = useState((isEdit && tool.status === 'completed') || !!pendingPermission);
-    const [showDropdown, setShowDropdown] = useState(false);
 
     const args = useMemo(() => {
         try { return typeof tool.arguments === 'string' ? JSON.parse(tool.arguments) : tool.arguments; } catch { return {}; }
@@ -761,12 +1050,15 @@ export const ToolRow = ({ tool, hideSummary = false, pendingPermission, onRespon
     const path = args.TargetFile || args.path || args.AbsolutePath || args.file || args.query || "";
     const fileName = path?.split('/').pop() || path;
     const diff = isEdit ? getToolDiff(tool, args) : null;
+    const toolArgsText = typeof tool.arguments === 'string'
+        ? tool.arguments
+        : JSON.stringify(tool.arguments || {}, null, 2);
 
     if (tool.name === 'command_status' && typeof args.id === 'string' && args.id.startsWith('agent-')) {
         return (
             <div className="my-0.5 ml-1 flex items-center gap-2 text-[10px] text-vscode-fg/42">
                 <span className="codicon codicon-radio-tower w-3 h-3" />
-                <span>Checked worker {args.id}</span>
+                <span>Checked agent {args.id}</span>
             </div>
         );
     }
@@ -778,6 +1070,7 @@ export const ToolRow = ({ tool, hideSummary = false, pendingPermission, onRespon
                 result={tool.result}
                 status={tool.status}
                 isBackground={tool.name.includes('background') || tool.name.includes('async')}
+                cwd={args.cwd || args.Cwd || args.workingDirectory || args.working_directory}
             />
         );
     }
@@ -815,40 +1108,22 @@ export const ToolRow = ({ tool, hideSummary = false, pendingPermission, onRespon
 
     // Default detailed layout for tools
     return (
-        <div className="flex flex-col gap-1 my-1 ml-1 w-full max-w-[95%]">
-            <button
-                onClick={() => setShowDropdown(!showDropdown)}
-                className="flex items-center gap-2 px-2 py-1.5 bg-vscode-editor-background hover:bg-vscode-list-hoverBackground rounded border border-vscode-border transition-colors w-full text-left group"
-            >
-                <div className="flex items-center gap-2">
-                    <span className={`text-[12px] font-medium ${tool.status === 'running' ? 'text-blue-400' : 'text-vscode-fg/70'}`}>
-                        {tool.name === 'write_scratchpad' ? 'Saved notes' : tool.name === 'read_scratchpad' ? 'Read notes' : tool.name.includes('search') ? 'Searched' : 'Ran'}
-                    </span>
-                    <span className="font-mono text-[11px] truncate max-w-[200px] text-vscode-fg/90">{tool.name}</span>
-                </div>
-
-                <div className="ml-auto flex items-center gap-2 shrink-0">
-                    {tool.status === 'running' && <span className="codicon codicon-loading codicon-modifier-spin text-blue-400 w-3 h-3" />}
-                    {tool.status === 'completed' && <span className="codicon codicon-pass text-vscode-fg/30 w-3 h-3 group-hover:text-vscode-fg/60 transition-colors" />}
-                    {tool.status === 'error' && <span className="codicon codicon-error text-red-500/70 w-3 h-3" />}
-                    {showDropdown ? <span className="codicon codicon-chevron-up w-3 h-3 text-vscode-fg/30" /> : <span className="codicon codicon-chevron-down w-3 h-3 text-vscode-fg/30" />}
-                </div>
-            </button>
-
-            {showDropdown && (
-                <div className="p-2.5 border-l-2 border-vscode-widget-border/30 ml-2 mt-0.5 text-[11px] font-mono rounded-r bg-vscode-input-bg">
-                    <div className="text-vscode-fg/40 mb-1 select-none font-bold tracking-wider uppercase text-[9px]">Input Payload</div>
-                    <div className="text-vscode-fg/80 whitespace-pre-wrap break-all mb-3 text-[11px]">{typeof tool.arguments === 'string' ? tool.arguments : JSON.stringify(tool.arguments, null, 2)}</div>
-
-                    {tool.result && (
-                        <div className="mt-3">
-                            <div className="text-vscode-fg/40 mb-1 select-none font-bold tracking-wider uppercase text-[9px]">Execution Output</div>
-                            <div className="text-vscode-fg/80 whitespace-pre-wrap break-all max-h-48 overflow-y-auto custom-scrollbar p-2 bg-vscode-editor-background rounded border border-vscode-border leading-relaxed">{tool.result}</div>
-                        </div>
-                    )}
-                </div>
-            )}
-        </div>
+        <ProcessEventBlock
+            command={tool.name}
+            output={tool.result}
+            status={tool.status}
+            script={toolArgsText && toolArgsText !== '{}' ? toolArgsText : undefined}
+            scriptLabel="Input"
+            outputLabel="Result"
+            actionLabel={tool.name === 'write_scratchpad'
+                ? 'Saved notes'
+                : tool.name === 'read_scratchpad'
+                    ? 'Read notes'
+                    : tool.name.includes('search')
+                        ? 'Searched'
+                        : 'Tool'}
+            defaultExpanded={tool.status === 'running'}
+        />
     );
 };
 
@@ -941,10 +1216,10 @@ export const ProgressBlock = ({
         else if (act.type === 'search') lbl = 'Search';
         else if (act.type === 'list_dir') lbl = 'Explore';
         const ic = act.type === 'search'
-            ? <FileGlyph path={bn} type="search" size="xs" />
+            ? <TimelineGlyph path={bn} type="search" size="xs" />
             : act.type === 'list_dir'
-                ? <FileGlyph path={bn} type="folder" size="xs" />
-                : <FileGlyph path={bn} type="file" size="xs" />;
+                ? <TimelineGlyph path={bn} type="folder" size="xs" />
+                : <TimelineGlyph path={bn} type="file" size="xs" />;
 
         return (
             <div key={`a-${idx}`} className="group flex items-start gap-3 py-1 relative">
@@ -957,7 +1232,11 @@ export const ProgressBlock = ({
                 <div className="flex-1 min-w-0" onClick={() => fp && postMessage({ type: 'open_file', payload: { path: fp } })}>
                     <div className="flex items-center gap-2 cursor-pointer">
                         <span className="font-mono text-[10.5px] text-vscode-fg/70 truncate hover:text-vscode-fg/90 hover:underline">{bn}</span>
-                        {act.lineRange && <span className="text-vscode-fg/35 text-[9px] font-mono select-none">{act.lineRange.startsWith('#L') ? act.lineRange : `#L${act.lineRange}`}</span>}
+                        {act.lineRange && (
+                            <span className="rounded bg-vscode-input-bg/45 px-1.5 py-0.5 font-mono text-[9px] leading-none text-vscode-fg/46 select-none">
+                                {formatTimelineLineRange(act.lineRange)}
+                            </span>
+                        )}
                         {act.type === 'edit' && (
                             <div className="flex items-center gap-1.5 text-[9px] font-bold opacity-30">
                                 <span className="text-green-400">+{act.additions}</span>
@@ -984,7 +1263,7 @@ export const ProgressBlock = ({
                     return (
                         <div key={`rt-${idx}`} className="group flex items-start gap-3 py-1 relative">
                             <div className="w-[42px] shrink-0 mt-0.5">
-                                <span className="text-vscode-fg/35 font-medium text-[9px] block text-right">Worker</span>
+                                <span className="text-vscode-fg/35 font-medium text-[9px] block text-right">Agent</span>
                             </div>
                             <div className="relative z-10 w-4 flex justify-center pt-0.5 opacity-50">
                                 <span className="codicon codicon-radio-tower text-vscode-fg/35 text-[11px]" />
@@ -1011,9 +1290,9 @@ export const ProgressBlock = ({
             else if (name.includes('read') || name.includes('view') || name.includes('analyze')) label = 'Read';
             const displayName = fileName || query || name;
             let icon;
-            if (label === 'Search') icon = name.includes('web') ? <span className="codicon codicon-globe text-blue-400/55 text-[11px]" /> : <span className="codicon codicon-search text-blue-400/55 text-[11px]" />;
-            else if (label === 'Explore') icon = <FileGlyph path={fileName || displayName} type="folder" size="xs" />;
-            else icon = fileName ? <FileGlyph path={fileName} type="file" size="xs" /> : <span className="text-vscode-fg/35">●</span>;
+            if (label === 'Search') icon = name.includes('web') ? <span className="codicon codicon-globe text-blue-400/55 text-[11px]" /> : <TimelineGlyph path={displayName} type="search" size="xs" />;
+            else if (label === 'Explore') icon = <TimelineGlyph path={fileName || displayName} type="folder" size="xs" />;
+            else icon = fileName ? <TimelineGlyph path={fileName} type="file" size="xs" /> : <span className="text-vscode-fg/35">●</span>;
 
             const sl = (args as any).StartLine || (args as any).StartLineNumber || (args as any).start_line;
             const el = (args as any).EndLine || (args as any).EndLineNumber || (args as any).end_line;
@@ -1030,7 +1309,11 @@ export const ProgressBlock = ({
                     <div className="flex-1 min-w-0" onClick={() => filePath && postMessage({ type: 'open_file', payload: { path: filePath } })}>
                         <div className="flex items-center gap-2 cursor-pointer">
                             <span className="font-mono text-[10.5px] text-vscode-fg/70 truncate hover:text-vscode-fg/90 hover:underline">{displayName}</span>
-                            {range && <span className="text-vscode-fg/35 text-[9px] font-mono select-none">{range}</span>}
+                            {range && (
+                                <span className="rounded bg-vscode-input-bg/45 px-1.5 py-0.5 font-mono text-[9px] leading-none text-vscode-fg/46 select-none">
+                                    {formatTimelineLineRange(range)}
+                                </span>
+                            )}
                             <span className="text-vscode-fg/35 text-[9px] font-mono ml-auto italic lowercase">
                                 {tool.status === 'running' ? 'doing...' : 'ok'}
                             </span>
@@ -1086,9 +1369,8 @@ export const ProgressBlock = ({
     if (timeline.length === 0) return null;
 
     return (
-        <div className="mb-2 mt-1 px-1 relative animate-in fade-in duration-300 overflow-hidden">
+        <div className="mb-2 mt-1 px-1 relative ricochet-message-enter overflow-hidden">
             <div className="relative">
-                <div className="absolute left-[57px] top-2 bottom-4 w-[1px] bg-vscode-border" />
                 <div className="flex flex-col">
                     {timeline.map((item, i) => {
                         return item.type === 'activity'
@@ -1135,7 +1417,9 @@ function workEventIcon(type: WorkEvent['type']) {
         case 'commentary': return 'codicon-comment-discussion';
         case 'read': return 'codicon-file-code';
         case 'search': return 'codicon-search';
+        case 'task': return 'codicon-checklist';
         case 'edit': return 'codicon-edit';
+        case 'review': return 'codicon-warning';
         case 'worker': return 'codicon-radio-tower';
         case 'approval': return 'codicon-shield';
         case 'artifact': return 'codicon-file-media';
@@ -1179,32 +1463,59 @@ export function pathIconClass(path?: string, entryType?: string) {
 
 function activityActionLabel(item: Pick<WorkEvent, 'type' | 'label'>) {
     if (item.type === 'search') return 'Searched';
-    if (item.label === 'Explored') return 'Explored';
-    if (item.type === 'read') return 'Read';
+    if (item.type === 'read') return 'Analyzed';
+    if (item.type === 'task') return 'Created';
+    if (item.type === 'review') return item.label || 'Review';
     if (item.type === 'artifact') return 'Document';
-    if (item.type === 'worker') return 'Worker';
+    if (item.type === 'worker') return 'Agent';
     return item.label;
 }
 
 export function summarizeWork(summary: WorkSummary): string {
     const parts: string[] = [];
     const readFiles = summary.counts.filesExplored || summary.counts.filesRead;
+    const editItems = summary.items.filter(item => item.type === 'edit');
+    const reviewItems = summary.items.filter(item => item.type === 'review');
+    const editHasDiff = (item: WorkEvent) => Boolean(
+        item.hasDiff
+        || (item.additions || 0) > 0
+        || (item.deletions || 0) > 0
+        || item.hunks?.some(hunk => (hunk.additions || 0) > 0 || (hunk.deletions || 0) > 0 || (hunk.oldLines?.length || 0) > 0 || (hunk.newLines?.length || 0) > 0)
+        || item.diffPreview?.trim()
+    );
+    const editFailed = (item: WorkEvent) => Boolean(item.error)
+        || item.status === 'failed'
+        || /conflict|failed|failure|error|reject|rejected|blocked/i.test(item.state || item.label || '');
+    const changedEditFiles = new Set(editItems
+        .filter(item => editHasDiff(item) && !editFailed(item))
+        .map(item => item.path || item.target || item.id));
+    const failedEditCount = editItems.filter(editFailed).length;
+    const reviewIssueCount = reviewItems.filter(item => item.status === 'failed' || Boolean(item.error)).length;
+    const failedCommandCount = summary.items.filter(item => item.type === 'command' && item.status === 'failed').length;
+    const auditRejectCount = summary.items.filter(item => /shadow audit|verification rejected/i.test(`${item.label} ${item.target || ''} ${item.error || ''}`)).length;
     if (readFiles || summary.counts.foldersExplored) {
         const readParts = [
             readFiles ? plural(readFiles, 'file') : '',
             summary.counts.foldersExplored ? plural(summary.counts.foldersExplored, 'folder') : '',
         ].filter(Boolean).join(', ');
-        parts.push(`read ${readParts}`);
+        parts.push(`explored ${readParts}`);
     }
     if (summary.counts.searches) parts.push(`performed ${plural(summary.counts.searches, 'search', 'searches')}`);
     if (summary.counts.commands) parts.push(`ran ${plural(summary.counts.commands, 'command')}`);
-    if (summary.counts.edits) parts.push(`edited ${plural(summary.counts.edits, 'file')}`);
-    if (summary.counts.workers) parts.push(`checked ${plural(summary.counts.workers, 'worker')}`);
+    if (failedCommandCount) parts.push(`${failedCommandCount} failed`);
+    if (summary.counts.tasks) parts.push(`created ${plural(summary.counts.tasks, 'Hub Task')}`);
+    if (changedEditFiles.size) parts.push(`edited ${plural(changedEditFiles.size, 'file')}`);
+    if (failedEditCount) parts.push(`${failedEditCount} failed ${failedEditCount === 1 ? 'edit' : 'edits'}`);
+    if (reviewIssueCount) parts.push(`${reviewIssueCount} review ${reviewIssueCount === 1 ? 'issue' : 'issues'}`);
+    if (auditRejectCount && auditRejectCount !== reviewIssueCount) parts.push(`${auditRejectCount} audit ${auditRejectCount === 1 ? 'reject' : 'rejects'}`);
+    if (summary.counts.workers) parts.push(`checked ${plural(summary.counts.workers, 'agent')}`);
     if (summary.counts.approvals) parts.push(`requested ${plural(summary.counts.approvals, 'approval')}`);
     return parts.length ? `Ricochet ${parts.join(', ')}` : '';
 }
 
 function emptyWorkSummaryText(summary: WorkSummary): string {
+    if (summary.status === 'running' && summary.activityHint === 'hidden_reasoning') return 'Thinking...';
+    if (summary.status === 'running') return 'Preparing the next step...';
     if (summary.activityHint === 'hidden_reasoning') return 'Only hidden reasoning was captured.';
     if (summary.activityHint === 'unassociated_tool') return 'Tool activity was not associated with this run.';
     if (summary.status === 'failed') return 'Agent failed before detailed activity was captured.';
@@ -1223,20 +1534,280 @@ function workEventDisplayTarget(item: WorkEvent) {
 
 function sectionTitle(type: WorkEvent['type']) {
     switch (type) {
-        case 'commentary': return 'Thought / plan';
+        case 'commentary': return 'Progress';
         case 'read':
-        case 'search': return 'Explored / read / searched';
+        case 'search': return 'Explored';
         case 'command': return 'Ran';
+        case 'task': return 'Created Hub Tasks';
         case 'edit': return 'Edited';
+        case 'review': return 'Review';
         case 'artifact': return 'Artifacts';
         case 'approval': return 'Approvals';
-        case 'worker': return 'Workers';
+        case 'worker': return 'Agents';
         case 'error': return 'Errors';
         default: return 'Activity';
     }
 }
 
-const timelineSectionOrder = ['Thought / plan', 'Explored / read / searched', 'Ran', 'Edited', 'Artifacts', 'Approvals', 'Workers', 'Errors'];
+const timelineSectionOrder = ['Progress', 'Created Hub Tasks', 'Explored', 'Ran', 'Edited', 'Review', 'Artifacts', 'Approvals', 'Agents', 'Errors'];
+
+export interface ExploredTreeNode {
+    key: string;
+    name: string;
+    path?: string;
+    type: 'folder' | 'file' | 'search';
+    lineRange?: string;
+    status?: WorkEvent['status'];
+    timestamp: number;
+    children: ExploredTreeNode[];
+}
+
+function normalizeFsPath(path = '') {
+    return path
+        .replace(/\\/g, '/')
+        .replace(/\/+/g, '/')
+        .replace(/\/$/, '');
+}
+
+function pathSegments(path = '') {
+    return normalizeFsPath(path).split('/').filter(Boolean);
+}
+
+function basenameFromPath(path = '') {
+    const parts = pathSegments(path);
+    return parts[parts.length - 1] || path;
+}
+
+function hasFileExtension(path = '') {
+    const name = basenameFromPath(path);
+    return /\.[A-Za-z0-9][A-Za-z0-9_-]{0,12}$/.test(name);
+}
+
+function isAbsolutePath(path = '') {
+    return normalizeFsPath(path).startsWith('/');
+}
+
+function commonAbsoluteRoot(paths: string[]) {
+    const absolutePaths = paths.map(normalizeFsPath).filter(isAbsolutePath);
+    if (absolutePaths.length === 0) return '';
+
+    const folderCandidates = [...absolutePaths]
+        .filter(path => !hasFileExtension(path))
+        .sort((a, b) => pathSegments(a).length - pathSegments(b).length);
+    const explicitRoot = folderCandidates.find(candidate =>
+        absolutePaths.every(path => path === candidate || path.startsWith(`${candidate}/`))
+    );
+    if (explicitRoot) return explicitRoot;
+
+    const splitPaths = absolutePaths.map(pathSegments);
+    const first = splitPaths[0] || [];
+    const common: string[] = [];
+    for (let index = 0; index < first.length; index += 1) {
+        if (splitPaths.every(parts => parts[index] === first[index])) {
+            common.push(first[index]);
+        } else {
+            break;
+        }
+    }
+    return common.length ? `/${common.join('/')}` : '';
+}
+
+function displayPartsForPath(path: string, root: string) {
+    const normalized = normalizeFsPath(path);
+    if (!root || (normalized !== root && !normalized.startsWith(`${root}/`))) {
+        return pathSegments(normalized);
+    }
+    const rootName = basenameFromPath(root);
+    if (normalized === root) return [rootName];
+    const rest = normalized.slice(root.length + 1);
+    return [rootName, ...pathSegments(rest)];
+}
+
+function eventPath(item: WorkEvent) {
+    return normalizeFsPath(item.path || workEventDisplayTarget(item));
+}
+
+function eventIsFolder(item: WorkEvent) {
+    const path = eventPath(item);
+    if (item.entries?.length || item.counts?.folders || item.label === 'Explored') return true;
+    if (!path) return false;
+    return path.endsWith('/') || (item.type === 'read' && !hasFileExtension(path) && item.label !== 'Read');
+}
+
+type ExploredRecord = {
+    path: string;
+    type: ExploredTreeNode['type'];
+    lineRange?: string;
+    status?: WorkEvent['status'];
+    timestamp: number;
+};
+
+function entryPath(parent: string, entry: ActivityEntry) {
+    if (entry.path) return normalizeFsPath(entry.path);
+    if (!parent) return normalizeFsPath(entry.name);
+    return normalizeFsPath(`${parent}/${entry.name}`);
+}
+
+function collectExploredRecords(items: WorkEvent[]): ExploredRecord[] {
+    const records: ExploredRecord[] = [];
+
+    items.forEach(item => {
+        const path = eventPath(item);
+        if (item.type === 'search') {
+            records.push({
+                path: item.target || item.label,
+                type: 'search',
+                status: item.status,
+                timestamp: item.timestamp,
+            });
+            return;
+        }
+
+        if (path) {
+            const type = eventIsFolder(item) ? 'folder' : 'file';
+            records.push({
+                path,
+                type,
+                lineRange: type === 'file' ? (item as any).lineRange : undefined,
+                status: item.status,
+                timestamp: item.timestamp,
+            });
+        }
+
+        (item.entries || []).forEach(entry => {
+            const fullPath = entryPath(path, entry);
+            if (!fullPath) return;
+            records.push({
+                path: fullPath,
+                type: entry.type === 'dir' || entry.type === 'folder' ? 'folder' : 'file',
+                lineRange: entry.type === 'dir' || entry.type === 'folder' ? undefined : (entry as any).lineRange,
+                status: item.status,
+                timestamp: item.timestamp,
+            });
+        });
+    });
+
+    return records;
+}
+
+type MutableExploredNode = ExploredTreeNode & {
+    order: number;
+    childMap: Map<string, MutableExploredNode>;
+};
+
+function createMutableNode(
+    key: string,
+    name: string,
+    type: ExploredTreeNode['type'],
+    timestamp: number,
+    path?: string,
+): MutableExploredNode {
+    return {
+        key,
+        name,
+        path,
+        type,
+        timestamp,
+        order: timestamp,
+        children: [],
+        childMap: new Map(),
+    };
+}
+
+function toReadonlyNode(node: MutableExploredNode): ExploredTreeNode {
+    const children = [...node.childMap.values()]
+        .sort((a, b) => a.order - b.order || (a.type === b.type ? 0 : a.type === 'folder' ? -1 : 1) || a.name.localeCompare(b.name))
+        .map(toReadonlyNode);
+    return {
+        key: node.key,
+        name: node.name,
+        path: node.path,
+        type: node.type,
+        lineRange: node.lineRange,
+        status: node.status,
+        timestamp: node.timestamp,
+        children,
+    };
+}
+
+function mergeExploredLineRange(existing?: string, incoming?: string): string | undefined {
+    if (!incoming) return existing;
+    if (!existing) return incoming;
+    const ranges = existing.split(',').map(part => part.trim()).filter(Boolean);
+    if (!ranges.includes(incoming)) ranges.push(incoming);
+    return ranges.join(', ');
+}
+
+export function buildExploredTree(items: WorkEvent[]) {
+    const records = collectExploredRecords(items);
+    const root = commonAbsoluteRoot(records.map(record => record.path));
+    const topLevel = new Map<string, MutableExploredNode>();
+
+    const addRecord = (record: ExploredRecord) => {
+        const displayParts = displayPartsForPath(record.path, root).filter(Boolean);
+        if (!displayParts.length) return;
+        let children = topLevel;
+        let keyPrefix = '';
+
+        displayParts.forEach((part, index) => {
+            const isLeaf = index === displayParts.length - 1;
+            const key = `${keyPrefix}/${part}`;
+            const nodeType = isLeaf ? record.type : 'folder';
+            let node = children.get(key);
+            if (!node) {
+                node = createMutableNode(
+                    key,
+                    part,
+                    nodeType,
+                    record.timestamp,
+                    isLeaf ? record.path : undefined,
+                );
+                children.set(key, node);
+            }
+
+            if (record.timestamp < node.order) {
+                node.order = record.timestamp;
+                node.timestamp = record.timestamp;
+            }
+            if (isLeaf) {
+                if (node.type !== 'folder') node.type = nodeType;
+                if (record.type === 'folder') node.type = 'folder';
+                node.path = record.path || node.path;
+                node.lineRange = mergeExploredLineRange(node.lineRange, record.lineRange);
+                node.status = record.status || node.status;
+            } else if (node.type !== 'folder') {
+                node.type = 'folder';
+            }
+
+            children = node.childMap;
+            keyPrefix = key;
+        });
+    };
+
+    records.forEach(addRecord);
+
+    const nodes = [...topLevel.values()]
+        .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
+        .map(toReadonlyNode);
+
+    const files = new Set<string>();
+    const folders = new Set<string>();
+    const searches = new Set<string>();
+    const visit = (node: ExploredTreeNode) => {
+        if (node.type === 'folder') folders.add(node.path || node.key);
+        if (node.type === 'file') files.add(node.path || node.key);
+        if (node.type === 'search') searches.add(node.path || node.key);
+        node.children.forEach(visit);
+    };
+    nodes.forEach(visit);
+
+    return {
+        nodes,
+        fileCount: files.size,
+        folderCount: folders.size,
+        searchCount: searches.size,
+    };
+}
 
 function findActiveSectionTitle(items: WorkEvent[], groupedItems: Map<string, WorkEvent[]>) {
     const candidates = items.filter(item => groupedItems.has(sectionTitle(item.type)));
@@ -1251,20 +1822,24 @@ function findActiveSectionTitle(items: WorkEvent[], groupedItems: Map<string, Wo
 }
 
 function sectionSummary(title: string, items: WorkEvent[]) {
-    if (title === 'Explored / read / searched') {
-        const files = items.reduce((sum, item) => sum + (item.counts?.files || 0), 0);
-        const folders = items.reduce((sum, item) => sum + (item.counts?.folders || 0), 0);
-        const reads = items.filter(item => item.type === 'read' && !item.counts?.files && !item.counts?.folders).length;
-        const searches = items.filter(item => item.type === 'search').length;
+    if (title === 'Explored') {
+        const tree = buildExploredTree(items);
+        const countFiles = items.reduce((sum, item) => sum + (item.counts?.files || 0), 0);
+        const countFolders = items.reduce((sum, item) => sum + (item.counts?.folders || 0), 0);
+        const files = Math.max(tree.fileCount, countFiles);
+        const folders = Math.max(tree.folderCount, countFolders);
+        const searches = tree.searchCount;
         return [
             files ? plural(files, 'file') : '',
             folders ? plural(folders, 'folder') : '',
-            reads ? plural(reads, 'read') : '',
             searches ? plural(searches, 'search', 'searches') : '',
         ].filter(Boolean).join(', ');
     }
     if (title === 'Ran') return plural(items.length, 'command');
-    if (title === 'Thought / plan') return plural(items.length, 'note');
+    if (title === 'Created Hub Tasks') return plural(items.length, 'task');
+    if (title === 'Progress') return plural(items.length, 'update');
+    if (title === 'Review') return plural(items.length, 'issue');
+    if (title === 'Agents') return plural(items.length, 'agent');
     return plural(items.length, 'item');
 }
 
@@ -1308,117 +1883,41 @@ const ShellOutputPanel = ({
     script?: string;
 }) => {
     const isRunning = status === 'running';
-    const isFailed = status === 'failed' || (typeof exitCode === 'number' && exitCode !== 0);
+    const shouldExpand = isRunning || status === 'failed' || status === 'waiting';
     const isPython = shell === 'python';
-    const footerLabel = isRunning ? 'Running...' : isFailed ? '✕ Failed' : '✓ Success';
-    const footerTone = isRunning ? 'text-blue-300/70' : isFailed ? 'text-red-300/80' : 'text-vscode-fg/48';
-    const trimmedOutput = (output || '').trimEnd();
-    const trimmedScript = (script || '').trimEnd();
-    const copyText = [command, trimmedScript, trimmedOutput].filter(Boolean).join('\n\n');
 
     return (
-        <div className="overflow-hidden rounded-xl bg-[#2b2b2b] shadow-none">
-            <div className="flex items-center gap-2 px-3 py-2">
-                <span className="text-[12px] font-medium text-vscode-fg/62">{isPython ? 'Python' : 'Shell'}</span>
-                {cwd && <span className="min-w-0 truncate font-mono text-[10.5px] text-vscode-fg/35">{cwd}</span>}
-                <span className="ml-auto" />
-                <CopyButton code={copyText} />
-            </div>
-            <div className="px-3 pb-2">
-                <div className="font-mono text-[11.5px] leading-[1.45] text-vscode-fg/86">
-                    <span className="text-vscode-fg/38">$ </span>
-                    <span className="whitespace-pre-wrap break-words">{command}</span>
-                </div>
-            </div>
-            {trimmedScript && (
-                <div className="px-3 pb-2">
-                    <div className="mb-1 text-[10px] font-medium text-vscode-fg/38">Script</div>
-                    <pre className="custom-scrollbar max-h-[260px] overflow-auto whitespace-pre rounded-md bg-vscode-editor-background/45 px-2.5 py-2 font-mono text-[10.5px] leading-[1.45] text-vscode-fg/58 selection:bg-vscode-editor-selectionBackground">
-                        {trimmedScript}
-                    </pre>
-                </div>
-            )}
-            {(trimmedOutput || isRunning) && (
-                <div className="px-3 py-2">
-                    {trimmedScript && <div className="mb-1 text-[10px] font-medium text-vscode-fg/38">Output</div>}
-                    <pre className="custom-scrollbar max-h-[360px] overflow-auto whitespace-pre font-mono text-[11.5px] leading-[1.5] text-vscode-fg/66 selection:bg-vscode-editor-selectionBackground">
-                        {trimmedOutput || 'Waiting for output...'}
-                    </pre>
-                </div>
-            )}
-            <div className={`flex items-center justify-end gap-2 px-3 py-2 text-[11px] ${footerTone}`}>
-                {typeof exitCode === 'number' && <span className="font-mono text-[10.5px] text-vscode-fg/38">exit {exitCode}</span>}
-                {typeof durationMs === 'number' && <span className="font-mono text-[10.5px] text-vscode-fg/38">{formatWorkDuration(durationMs)}</span>}
-                <span>{footerLabel}</span>
-            </div>
-        </div>
+        <ProcessEventBlock
+            command={command}
+            output={output}
+            status={status}
+            exitCode={exitCode}
+            durationMs={durationMs}
+            cwd={cwd}
+            shell={shell}
+            script={script}
+            actionLabel={isPython ? 'Python script' : 'Command'}
+            defaultExpanded={shouldExpand}
+        />
     );
 };
 
 const TimelineCommandRow = ({ item }: { item: WorkEvent }) => {
-    const [expanded, setExpanded] = useState(item.status === 'running');
-    const userToggledRef = useRef(false);
     const command = (item.command || item.target || '').trim();
-    const output = (item.resultPreview || '').trimEnd();
-    const hasOutput = output.trim().length > 0;
-    const isRunning = item.status === 'running';
-    const hasScript = Boolean(item.script?.trim());
-    const isPython = item.shell === 'python' || item.label === 'Ran Python script';
-    const canExpand = hasOutput || hasScript || isRunning;
-    const durationLabel = typeof item.durationMs === 'number' && item.durationMs > 0 ? ` ${formatWorkDuration(item.durationMs)}` : '';
-    const label = isRunning
-        ? (isPython ? 'Running Python script' : 'Running')
-        : item.status === 'failed'
-            ? (isPython ? 'Python script failed' : 'Command failed')
-            : isPython
-                ? `Ran Python script${durationLabel}`
-                : `Ran command${durationLabel}`;
-
-    useEffect(() => {
-        if (isRunning && !userToggledRef.current) {
-            setExpanded(true);
-        }
-    }, [isRunning]);
 
     if (!command) return null;
 
     return (
-        <div className="rounded px-1 py-0.5 text-[12px] leading-5">
-            <button
-                type="button"
-                disabled={!canExpand}
-                aria-expanded={canExpand ? expanded : undefined}
-                onClick={() => {
-                    if (!canExpand) return;
-                    userToggledRef.current = true;
-                    setExpanded(open => !open);
-                }}
-                className={`flex w-full min-w-0 items-center gap-1.5 rounded px-1 py-0.5 text-left text-vscode-fg/68 ${canExpand ? 'hover:bg-vscode-list-hoverBackground/35 hover:text-vscode-fg/82' : 'cursor-default'}`}
-            >
-                <span className={`codicon ${item.status === 'running' ? 'codicon-loading codicon-modifier-spin' : 'codicon-terminal'} shrink-0 text-[12px] text-vscode-fg/42`} />
-                <span className="shrink-0 text-[11.5px] font-medium text-vscode-fg/58">{label}</span>
-                <span className="min-w-0 truncate font-mono text-[11.5px] leading-5 text-vscode-fg/78">{command}</span>
-                {canExpand && (
-                    <span className={`codicon codicon-chevron-right ml-auto shrink-0 text-[11px] text-vscode-fg/35 transition-transform duration-200 ease-out motion-reduce:transition-none ${expanded ? 'rotate-90' : ''}`} />
-                )}
-            </button>
-            {canExpand && (
-                <AnimatedDisclosure open={expanded}>
-                    <div className="mt-1.5">
-                        <ShellOutputPanel
-                            command={command}
-                            output={output}
-                            status={item.status}
-                            exitCode={item.exitCode}
-                            durationMs={item.durationMs}
-                            cwd={item.cwd}
-                            shell={item.shell}
-                            script={item.script}
-                        />
-                    </div>
-                </AnimatedDisclosure>
-            )}
-        </div>
+        <ShellOutputPanel
+            command={command}
+            output={item.resultPreview}
+            status={item.status}
+            exitCode={item.exitCode}
+            durationMs={item.durationMs}
+            cwd={item.cwd}
+            shell={item.shell}
+            script={item.script}
+        />
     );
 };
 
@@ -1436,15 +1935,18 @@ const TimelineActivityRow = ({ item }: { item: WorkEvent }) => {
     }
 
     const actionLabel = activityActionLabel(item);
+    const readGlyphType = hasEntries || item.label === 'Explored' ? 'folder' : 'file';
     return (
         <div className="rounded px-1 py-0.5 text-[11.5px] leading-5 hover:bg-vscode-list-hoverBackground/35">
             <div className="flex min-w-0 items-center gap-1.5">
                 {item.type === 'read' ? (
-                    <FileGlyph path={item.path || displayTarget} type={hasEntries ? 'folder' : 'file'} size="sm" />
+                    <TimelineGlyph path={item.path || displayTarget} type={readGlyphType} size="sm" />
                 ) : item.type === 'search' ? (
-                    <FileGlyph path={item.target || displayTarget} type="search" size="sm" />
+                    <TimelineGlyph path={item.target || displayTarget} type="search" size="sm" />
                 ) : item.type === 'artifact' ? (
                     <FileGlyph path={item.path || item.target || displayTarget || 'artifact.md'} type="file" size="sm" />
+                ) : item.type === 'edit' ? (
+                    <FileGlyph path={item.path || displayTarget} type="file" size="sm" />
                 ) : (
                     <span className={`codicon ${workEventIcon(item.type)} w-4 shrink-0 text-[12px] text-vscode-fg/38`} />
                 )}
@@ -1455,15 +1957,21 @@ const TimelineActivityRow = ({ item }: { item: WorkEvent }) => {
                     className={`flex min-w-0 flex-1 items-center gap-1.5 text-left ${item.path ? 'cursor-pointer hover:text-vscode-link-foreground' : 'cursor-default'}`}
                     title={item.path || item.target || item.label}
                 >
-                    <span className="shrink-0 whitespace-nowrap text-[10.5px] font-medium tracking-normal text-vscode-fg/42">
+                    <span className="shrink-0 whitespace-nowrap text-[10.5px] font-medium tracking-normal text-vscode-fg/44">
                         {actionLabel}
                     </span>
-                    {displayTarget && <span className="min-w-0 truncate whitespace-nowrap font-mono text-[11px] text-vscode-fg/76">{displayTarget}</span>}
+                    {displayTarget && <span className="min-w-0 truncate whitespace-nowrap font-mono text-[11.5px] font-semibold text-vscode-fg/76">{displayTarget}</span>}
                     {countText && <span className="shrink-0 text-[10.5px] text-vscode-fg/42">{countText}</span>}
                 </button>
                 {item.type === 'edit' && (
                     <span className="shrink-0 font-mono text-[10.5px] text-vscode-fg/45">
-                        <span className="text-emerald-500/80">+{item.additions || 0}</span> <span className="text-rose-500/80">-{item.deletions || 0}</span>
+                        {(item.additions || 0) === 0 && (item.deletions || 0) === 0 ? (
+                            <span className="text-vscode-fg/38">No changes</span>
+                        ) : (
+                            <>
+                                <span className="text-emerald-500/80">+{item.additions || 0}</span> <span className="text-rose-500/80">-{item.deletions || 0}</span>
+                            </>
+                        )}
                     </span>
                 )}
                 {hasEntries && (
@@ -1483,6 +1991,19 @@ const TimelineActivityRow = ({ item }: { item: WorkEvent }) => {
                     {item.error}
                 </div>
             )}
+            {item.type === 'edit' && item.hunks?.[0] && (
+                <div className="ml-5 mt-1 rounded bg-vscode-editor-background/55 px-2 py-1.5 font-mono text-[10.5px] leading-4">
+                    <div className="mb-0.5 text-vscode-fg/35">
+                        #L{Math.max(1, (item.hunks[0].newStart ?? item.hunks[0].oldStart ?? 0) + 1)}
+                    </div>
+                    {(item.hunks[0].oldLines || []).filter(line => line.trim()).slice(0, 1).map((line, index) => (
+                        <div key={`old-${index}`} className="truncate text-rose-300/60">- {line}</div>
+                    ))}
+                    {(item.hunks[0].newLines || []).filter(line => line.trim()).slice(0, 2).map((line, index) => (
+                        <div key={`new-${index}`} className="truncate text-emerald-300/65">+ {line}</div>
+                    ))}
+                </div>
+            )}
             <AnimatedDisclosure open={expanded && Boolean(item.entries?.length)}>
                 <div className="ml-5 mt-1 grid grid-cols-1 gap-0.5">
                     {(item.entries || []).map((entry, index) => (
@@ -1491,18 +2012,100 @@ const TimelineActivityRow = ({ item }: { item: WorkEvent }) => {
                             type="button"
                             disabled={!entry.path}
                             onClick={() => entry.path && postMessage({ type: 'open_file', payload: { path: entry.path } })}
-                            className="flex min-w-0 items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11px] leading-5 text-vscode-fg/58 hover:bg-vscode-list-hoverBackground/60 hover:text-vscode-link-foreground"
+                            className="flex min-w-0 items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11.5px] leading-5 text-vscode-fg/58 hover:bg-vscode-list-hoverBackground/60 hover:text-vscode-link-foreground"
                             title={entry.path || entry.name}
                         >
-                            <FileGlyph path={entry.path || entry.name} type={entry.type === 'dir' ? 'folder' : 'file'} size="xs" />
+                            <TimelineGlyph path={entry.path || entry.name} type={entry.type === 'dir' ? 'folder' : 'file'} size="xs" />
                             <span className="shrink-0 whitespace-nowrap text-[10px] font-medium tracking-normal text-vscode-fg/36">
-                                {entry.type === 'dir' ? 'Explored' : actionLabel}
+                                {entry.type === 'dir' ? 'Analyzed' : actionLabel}
                             </span>
-                            <span className="min-w-0 truncate font-mono">{entry.name}</span>
+                            <span className="min-w-0 truncate font-mono font-semibold">{entry.name}</span>
                         </button>
                     ))}
                 </div>
             </AnimatedDisclosure>
+        </div>
+    );
+};
+
+const ExploredTreeRow = ({
+    node,
+    depth,
+}: {
+    node: ExploredTreeNode;
+    depth: number;
+}) => {
+    const { postMessage } = useVSCodeApi();
+    const canExpand = node.type === 'folder' && node.children.length > 0;
+    const [expanded, setExpanded] = useState(canExpand && depth === 0);
+    const actionLabel = node.type === 'search' ? 'Searched' : 'Analyzed';
+    const lineRange = node.type === 'file' ? formatTimelineLineRange(node.lineRange) : '';
+    const indent = Math.min(depth * 16, 56);
+
+    const handleClick = () => {
+        if (canExpand) {
+            setExpanded(open => !open);
+            return;
+        }
+        if (node.type === 'file' && node.path) {
+            postMessage({ type: 'open_file', payload: { path: node.path } });
+        }
+    };
+
+    return (
+        <div>
+            <button
+                type="button"
+                onClick={handleClick}
+                className={`group flex w-full min-w-0 items-center gap-1.5 rounded px-1 py-0.5 text-left text-[11.75px] leading-5 hover:bg-vscode-list-hoverBackground/35 ${node.type === 'file' && node.path ? 'cursor-pointer hover:text-vscode-link-foreground' : 'cursor-default text-vscode-fg/70'}`}
+                style={{ paddingLeft: `${indent + 4}px` }}
+                title={node.path || node.name}
+            >
+                <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                    {canExpand ? (
+                        <span className={`codicon codicon-chevron-right text-[11px] text-vscode-fg/36 transition-transform duration-200 ease-out motion-reduce:transition-none ${expanded ? 'rotate-90' : ''}`} />
+                    ) : (
+                        <span className="w-[11px]" />
+                    )}
+                </span>
+                <TimelineGlyph
+                    path={node.path || node.name}
+                    type={node.type === 'folder' ? 'folder' : node.type === 'search' ? 'search' : 'file'}
+                    size="sm"
+                />
+                <span className="shrink-0 whitespace-nowrap text-[10.75px] font-medium tracking-normal text-vscode-fg/44">
+                    {actionLabel}
+                </span>
+                <span className="min-w-0 truncate whitespace-nowrap font-mono text-[11.75px] font-semibold text-vscode-fg/76">
+                    {node.name}
+                </span>
+                {lineRange && (
+                    <span className="shrink-0 rounded bg-vscode-input-bg/45 px-1.5 py-0.5 font-mono text-[10px] leading-none text-vscode-fg/46">
+                        {lineRange}
+                    </span>
+                )}
+                {node.status === 'waiting' && <span className="ml-auto shrink-0 text-[10.5px] text-blue-400/70">waiting</span>}
+            </button>
+            <AnimatedDisclosure open={expanded && canExpand}>
+                <div className="space-y-0.5">
+                    {node.children.map(child => (
+                        <ExploredTreeRow key={child.key} node={child} depth={depth + 1} />
+                    ))}
+                </div>
+            </AnimatedDisclosure>
+        </div>
+    );
+};
+
+const ExploredTree = ({ items }: { items: WorkEvent[] }) => {
+    const tree = useMemo(() => buildExploredTree(items), [items]);
+    if (!tree.nodes.length) return null;
+
+    return (
+        <div className="space-y-0.5">
+            {tree.nodes.map(node => (
+                <ExploredTreeRow key={node.key} node={node} depth={0} />
+            ))}
         </div>
     );
 };
@@ -1521,9 +2124,10 @@ const TimelineSection = ({
     onToggle: () => void;
 }) => {
     const summary = sectionSummary(title, items);
+    const visibleItems = title === 'Explored' ? [] : items;
 
     return (
-        <section className="space-y-1">
+        <section className="ricochet-timeline-section space-y-1 px-1 py-0.5" data-open={open ? 'true' : 'false'}>
             <button
                 type="button"
                 onClick={onToggle}
@@ -1532,13 +2136,15 @@ const TimelineSection = ({
             >
                 <span className={`codicon codicon-chevron-right shrink-0 text-[11px] text-vscode-fg/35 transition-transform duration-200 ease-out motion-reduce:transition-none ${open ? 'rotate-90' : ''}`} />
                 {active && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400/70" />}
-                <span className="shrink-0 text-[11px] font-medium leading-5">{title}</span>
-                {summary && <span className="min-w-0 truncate text-[10.5px] text-vscode-fg/35">{summary}</span>}
+                <span className="shrink-0 text-[12px] font-semibold leading-5">{title}</span>
+                {summary && <span className="min-w-0 truncate text-[11px] font-medium text-vscode-fg/48">{summary}</span>}
             </button>
             <AnimatedDisclosure open={open}>
                 <div className="space-y-0.5 pl-2">
-                    {items.map(item => item.type === 'commentary' ? (
-                        <div key={item.id} className="custom-scrollbar max-h-[220px] overflow-auto break-words rounded-md bg-vscode-input-bg/30 px-2 py-1.5 text-vscode-fg/78">
+                    {title === 'Explored' ? (
+                        <ExploredTree items={items} />
+                    ) : visibleItems.map(item => item.type === 'commentary' ? (
+                        <div key={item.id} className="ricochet-timeline-note custom-scrollbar max-h-[220px] overflow-auto break-words rounded-md px-2 py-1.5 text-vscode-fg/56">
                             <TimelineMarkdownContent content={item.target || ''} />
                         </div>
                     ) : (
@@ -1550,95 +2156,7 @@ const TimelineSection = ({
     );
 };
 
-type PendingEditItem = {
-    filePath?: string;
-    additions?: number;
-    deletions?: number;
-    status?: 'pending' | 'reviewing' | 'conflicted' | string;
-    conflictReason?: string;
-    isNewFile?: boolean;
-};
-
-const InlineEditApprovalCard = ({
-    edits,
-    onOpenFile,
-    onSave,
-    onReject,
-}: {
-    edits: PendingEditItem[];
-    onOpenFile: (path: string) => void;
-    onSave: () => void;
-    onReject: () => void;
-}) => {
-    if (!edits.length) return null;
-    const hasConflict = edits.some(edit => edit.status === 'conflicted');
-
-    return (
-        <div className="rounded-md border border-vscode-border bg-vscode-input-bg/45" data-ricochet-inline-edit-approval>
-            <div className="flex items-center gap-2 border-b border-vscode-border/70 px-3 py-2">
-                <span className="codicon codicon-edit text-[13px] text-blue-300/65" />
-                <div className="min-w-0 flex-1">
-                    <div className="text-[12px] font-semibold text-vscode-fg/82">Ricochet wants to edit this file{edits.length === 1 ? '' : 's'}:</div>
-                    <div className="truncate text-[10.5px] text-vscode-fg/42">Review pending workspace changes</div>
-                </div>
-            </div>
-
-            <div className="grid gap-1.5 p-2">
-                {edits.map((edit, index) => {
-                    const path = edit.filePath || '';
-                    const target = path ? workEventDisplayTarget({ id: path, type: 'edit', label: 'Edited', target: path, path, timestamp: 0 }) : 'pending edit';
-                    return (
-                        <button
-                            key={`${path}-${index}`}
-                            type="button"
-                            disabled={!path}
-                            onClick={() => path && onOpenFile(path)}
-                            title={edit.conflictReason || path}
-                            className={`flex min-w-0 items-center gap-2 rounded border px-2.5 py-2 text-left text-[11.5px] transition-colors ${
-                                edit.status === 'conflicted'
-                                    ? 'border-rose-500/25 bg-rose-500/10 text-rose-200/85'
-                                    : 'border-vscode-border bg-vscode-editor-background/55 text-vscode-fg/72 hover:bg-vscode-list-hoverBackground/55 hover:text-vscode-fg/88'
-                            }`}
-                        >
-                            <FileGlyph path={target} type="file" size="sm" />
-                            <span className="min-w-0 flex-1 truncate font-mono">{target}</span>
-                            {edit.status === 'conflicted' && <span className="shrink-0 text-[10px] text-rose-200/75">conflict</span>}
-                            <span className="shrink-0 font-mono text-[10.5px] text-vscode-fg/48">
-                                <span className="text-emerald-400/85">+{edit.additions || 0}</span>{' '}
-                                <span className="text-rose-400/85">-{edit.deletions || 0}</span>
-                            </span>
-                            <span className="codicon codicon-chevron-right shrink-0 text-[11px] text-vscode-fg/35" />
-                        </button>
-                    );
-                })}
-            </div>
-
-            <div className="flex items-center justify-between gap-2 border-t border-vscode-border/70 px-3 py-2">
-                <div className="min-w-0 truncate text-[10.5px] text-vscode-fg/42">
-                    Auto-approve: current Ricochet workspace rules
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                    <button
-                        type="button"
-                        onClick={onReject}
-                        className="rounded border border-vscode-border bg-vscode-editor-background px-3 py-1.5 text-[11px] font-medium text-vscode-fg/64 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg/86"
-                    >
-                        Reject
-                    </button>
-                    <button
-                        type="button"
-                        disabled={hasConflict}
-                        onClick={onSave}
-                        className="rounded bg-vscode-button-bg px-3 py-1.5 text-[11px] font-semibold text-vscode-button-fg hover:bg-vscode-button-hover disabled:cursor-not-allowed disabled:opacity-45"
-                        title={hasConflict ? 'Resolve conflicted files before saving changes' : 'Save all pending Ricochet edits'}
-                    >
-                        Save
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
-};
+type PendingEditItem = ChangedFileItem;
 
 type PlanArtifact = {
     id?: string;
@@ -1649,6 +2167,8 @@ type PlanArtifact = {
     content?: string;
     session_id?: string;
     status?: string;
+    decision?: string;
+    decision_error?: string;
 };
 
 const isImplementationPlanArtifact = (artifact: any): artifact is PlanArtifact =>
@@ -1706,105 +2226,80 @@ const planExcerpt = (artifact: PlanArtifact) => {
 
 const PlanArtifactCard = ({
     artifact,
-    onSendMessage,
 }: {
     artifact: PlanArtifact;
-    onSendMessage?: (content: string) => void;
 }) => {
     const { postMessage } = useVSCodeApi();
-    const [decision, setDecision] = useState<string | null>(artifact.status === 'approved' ? 'implement' : null);
     const title = artifact.title || 'Implementation Plan';
-    const sessionId = artifact.session_id;
-    const artifactId = artifact.id || artifact.path || title;
-
-    const sendDecision = (nextDecision: 'implement' | 'revise') => {
-        setDecision(nextDecision);
-        postMessage({
-            type: 'plan_decision',
-            payload: {
-                session_id: sessionId,
-                artifact_id: artifactId,
-                path: artifact.path,
-                decision: nextDecision,
-            }
-        });
-    };
-
-    const requestRevision = () => {
-        sendDecision('revise');
-        onSendMessage?.(`Revise the implementation plan "${title}" and submit the updated plan artifact.`);
-    };
+    const status = artifact.status;
+    const isApproved = status === 'approved';
+    const isRevisionRequested = status === 'revision_requested';
+    const hasDecisionError = status === 'error';
 
     return (
-        <div className="mb-3 rounded-md border border-vscode-border bg-vscode-input-bg/35">
-            <div className="flex items-start gap-3 px-3 py-3">
-                <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded border border-vscode-border bg-vscode-editor-background">
-                    <span className="codicon codicon-preview text-[14px] text-blue-300/75" />
-                </div>
-                <div className="min-w-0 flex-1">
-                    <div className="mb-1 flex min-w-0 items-center gap-2">
-                        <div className="truncate text-[13px] font-semibold text-vscode-fg/88">{title}</div>
-                        {decision === 'implement' && (
-                            <span className="shrink-0 rounded bg-emerald-500/12 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-300/85">
-                                Approved
-                            </span>
-                        )}
-                    </div>
-                    <div className="line-clamp-3 text-[12px] leading-[1.5] text-vscode-fg/60">
-                        {planExcerpt(artifact)}
-                    </div>
-                </div>
+        <div
+            data-ricochet-plan-transcript-card
+            className={`mb-3 rounded-md bg-vscode-input-bg/35 px-3 py-2.5 ${artifact.path ? 'cursor-pointer hover:bg-vscode-list-hoverBackground/60' : ''}`}
+            role={artifact.path ? 'button' : undefined}
+            tabIndex={artifact.path ? 0 : undefined}
+            title={artifact.path ? `Open ${artifact.path}` : title}
+            onClick={() => artifact.path && postMessage({ type: 'open_file', payload: { path: artifact.path } })}
+            onKeyDown={(event) => {
+                if (!artifact.path) return;
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    postMessage({ type: 'open_file', payload: { path: artifact.path } });
+                }
+            }}
+        >
+            <div className="mb-1 flex min-w-0 items-center gap-2">
+                <div className="truncate text-[13px] font-semibold text-vscode-fg/88">{title}</div>
+                {!status && (
+                    <span className="shrink-0 rounded bg-blue-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-blue-200/80">
+                        Plan created
+                    </span>
+                )}
+                {isApproved && (
+                    <span className="shrink-0 rounded bg-emerald-500/12 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-300/85">
+                        Approved
+                    </span>
+                )}
+                {isRevisionRequested && (
+                    <span className="shrink-0 rounded bg-amber-500/12 px-1.5 py-0.5 text-[9px] font-semibold text-amber-300/85">
+                        Revision requested
+                    </span>
+                )}
+                {hasDecisionError && (
+                    <span className="shrink-0 rounded bg-red-500/12 px-1.5 py-0.5 text-[9px] font-semibold text-red-300/85">
+                        Decision failed
+                    </span>
+                )}
             </div>
-
-            <div className="flex flex-wrap items-center gap-2 border-t border-vscode-border/70 px-3 py-2">
-                <button
-                    type="button"
-                    disabled={!artifact.path}
-                    onClick={() => artifact.path && postMessage({ type: 'open_file', payload: { path: artifact.path } })}
-                    className="inline-flex items-center gap-1.5 rounded border border-vscode-border bg-vscode-editor-background px-2.5 py-1.5 text-[11px] font-medium text-vscode-fg/70 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg disabled:cursor-not-allowed disabled:opacity-45"
-                >
-                    <span className="codicon codicon-open-preview text-[12px]" />
-                    Review
-                </button>
-                <button
-                    type="button"
-                    onClick={() => sendDecision('implement')}
-                    className="inline-flex items-center gap-1.5 rounded bg-vscode-button-bg px-3 py-1.5 text-[11px] font-semibold text-vscode-button-fg hover:bg-vscode-button-hover"
-                >
-                    <span className="codicon codicon-check text-[12px]" />
-                    Proceed
-                </button>
-                <button
-                    type="button"
-                    onClick={requestRevision}
-                    className="inline-flex items-center gap-1.5 rounded border border-vscode-border bg-vscode-editor-background px-2.5 py-1.5 text-[11px] font-medium text-vscode-fg/62 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg"
-                >
-                    <span className="codicon codicon-edit text-[12px]" />
-                    Revise
-                </button>
+            <div className="line-clamp-2 text-[12px] leading-[1.5] text-vscode-fg/58">
+                {planExcerpt(artifact)}
             </div>
+            {artifact.decision_error && (
+                <div className="mt-2 rounded bg-red-500/8 px-2 py-1.5 text-[11px] leading-snug text-red-200/85">
+                    {artifact.decision_error}
+                </div>
+            )}
         </div>
     );
 };
 
 const WorkSummaryBlock = ({
     summary,
-    pendingPermissions = {},
     pendingEdits = [],
-    onRespondToPermission,
 }: {
     summary: WorkSummary;
-    pendingPermissions?: Record<string, any>;
     pendingEdits?: PendingEditItem[];
-    onRespondToPermission?: (id: string, answer: string) => void;
 }) => {
-    const { postMessage, onMessage } = useVSCodeApi();
+    const { postMessage } = useVSCodeApi();
     const isActive = summary.status === 'running';
     const needsAttention = summary.status === 'waiting' || summary.status === 'failed';
     const shouldAutoExpand = isActive || needsAttention;
     const [expanded, setExpanded] = useState(shouldAutoExpand);
     const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
-    const [openFileWarning, setOpenFileWarning] = useState<string | null>(null);
     const previousStatusRef = useRef(summary.status);
     const previousTurnIdRef = useRef(summary.turnId);
     const previousActiveSectionRef = useRef<string | null>(null);
@@ -1815,6 +2310,11 @@ const WorkSummaryBlock = ({
         if (previousStatusRef.current !== summary.status) {
             previousStatusRef.current = summary.status;
             userToggledRef.current = false;
+            if (['completed', 'stopped', 'rejected'].includes(summary.status)) {
+                manuallyToggledSectionsRef.current.clear();
+                previousActiveSectionRef.current = null;
+                setOpenSections({});
+            }
             setExpanded(summary.status === 'running' || summary.status === 'waiting' || summary.status === 'failed');
             return;
         }
@@ -1827,10 +2327,6 @@ const WorkSummaryBlock = ({
     const duration = summary.durationMs || Date.now() - summary.startedAt;
     const changedFiles = summary.items.filter(item => item.type === 'edit' && item.path);
     const artifacts = summary.items.filter(isRenderableWorkArtifact);
-    const visiblePendingPermissions = Object.values(pendingPermissions).filter((request: any) => {
-        if (!pendingEdits.length) return true;
-        return !/edit|file|write|save|apply|diff/i.test(request.question || '');
-    });
     const title = isActive
         ? `Working ${formatWorkDuration(duration)}`
         : summary.status === 'waiting'
@@ -1852,16 +2348,6 @@ const WorkSummaryBlock = ({
     const activeSectionTitle = findActiveSectionTitle(summary.items, groupedItems);
 
     useEffect(() => {
-        const unsubscribe = onMessage((message: any) => {
-            if (message.type !== 'open_file_result' || message.payload?.ok !== false) return;
-            const failedPath = message.payload.path;
-            if (!failedPath || !changedFiles.some(file => file.path === failedPath || file.target === failedPath)) return;
-            setOpenFileWarning(`File not found: ${failedPath}`);
-        });
-        return () => { unsubscribe(); };
-    }, [onMessage, changedFiles]);
-
-    useEffect(() => {
         if (previousTurnIdRef.current !== summary.turnId) {
             previousTurnIdRef.current = summary.turnId;
             previousActiveSectionRef.current = null;
@@ -1871,6 +2357,12 @@ const WorkSummaryBlock = ({
     }, [summary.turnId]);
 
     useEffect(() => {
+        if (!isActive && ['completed', 'stopped', 'rejected'].includes(summary.status)) {
+            previousActiveSectionRef.current = activeSectionTitle;
+            setOpenSections({});
+            return;
+        }
+
         setOpenSections(prev => {
             const manual = manuallyToggledSectionsRef.current;
             const activeChanged = previousActiveSectionRef.current !== activeSectionTitle;
@@ -1895,7 +2387,7 @@ const WorkSummaryBlock = ({
     }, [activeSectionTitle, sectionTitlesKey]);
 
     return (
-        <div className="mb-3 mt-1 pb-2 text-[12px]">
+        <div className="mb-3 mt-1 pb-2 text-[12.5px]">
             <button
                 type="button"
                 onClick={() => {
@@ -1905,8 +2397,8 @@ const WorkSummaryBlock = ({
                 className="group flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-vscode-fg/60 hover:bg-vscode-list-hoverBackground/35 hover:text-vscode-fg/80"
             >
                 <span className={`codicon ${isActive ? 'codicon-loading codicon-modifier-spin' : 'codicon-terminal'} text-[12px] text-vscode-fg/42`} />
-                <span className="shrink-0 text-[12.5px] font-semibold">{title}</span>
-                {subtitle && <span className="min-w-0 truncate text-[11px] text-vscode-fg/44">{subtitle}</span>}
+                <span className="shrink-0 text-[13px] font-semibold">{title}</span>
+                {subtitle && <span className="min-w-0 truncate text-[11.5px] text-vscode-fg/46">{subtitle}</span>}
                 <span className={`codicon codicon-chevron-right ml-auto text-[11px] text-vscode-fg/30 transition-transform duration-200 ease-out motion-reduce:transition-none ${expanded ? 'rotate-90' : ''}`} />
             </button>
 
@@ -1915,7 +2407,7 @@ const WorkSummaryBlock = ({
                     <div className="space-y-2.5">
                         {summary.items.length === 0 ? (
                             <div className="flex items-start gap-2 text-[11px] text-vscode-fg/40">
-                                <span className="codicon codicon-info mt-0.5 w-4 shrink-0 text-[12px]" />
+                                <span className={`codicon ${isActive ? 'codicon-loading codicon-modifier-spin' : 'codicon-info'} mt-0.5 w-4 shrink-0 text-[12px]`} />
                                 <span>{emptyWorkSummaryText(summary)}</span>
                             </div>
                         ) : sectionTitles
@@ -1934,46 +2426,14 @@ const WorkSummaryBlock = ({
                             ))}
                     </div>
 
-                    {(changedFiles.length > 0 || artifacts.length > 0 || pendingEdits.length > 0 || visiblePendingPermissions.length > 0) && (
+                    {(changedFiles.length > 0 || artifacts.length > 0 || pendingEdits.length > 0) && (
                         <div className="mt-3 space-y-1.5 pt-0.5">
                             {pendingEdits.length > 0 && (
-                                <InlineEditApprovalCard
-                                    edits={pendingEdits}
-                                    onOpenFile={(path) => postMessage({ type: 'open_file', payload: { path } })}
-                                    onSave={() => postMessage({ type: 'execute_command', payload: { command: '/accept-all' } })}
-                                    onReject={() => postMessage({ type: 'execute_command', payload: { command: '/reject-all' } })}
-                                />
+                                <ChangedFilesSummary files={pendingEdits} mode="pending" />
                             )}
 
                             {changedFiles.length > 0 && (
-                                <div>
-                                    <div className="mb-1 text-[11px] font-medium text-vscode-fg/42">Changed files</div>
-                                    <div className="flex flex-wrap gap-1.5">
-                                        {changedFiles.map(file => (
-                                            <button
-                                                key={file.id}
-                                                type="button"
-                                                title={file.path || file.target}
-                                                onClick={() => {
-                                                    setOpenFileWarning(null);
-                                                    file.path && postMessage({ type: 'open_file', payload: { path: file.path } });
-                                                }}
-                                                className="inline-flex max-w-full items-center gap-1.5 rounded border border-vscode-border bg-vscode-input-bg px-2 py-1 text-left font-mono text-[10px] text-vscode-fg/65 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg"
-                                            >
-                                                <span className="codicon codicon-file-code shrink-0 text-[12px] text-vscode-fg/45" />
-                                                <span className="min-w-0 truncate">{file.target || file.path}</span>
-                                                <span className="shrink-0 text-vscode-fg/35">
-                                                    {typeof file.additions === 'number' || typeof file.deletions === 'number'
-                                                        ? `+${file.additions || 0} -${file.deletions || 0}`
-                                                        : 'modified'}
-                                                </span>
-                                            </button>
-                                        ))}
-                                    </div>
-                                    {openFileWarning && (
-                                        <div className="mt-1 text-[10px] leading-snug text-amber-400/80">{openFileWarning}</div>
-                                    )}
-                                </div>
+                                <ChangedFilesSummary files={changedFiles} mode="completed" />
                             )}
 
                             {artifacts.length > 0 && (
@@ -1995,28 +2455,6 @@ const WorkSummaryBlock = ({
                                     </div>
                                 </div>
                             )}
-
-                            {visiblePendingPermissions.map((request: any) => (
-                                <div key={request.id} className="rounded border border-blue-400/20 bg-blue-400/5 px-2 py-2">
-                                    <div className="mb-2 text-[11px] text-vscode-fg/75">{request.question}</div>
-                                    <div className="flex flex-wrap gap-1.5">
-                                        {(request.choices?.length ? request.choices : ['Allow', 'Deny']).map((choice: string, index: number) => (
-                                            <button
-                                                key={choice}
-                                                type="button"
-                                                onClick={() => onRespondToPermission?.(request.id, choice)}
-                                                className={`rounded px-2.5 py-1 text-[10px] font-medium transition-colors ${
-                                                    index === 0
-                                                        ? 'bg-vscode-button-background text-vscode-button-foreground hover:bg-vscode-button-hoverBackground'
-                                                        : 'bg-vscode-input-bg text-vscode-fg/65 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg'
-                                                }`}
-                                            >
-                                                {choice}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                            ))}
                         </div>
                     )}
                 </div>
@@ -2029,20 +2467,14 @@ const WorkSummaryBlock = ({
 const AssistantContent = ({
     message,
     workSummary,
-    pendingPermissions = {},
     pendingEdits = [],
-    onRespondToPermission,
     onExecuteCommand,
-    onSendMessage,
     onRetryMessage
 }: {
     message: ChatMessageType;
     workSummary?: WorkSummary;
-    pendingPermissions?: Record<string, any>;
     pendingEdits?: PendingEditItem[];
-    onRespondToPermission?: (id: string, answer: string) => void;
     onExecuteCommand?: (cmd: string) => void;
-    onSendMessage?: (content: string) => void;
     onRetryMessage?: () => void;
 }) => {
     const { body, artifacts: inlineArtifacts } = useMemo(() => parseContent(message.content), [message.content]);
@@ -2060,6 +2492,7 @@ const AssistantContent = ({
     const planArtifacts = useMemo(() => artifacts.filter(isImplementationPlanArtifact), [artifacts]);
     const nonPlanArtifacts = useMemo(() => artifacts.filter(isTimelineArtifact), [artifacts]);
     const isStreaming = message.isStreaming || false;
+    const messageHasWorkPayload = Boolean(message.toolCalls?.length || message.activities?.length || artifacts.length);
     const effectiveWorkSummary = useMemo<WorkSummary | undefined>(() => {
         if (workSummary) {
             if (message.errorInfo && workSummary.items.length === 0) return undefined;
@@ -2106,13 +2539,18 @@ const AssistantContent = ({
             text = text.replace(linkRegex, '');
         });
         const visible = cleanAssistantVisibleText(text);
-        const hasToolPayload = Boolean(message.toolCalls?.length || message.activities?.length || artifacts.length);
-        return hasToolPayload ? normalizeWorkCommentaryText(visible) : visible;
-    }, [body, artifacts, message.activities?.length, message.toolCalls?.length]);
+        return messageHasWorkPayload ? normalizeWorkCommentaryText(visible) : visible;
+    }, [body, artifacts, messageHasWorkPayload]);
 
     const blocks = useMemo(() => splitMessageIntoBlocks(cleanedBody), [cleanedBody]);
     const textBlocks = useMemo(() => blocks.filter(block => block.type !== 'thinking' && block.content.trim()), [blocks]);
-    const shouldUseCompletionCard = Boolean(!isStreaming && cleanedBody.trim() && effectiveWorkSummary?.status === 'completed' && !message.errorInfo);
+    const runPhase = message.metadata?.runPhase;
+    const shouldUseDraftCard = Boolean(runPhase === 'intermediate' && cleanedBody.trim() && !message.errorInfo);
+    const suppressCompletionCard = effectiveWorkSummary?.status === 'stopped'
+        || effectiveWorkSummary?.status === 'failed'
+        || effectiveWorkSummary?.status === 'rejected';
+    const shouldUseCompletionCard = Boolean(!isStreaming && cleanedBody.trim() && !suppressCompletionCard && !runPhase && messageHasWorkPayload && effectiveWorkSummary?.status === 'completed' && !message.errorInfo);
+    const shouldRenderPlainAssistantText = Boolean(cleanedBody.trim() && !shouldUseCompletionCard && !shouldUseDraftCard);
 
     if (!cleanedBody && planArtifacts.length === 0 && !effectiveWorkSummary && !message.errorInfo) {
         return null;
@@ -2123,9 +2561,7 @@ const AssistantContent = ({
             {effectiveWorkSummary && (
                 <WorkSummaryBlock
                     summary={effectiveWorkSummary}
-                    pendingPermissions={pendingPermissions}
                     pendingEdits={pendingEdits}
-                    onRespondToPermission={onRespondToPermission}
                 />
             )}
 
@@ -2140,16 +2576,31 @@ const AssistantContent = ({
                 <PlanArtifactCard
                     key={artifact.id || artifact.path || `${artifact.title || 'plan'}-${index}`}
                     artifact={artifact}
-                    onSendMessage={onSendMessage}
                 />
             ))}
 
             <div className={`prose prose-sm max-w-none text-vscode-fg ${isStreaming ? 'opacity-90' : ''}`}>
                 {shouldUseCompletionCard ? (
                     <CompletionMarkdownCard content={cleanedBody} onExecuteCommand={onExecuteCommand} />
-                ) : textBlocks.map((block, idx) => (
-                    <MarkdownContent key={idx} content={block.content} onExecuteCommand={onExecuteCommand} />
-                ))}
+                ) : shouldUseDraftCard ? (
+                    <DraftMarkdownCard content={cleanedBody} onExecuteCommand={onExecuteCommand} />
+                ) : shouldRenderPlainAssistantText ? (
+                    <div className="group/assistant-message relative pr-7" data-testid="assistant-message-body">
+                        {!isStreaming && (
+                            <CopyButton
+                                code={cleanedBody}
+                                title="Copy message"
+                                className={`absolute right-0 top-0 transition-opacity ${runPhase === 'final'
+                                    ? 'opacity-80 hover:opacity-100 focus:opacity-100'
+                                    : 'opacity-0 group-hover/assistant-message:opacity-100 focus:opacity-100'
+                                }`}
+                            />
+                        )}
+                        {textBlocks.map((block, idx) => (
+                            <MarkdownContent key={idx} content={block.content} onExecuteCommand={onExecuteCommand} />
+                        ))}
+                    </div>
+                ) : null}
                 {(isStreaming && !cleanedBody) ? (
                     <div className="flex items-center gap-2 text-vscode-fg/40 py-2">
                         <span className="codicon codicon-loading codicon-modifier-spin w-3 h-3 animate-spin" />
@@ -2161,17 +2612,94 @@ const AssistantContent = ({
     );
 };
 
-const UserContent = ({ content, via, remoteUsername }: { content: string; via?: 'telegram' | 'discord' | 'ide'; remoteUsername?: string }) => {
+function queuedTurnLabel(queuedTurn: QueuedTurnState): string {
+    if (queuedTurn.status === 'failed') return queuedTurn.error || 'Queued message failed';
+    if (queuedTurn.status === 'running') return 'Running queued turn';
+    return queuedTurn.queueLength && queuedTurn.queueLength > 1
+        ? `Queued for current run (${queuedTurn.queueLength} waiting)`
+        : 'Queued for current run';
+}
+
+const UserContent = ({
+    content,
+    via,
+    remoteUsername,
+    queuedTurn,
+    contextFiles = [],
+}: {
+    content: string;
+    via?: 'telegram' | 'discord' | 'ide';
+    remoteUsername?: string;
+    queuedTurn?: QueuedTurnState;
+    contextFiles?: ContextFilePayload[];
+}) => {
+    const legacy = useMemo(() => extractLegacyContextFiles(content), [content]);
+    const visibleContent = legacy.content || content.trim();
+    const attachments = useMemo(() => {
+        const merged = [...contextFiles, ...legacy.contextFiles];
+        const seen = new Set<string>();
+        return merged.filter(file => {
+            const key = file.stagedPath || file.path;
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+    }, [contextFiles, legacy.contextFiles]);
     const isRedundantName = remoteUsername && via && remoteUsername.toLowerCase() === via.toLowerCase();
+    const remoteLabel = messengerLabel(via);
+    const queuedIcon = queuedTurn?.status === 'running'
+        ? 'codicon-loading codicon-modifier-spin'
+        : queuedTurn?.status === 'failed'
+            ? 'codicon-error'
+            : 'codicon-clock';
     return (
         <div className="flex flex-col items-end w-full px-2 mb-2">
             <div className="flex items-center gap-2 mb-1.5 px-2">
                 {(!isRedundantName && remoteUsername) ? <span className="text-[10px] text-vscode-fg/45 font-medium">{remoteUsername}</span> : null}
-                {via && via !== 'ide' ? <span className="inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded bg-cyan-500/10 text-[9px] text-cyan-400 font-medium border border-cyan-500/20">{via}</span> : null}
+                {via && via !== 'ide' ? (
+                    <span
+                        className="inline-flex items-center justify-center text-cyan-400"
+                        title={remoteLabel}
+                        aria-label={remoteLabel}
+                    >
+                        <MessengerIcon via={via} className="h-4 w-4" />
+                    </span>
+                ) : null}
             </div>
-            <div className="max-w-[88%] py-3 px-4 rounded-md rounded-tr-sm whitespace-pre-wrap text-[13px] leading-relaxed border border-vscode-border bg-vscode-input-bg text-vscode-fg/90 transition-colors hover:bg-vscode-list-hoverBackground">
-                {content}
-            </div>
+            {attachments.length > 0 ? (
+                <div className="mb-1.5 flex max-w-[88%] flex-wrap justify-end gap-1.5">
+                    {attachments.map((file, index) => {
+                        const displayName = contextFileDisplayName(file);
+                        const path = file.stagedPath || file.path;
+                        return (
+                            <div
+                                key={`${path}-${index}`}
+                                title={path}
+                                className="inline-flex max-w-[260px] items-center gap-1.5 rounded-md bg-vscode-input-bg/70 px-2 py-1 text-[11px] text-vscode-fg/68"
+                            >
+                                <FileGlyph path={displayName || path} type={file.kind === 'folder' ? 'folder' : 'file'} size="xs" />
+                                <span className="min-w-0 truncate font-medium">{displayName}</span>
+                                <span className="shrink-0 text-[10px] text-vscode-fg/38">{contextFileMeta(file)}</span>
+                            </div>
+                        );
+                    })}
+                </div>
+            ) : null}
+            {visibleContent ? (
+                <div className="max-w-[88%] py-3 px-4 rounded-md rounded-tr-sm whitespace-pre-wrap text-[13px] leading-relaxed border border-vscode-border bg-vscode-input-bg text-vscode-fg/90 transition-colors hover:bg-vscode-list-hoverBackground">
+                    {visibleContent}
+                </div>
+            ) : null}
+            {queuedTurn ? (
+                <div className={`mt-1.5 flex max-w-[88%] items-center gap-1.5 rounded px-2 py-0.5 text-[10.5px] ${
+                    queuedTurn.status === 'failed'
+                        ? 'border border-red-500/25 bg-red-500/10 text-red-300'
+                        : 'border border-vscode-border/60 bg-vscode-input-bg/60 text-vscode-fg/55'
+                }`}>
+                    <span className={`codicon ${queuedIcon} text-[11px]`} />
+                    <span className="min-w-0 truncate">{queuedTurnLabel(queuedTurn)}</span>
+                </div>
+            ) : null}
         </div>
     );
 };
@@ -2179,21 +2707,17 @@ const UserContent = ({ content, via, remoteUsername }: { content: string; via?: 
 export function ChatMessage({
     message,
     workSummary,
-    pendingPermissions = {},
+    queuedTurn,
     pendingEdits = [],
-    onRespondToPermission,
     onExecuteCommand,
-    onSendMessage,
     onRetryMessage,
     onRestore
 }: {
     message: ChatMessageType;
     workSummary?: WorkSummary;
-    pendingPermissions?: Record<string, any>;
+    queuedTurn?: QueuedTurnState;
     pendingEdits?: PendingEditItem[];
-    onRespondToPermission?: (id: string, answer: string) => void;
     onExecuteCommand?: (command: string) => void;
-    onSendMessage?: (content: string) => void;
     onRetryMessage?: () => void;
     onRestore?: (hash: string) => void;
 }) {
@@ -2215,16 +2739,29 @@ export function ChatMessage({
                     <AssistantContent
                         message={message}
                         workSummary={workSummary}
-                        pendingPermissions={pendingPermissions}
                         pendingEdits={pendingEdits}
-                        onRespondToPermission={onRespondToPermission}
                         onExecuteCommand={onExecuteCommand}
-                        onSendMessage={onSendMessage}
                         onRetryMessage={onRetryMessage}
                     />
                 </div>
             ) : (
-                <UserContent content={message.content} via={message.via} remoteUsername={message.remoteUsername} />
+                <>
+                    <UserContent
+                        content={message.content}
+                        via={message.via}
+                        remoteUsername={message.remoteUsername}
+                        queuedTurn={queuedTurn}
+                        contextFiles={message.contextFiles || message.context_files || []}
+                    />
+                    {workSummary && (
+                        <div className="px-3 pt-1">
+                            <WorkSummaryBlock
+                                summary={workSummary}
+                                pendingEdits={pendingEdits}
+                            />
+                        </div>
+                    )}
+                </>
             )}
         </div>
     );

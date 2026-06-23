@@ -25,7 +25,7 @@ type AnthropicProvider struct {
 // NewAnthropicProvider creates a new Anthropic provider
 func NewAnthropicProvider(apiKey, model string) *AnthropicProvider {
 	if model == "" {
-		model = "claude-sonnet-4-20250514"
+		model = "claude-sonnet-4-6"
 	}
 	return &AnthropicProvider{
 		apiKey: apiKey,
@@ -247,7 +247,7 @@ func (p *AnthropicProvider) buildRequest(req *ChatRequest, stream bool) *anthrop
 	}
 
 	var thinking *anthropicThinking
-	if strings.Contains(p.model, "claude-3-7") && maxTokens >= 4000 {
+	if supportsAnthropicExtendedThinking(p.model) && maxTokens >= 4000 {
 		thinking = &anthropicThinking{
 			Type:         "enabled",
 			BudgetTokens: 2048, // Default budget for reasoning
@@ -265,6 +265,13 @@ func (p *AnthropicProvider) buildRequest(req *ChatRequest, stream bool) *anthrop
 		TopP:        req.TopP,
 		Stream:      stream,
 	}
+}
+
+func supportsAnthropicExtendedThinking(model string) bool {
+	model = strings.ToLower(model)
+	return strings.Contains(model, "claude-3-7") ||
+		strings.Contains(model, "claude-sonnet-4-6") ||
+		strings.Contains(model, "claude-haiku-4-5")
 }
 
 func (p *AnthropicProvider) parseResponse(resp *anthropicResponse) *ChatResponse {

@@ -21,6 +21,55 @@ type EmbeddedSkill struct {
 func PluginDevSkills() []EmbeddedSkill {
 	return []EmbeddedSkill{
 		{
+			Name:             "agent-reliability",
+			DisplayName:      "Agent Reliability",
+			Description:      "Improve Ricochet prompts, workflows, tools, permissions, memory, swarm, skills, verification, reviews, and task completion reliability.",
+			WhenToUse:        "Use when the user asks to improve agent behavior, workflows, prompts, tools, skills, permissions, swarm, memory, verification, reviews, or completion reliability.",
+			AllowedTools:     []string{"list_dir", "read_file", "grep_search", "find_by_name", "get_diagnostics", "execute_command", "command_status", "list_available_skills", "invoke_skill"},
+			Effort:           "high",
+			ExecutionContext: "fork",
+			Content: `
+# Ricochet Agent Reliability Skill
+
+Use this skill for Ricochet agent mechanics, not product feature work.
+
+## Execution Rules
+- Do not make false success claims. Cite tool output, tests, or direct inspection.
+- Do not retry failed tools blindly. Read the error, change the input or strategy, then retry.
+- Before final response, inspect touched files or diffs enough to catch accidental edits.
+- If verification cannot run, report the exact missing command or condition.
+- If blocked, state the blocker, what was tried, and the smallest next decision needed.
+
+## Workflow Rules
+- Treat workflows as contracts with inputs, stop conditions, forbidden actions, verification, and completion criteria.
+- Preserve unrelated dirty worktree changes.
+- Do not stage the whole tree, force push, or mutate external systems unless the user explicitly requested it and permissions allow it.
+
+## Review Rules
+- Lead with findings.
+- Include severity, file/line when available, confidence, and why the issue matters.
+- Report only actionable defects, regressions, security risks, data-loss risks, or missing tests tied to concrete behavior.
+- If no findings exist, say that clearly and mention residual verification risk.
+`,
+			Enforcement: "suggest",
+			Triggers: TriggerConfig{
+				Keywords: []string{"agent reliability", "workflow", "workflows", "prompt", "prompts", "verification", "permissions", "swarm", "agent behavior"},
+				IntentPatterns: []string{
+					"(?i)improve.*agent",
+					"(?i)audit.*agent",
+					"(?i)fix.*workflow",
+					"(?i)make.*agent.*reliable",
+				},
+				PathPatterns: []string{
+					"core/internal/prompts/*",
+					"core/internal/workflow/*",
+					"core/internal/skills/*",
+					"core/.agent/workflows/*",
+					"core/.agent/skills/*",
+				},
+			},
+		},
+		{
 			Name:         "plugin-structure",
 			DisplayName:  "Plugin Structure",
 			Description:  "Understand the Ricochet Plugin structure.",

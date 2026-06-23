@@ -67,7 +67,7 @@ export class DiffService extends EventEmitter {
         return path.join(workspaceFolders[0].uri.fsPath, filePath);
     }
 
-    public registerPendingEdit(filePath: string, newContent: string, options?: { originalContent?: string; proposalId?: string; tool?: string }) {
+    public registerPendingEdit(filePath: string, newContent: string, options?: { originalContent?: string; proposalId?: string; tool?: string }): PendingEdit | undefined {
         const fullPath = this.toAbsolutePath(filePath);
         let originalContent = '';
         const existedAtProposal = fs.existsSync(fullPath);
@@ -82,9 +82,12 @@ export class DiffService extends EventEmitter {
         }
 
         const hunks = this.computeHunks(originalContent, newContent);
+        if (hunks.length === 0) {
+            return undefined;
+        }
         const stats = this.calculateStatsFromHunks(hunks);
         const conflict = this.getConflictState(fullPath, originalContent, newContent, !existedAtProposal);
-        this.pendingEdits.set(fullPath, {
+        const edit: PendingEdit = {
             filePath: fullPath,
             newContent,
             originalContent,
@@ -98,8 +101,10 @@ export class DiffService extends EventEmitter {
             isNewFile: !existedAtProposal,
             proposalId: options?.proposalId,
             tool: options?.tool
-        });
+        };
+        this.pendingEdits.set(fullPath, edit);
         this.emit('change');
+        return edit;
     }
 
     private calculateStats(oldContent: string, newContent: string) {

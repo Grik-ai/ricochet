@@ -8,6 +8,8 @@ type StoredAuthTokens = {
     expiresAt?: number | null;
 };
 
+type AuthSyncStatus = 'ready' | 'degraded';
+
 type DeviceCodeResponse = {
     device_code?: string;
     deviceCode?: string;
@@ -36,8 +38,10 @@ type TokenResponse = {
 };
 
 const AUTH_SECRET_KEY = 'ricochet.grik.auth';
-const DEFAULT_GRIK_API_BASE_URL = 'https://grik.ai/api/v1';
-const DEFAULT_GRIK_WEB_BASE_URL = 'https://grik.ai';
+const DEFAULT_GRIK_API_BASE_URL = 'https://grik.io/api/v1';
+const DEFAULT_GRIK_WEB_BASE_URL = 'https://grik.io';
+const ACCOUNT_REQUEST_ATTEMPTS = 2;
+const ACCOUNT_RETRY_DELAY_MS = 250;
 
 export class AuthService {
     private pollTimer?: ReturnType<typeof setTimeout>;
@@ -102,21 +106,32 @@ export class AuthService {
         await this.context.secrets.delete(AUTH_SECRET_KEY);
         await this.notifyAccessToken(null);
         this.postMessage({ type: 'auth_state', payload: this.loggedOutState() });
-        this.postMessage({ type: 'billing_state', payload: { credits: [], entitlements: [] } });
+        this.postMessage({ type: 'billing_state', payload: { credits: [], entitlements: [], syncStatus: 'ready' } });
     }
 
     async syncState() {
         const tokens = await this.getTokens();
         if (!tokens?.accessToken) {
             this.postMessage({ type: 'auth_state', payload: this.loggedOutState() });
-            this.postMessage({ type: 'billing_state', payload: { credits: [], entitlements: [] } });
+            this.postMessage({ type: 'billing_state', payload: { credits: [], entitlements: [], syncStatus: 'ready' } });
             return;
         }
 
         let activeTokens = tokens;
         if (tokens.expiresAt && tokens.expiresAt < Date.now() + 30_000) {
-            const refreshed = await this.refreshTokens(tokens).catch(() => null);
-            if (!refreshed) {
+            const refreshed = await this.refreshTokens(tokens).catch((error) => {
+                if (isUnauthorized(error)) {
+                    return null;
+                }
+                this.postAuthenticatedState(tokens, null, 'degraded', errorMessage(error));
+                return undefined;
+            });
+            if (refreshed === undefined) {
+                await this.notifyAccessToken(activeTokens.accessToken);
+                await this.syncBillingState(activeTokens.accessToken);
+                return;
+            }
+            if (refreshed === null) {
                 await this.logout();
                 return;
             }
@@ -125,37 +140,39 @@ export class AuthService {
 
         await this.notifyAccessToken(activeTokens.accessToken);
 
-        const me = await this.getJson('/users/me', activeTokens.accessToken).catch(async (error) => {
+        const me = await this.getJsonWithRetry('/users/me', activeTokens.accessToken).catch(async (error) => {
             if (isUnauthorized(error)) {
                 const refreshed = await this.refreshTokens(activeTokens).catch(() => null);
                 if (refreshed) {
                     activeTokens = refreshed;
-                    return this.getJson('/users/me', activeTokens.accessToken);
+                    await this.notifyAccessToken(activeTokens.accessToken);
+                    return this.getJsonWithRetry('/users/me', activeTokens.accessToken);
                 }
+                await this.logout();
+                return undefined;
             }
-            throw error;
+            this.postAuthenticatedState(activeTokens, null, 'degraded', errorMessage(error));
+            await this.syncBillingState(activeTokens.accessToken);
+            return undefined;
         });
+        if (me === undefined) return;
 
-        this.postMessage({
-            type: 'auth_state',
-            payload: {
-                authenticated: true,
-                user: (me as any).user || me,
-                expiresAt: activeTokens.expiresAt || null,
-                apiBaseUrl: this.apiBaseUrl(),
-                webBaseUrl: this.webBaseUrl(),
-            },
-        });
+        this.postAuthenticatedState(activeTokens, (me as any).user || me, 'ready');
 
         await this.syncBillingState(activeTokens.accessToken);
     }
 
     async openBilling(payload?: { target?: string; product?: string }) {
         const baseUrl = this.webBaseUrl();
-        const target = payload?.target === 'credits' ? '/billing/credits' : '/dashboard';
+        const rawProduct = payload?.product;
+        const product = rawProduct === 'ricochet_code' && payload?.target !== 'subscription' ? 'ricochet-code' : rawProduct;
+        const target = payload?.target === 'subscription'
+            ? '/en/me/subscription'
+            : product === 'ricochet-code' || payload?.target === 'credits' ? '/en/pricing' : '/dashboard';
         const url = new URL(target, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
-        if (payload?.product) {
-            url.searchParams.set('product', payload.product);
+        const productParam = payload?.target === 'subscription' ? rawProduct || product : product;
+        if (productParam) {
+            url.searchParams.set('product', productParam);
         }
         await vscode.env.openExternal(vscode.Uri.parse(url.toString()));
     }
@@ -163,6 +180,28 @@ export class AuthService {
     async openExternal(url: string) {
         if (!/^https?:\/\//i.test(url)) return;
         await vscode.env.openExternal(vscode.Uri.parse(url));
+    }
+
+    async cancelSubscription(subscriptionId: string, reason?: string) {
+        if (!subscriptionId) {
+            throw new Error('Subscription id is required.');
+        }
+        const accessToken = await this.activeAccessToken();
+        const result = await this.postJson(`/billing/subscriptions/${encodeURIComponent(subscriptionId)}/cancel`, {
+            reason: reason || 'user_requested',
+        }, accessToken);
+        await this.syncBillingState(accessToken);
+        return result;
+    }
+
+    async resumeSubscription(subscriptionId: string) {
+        if (!subscriptionId) {
+            throw new Error('Subscription id is required.');
+        }
+        const accessToken = await this.activeAccessToken();
+        const result = await this.postJson(`/billing/subscriptions/${encodeURIComponent(subscriptionId)}/resume`, {}, accessToken);
+        await this.syncBillingState(accessToken);
+        return result;
     }
 
     private schedulePoll(deviceCode: string, intervalSeconds: number, expiresAt: number) {
@@ -207,15 +246,18 @@ export class AuthService {
             throw new Error('Grik API returned no tokens for approved device login.');
         }
 
-        await this.storeTokens({
+        const storedTokens = {
             accessToken,
             refreshToken,
             expiresAt: this.resolveExpiresAt(payload),
-        });
+        };
+        await this.storeTokens(storedTokens);
 
         this.cancelLogin();
         this.postMessage({ type: 'device_auth_complete', payload: { ok: true } });
-        await this.syncState();
+        await this.syncState().catch((error) => {
+            this.postAuthenticatedState(storedTokens, null, 'degraded', errorMessage(error));
+        });
     }
 
     private async refreshTokens(tokens: StoredAuthTokens): Promise<StoredAuthTokens> {
@@ -238,16 +280,41 @@ export class AuthService {
     }
 
     private async syncBillingState(accessToken: string) {
-        const [creditsResult, entitlementsResult] = await Promise.allSettled([
-            this.getJson('/billing/credits', accessToken),
-            this.getJson('/billing/entitlements', accessToken),
+        const [creditsResult, entitlementsResult, budgetResult] = await Promise.allSettled([
+            this.getJsonWithRetry('/billing/credits', accessToken),
+            this.getJsonWithRetry('/billing/entitlements', accessToken),
+            this.getJsonWithRetry('/ricochet/budget', accessToken),
         ]);
+        const errors = [creditsResult, entitlementsResult]
+            .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+            .map((result) => errorMessage(result.reason));
+        const budget = budgetResult.status === 'fulfilled'
+            ? ((budgetResult.value as any).budget || budgetResult.value)
+            : null;
 
         this.postMessage({
             type: 'billing_state',
             payload: {
                 credits: creditsResult.status === 'fulfilled' ? ((creditsResult.value as any).credits || creditsResult.value) : [],
                 entitlements: entitlementsResult.status === 'fulfilled' ? ((entitlementsResult.value as any).entitlements || entitlementsResult.value) : [],
+                budget,
+                syncStatus: errors.length > 0 ? 'degraded' : 'ready',
+                ...(errors.length > 0 ? { error: Array.from(new Set(errors)).join(' ') } : {}),
+            },
+        });
+    }
+
+    private postAuthenticatedState(tokens: StoredAuthTokens, user: unknown, syncStatus: AuthSyncStatus, error?: string) {
+        this.postMessage({
+            type: 'auth_state',
+            payload: {
+                authenticated: true,
+                user,
+                expiresAt: tokens.expiresAt || null,
+                apiBaseUrl: this.apiBaseUrl(),
+                webBaseUrl: this.webBaseUrl(),
+                syncStatus,
+                ...(error ? { error } : {}),
             },
         });
     }
@@ -280,6 +347,38 @@ export class AuthService {
             throw new HttpError(response.status, (payload as any)?.error || (payload as any)?.message || `Request failed with ${response.status}.`);
         }
         return payload;
+    }
+
+    private async getJsonWithRetry(path: string, accessToken?: string): Promise<unknown> {
+        return this.withTransientRetry(() => this.getJson(path, accessToken), ACCOUNT_REQUEST_ATTEMPTS);
+    }
+
+    private async activeAccessToken(): Promise<string> {
+        const tokens = await this.getTokens();
+        if (!tokens?.accessToken) {
+            throw new Error('Sign in to Grik before managing subscriptions.');
+        }
+        if (tokens.expiresAt && tokens.expiresAt < Date.now() + 30_000) {
+            const refreshed = await this.refreshTokens(tokens);
+            return refreshed.accessToken;
+        }
+        return tokens.accessToken;
+    }
+
+    private async withTransientRetry<T>(operation: () => Promise<T>, attempts: number): Promise<T> {
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                return await operation();
+            } catch (error) {
+                lastError = error;
+                if (attempt >= attempts || !isTransientError(error)) {
+                    throw error;
+                }
+                await delay(ACCOUNT_RETRY_DELAY_MS * attempt);
+            }
+        }
+        throw lastError;
     }
 
     private async getTokens(): Promise<StoredAuthTokens | null> {
@@ -330,7 +429,7 @@ export class AuthService {
         try {
             return await fetch(url, init);
         } catch (error) {
-            throw new Error(this.fetchErrorMessage(url, error));
+            throw new FetchDiagnosticError(this.fetchErrorMessage(url, error), isTransientFetchFailure(error));
         }
     }
 
@@ -384,6 +483,7 @@ export class AuthService {
             expiresAt: null,
             apiBaseUrl: this.apiBaseUrl(),
             webBaseUrl: this.webBaseUrl(),
+            syncStatus: 'ready',
         };
     }
 
@@ -400,8 +500,26 @@ class HttpError extends Error {
     }
 }
 
+class FetchDiagnosticError extends Error {
+    constructor(message: string, readonly transient: boolean) {
+        super(message);
+    }
+}
+
 function isUnauthorized(error: unknown) {
     return error instanceof HttpError && error.status === 401;
+}
+
+function isTransientError(error: unknown) {
+    if (error instanceof FetchDiagnosticError) {
+        return error.transient;
+    }
+    const message = errorMessage(error);
+    return /UND_ERR_CONNECT_TIMEOUT|connect timeout|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|Cannot reach Grik API/i.test(message);
+}
+
+function errorMessage(error: unknown) {
+    return error instanceof Error ? error.message : String(error || 'Request failed.');
 }
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -431,4 +549,14 @@ function fetchFailureDetails(error: unknown): string {
     }
 
     return Array.from(new Set(parts)).join(': ');
+}
+
+function isTransientFetchFailure(error: unknown): boolean {
+    const details = fetchFailureDetails(error);
+    const message = error instanceof Error ? `${error.name} ${error.message} ${details}` : details;
+    return /UND_ERR_CONNECT_TIMEOUT|connect timeout|fetch failed|AbortError|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(message);
+}
+
+function delay(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }

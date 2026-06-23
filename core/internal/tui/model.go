@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -16,17 +17,8 @@ import (
 	"github.com/igoryan-dao/ricochet/internal/livemode"
 	"github.com/igoryan-dao/ricochet/internal/protocol"
 	"github.com/igoryan-dao/ricochet/internal/tui/style"
+	"github.com/igoryan-dao/ricochet/internal/version"
 )
-
-var WhimsicalVerbs = []string{
-	"Perambulating",
-	"Reticulating",
-	"Puzzling",
-	"Sussing",
-	"Meandering",
-	"Cogitating",
-	"Ruminating",
-}
 
 // -- Messages --
 
@@ -67,6 +59,27 @@ type SlashCmdResMsg struct {
 	Error    error
 }
 
+type CommandEventMsg struct {
+	Event protocol.CommandEvent
+}
+
+type ToolLifecycleMsg struct {
+	Event protocol.ToolLifecycleEvent
+}
+
+type TimelineNoticeMsg struct {
+	Kind       string
+	Title      string
+	Status     string
+	Detail     string
+	Path       string
+	LineRange  string
+	Output     string
+	Error      string
+	DurationMs int64
+	Timestamp  int64
+}
+
 type RemoteInputMsg struct {
 	Content string
 }
@@ -95,6 +108,34 @@ type TaskNode struct {
 	Depth      int
 	AgentName  string // e.g. "ARCH", "QA"
 	AgentColor string // Hex color
+}
+
+type APIKeyPrompt struct {
+	Provider string
+}
+
+type TimelineItem struct {
+	Kind          string
+	ID            string
+	ToolUseID     string
+	Section       string
+	Title         string
+	Detail        string
+	Status        string
+	Command       string
+	Cwd           string
+	Shell         string
+	Path          string
+	LineRange     string
+	Output        string
+	Error         string
+	ExitCode      int
+	DurationMs    int64
+	StartedAt     int64
+	CompletedAt   int64
+	Truncated     bool
+	Expanded      bool
+	AffectedFiles []string
 }
 
 // -- Interleaved Blocks Architecture --
@@ -127,6 +168,7 @@ type Model struct {
 
 	Viewport  viewport.Model
 	Textarea  textarea.Model
+	Secret    textinput.Model
 	Spinner   spinner.Model
 	IsLoading bool
 	Thoughts  string
@@ -137,12 +179,20 @@ type Model struct {
 	// Approval flow
 	PendingApproval *AskUserMsg
 	PendingChoice   *AskUserChoiceMsg
+	APIKeyPrompt    *APIKeyPrompt
 	ConfirmationIdx int
 
 	// Interleaved Blocks (Claude Code-style rendering)
 	// Each block is either User Query, Agent Text, or Agent Tree
 	// This is now the Single Source of Truth for history.
 	Blocks []*HistoryBlock
+
+	// First-class event timeline for command/tool lifecycle events.
+	Timeline        []*TimelineItem
+	CommandItems    map[string]*TimelineItem
+	ToolItems       map[string]*TimelineItem
+	ShowShortcuts   bool
+	ShowRawTimeline bool
 
 	// Deduplication State
 	// Tracks how many steps have been rendered for each TaskName to prevent "Snowball Effect"
@@ -162,6 +212,8 @@ type Model struct {
 	Suggestions        []string
 	SelectedSuggestion int
 	ShowSuggestions    bool
+	SlashHistory       []string
+	SlashHistoryIndex  int
 
 	// Stats
 	TokenUsage   int
@@ -179,7 +231,7 @@ type Model struct {
 	CurrentAction string // Granular status like "Searching...", "Writing..."
 
 	// Whimsical Flavor
-	CurrentStatusStr string // "Meandering..."
+	CurrentStatusStr string
 	StatusTick       int
 
 	// Auto-Pilot (Autonomous Agent)
@@ -187,6 +239,10 @@ type Model struct {
 }
 
 func NewModel(cwd, modelName string, msgChan chan tea.Msg, ctrl *agent.Controller) Model {
+	if store, err := config.NewStore(); err == nil {
+		style.SetTheme(store.Get().Theme)
+	}
+
 	renderer, _ := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
 		glamour.WithWordWrap(80),
@@ -216,24 +272,30 @@ func NewModel(cwd, modelName string, msgChan chan tea.Msg, ctrl *agent.Controlle
 	sp.Spinner = spinner.MiniDot
 	sp.Style = style.SpinnerStyle
 
-	session := ctrl.CreateSession()
+	secret := textinput.New()
+	secret.Placeholder = "API key"
+	secret.EchoMode = textinput.EchoPassword
+	secret.EchoCharacter = '*'
+	secret.CharLimit = 0
+	secret.Blur()
 
-	// Initial commands list
-	cmds := []string{
-		"/help", "/model", "/status", "/checkpoint", "/restore", "/init", "/shell",
-		"/memory", "/hooks", "/clear", "/mode", "/exit", "/ether", "/permissions",
+	sessionID := "terminal-lab"
+	if ctrl != nil {
+		session := ctrl.CreateSession()
+		sessionID = session.ID
 	}
 
 	// Generate Welcome Content (Plain Text to prevent ALL artifacts)
 	// We avoid all coloring for the welcome message to be safe.
 
-	welcome := fmt.Sprintf(`Welcome to Ricochet v0.1.0
+	welcome := fmt.Sprintf(`Welcome to Ricochet %s
 Model: %s
 CWD: %s
 
 Type /help for commands.
 Type ? for shortcuts.
 `,
+		version.Display(),
 		modelName,
 		cwd,
 	)
@@ -243,15 +305,19 @@ Type ? for shortcuts.
 	return Model{
 		Cwd:        cwd,
 		Controller: ctrl,
-		SessionID:  session.ID,
+		SessionID:  sessionID,
 		MsgChan:    msgChan,
 		ModelName:  modelName,
 
-		Viewport:    vp,
-		Textarea:    ta,
-		Spinner:     sp,
-		Renderer:    renderer,
-		AllCommands: cmds,
+		Viewport:          vp,
+		Textarea:          ta,
+		Secret:            secret,
+		Spinner:           sp,
+		Renderer:          renderer,
+		AllCommands:       SlashCommandNamesForContext(modelName == "terminal-lab"),
+		SlashHistoryIndex: -1,
+		CommandItems:      make(map[string]*TimelineItem),
+		ToolItems:         make(map[string]*TimelineItem),
 
 		// Blocks initialized with welcome message
 		Blocks: []*HistoryBlock{

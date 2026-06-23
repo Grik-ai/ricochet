@@ -5,6 +5,7 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
+        "dev:chat-lab": "vite --host 127.0.0.1",
         "build": "tsc && vite build",
         "lint": "eslint src --ext ts,tsx",
         "test": "vitest"

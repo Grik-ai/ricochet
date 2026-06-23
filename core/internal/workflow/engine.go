@@ -32,6 +32,9 @@ func NewEngine(executor AgentExecutor, cmdExecutor CommandExecutor) *Engine {
 
 // Execute runs a workflow definition
 func (e *Engine) Execute(ctx context.Context, wf WorkflowDefinition, inputVars map[string]interface{}) (*ExecutionContext, error) {
+	if inputVars == nil {
+		inputVars = make(map[string]interface{})
+	}
 	execCtx := &ExecutionContext{
 		WorkflowID: wf.Name,
 		Variables:  inputVars,
@@ -66,17 +69,22 @@ func (e *Engine) executeStep(ctx context.Context, step WorkflowStep, execCtx *Ex
 	case "parallel":
 		output, err = e.executeParallel(ctx, step.Parallel, execCtx)
 	case "agent":
-		// Interpolate variables into Action (Prompt)
-		prompt := e.interpolate(ctx, step.Action, execCtx.Variables)
+		prompt, interpErr := e.interpolate(ctx, step.Action, execCtx.Variables, step.AllowCommandInjection)
+		if interpErr != nil {
+			err = interpErr
+			break
+		}
 		output, err = e.executor.Execute(ctx, prompt)
 	case "user_input":
-		// For now, we don't have a callback for user input in this engine layer yet
-		// We'll simulate it or fail
-		output = "User input placeholder"
+		err = fmt.Errorf("workflow step %s requires unsupported user input", step.ID)
 	default:
 		// Default to agent if type unspecified but action exists
 		if step.Action != "" {
-			prompt := e.interpolate(ctx, step.Action, execCtx.Variables)
+			prompt, interpErr := e.interpolate(ctx, step.Action, execCtx.Variables, step.AllowCommandInjection)
+			if interpErr != nil {
+				err = interpErr
+				break
+			}
 			output, err = e.executor.Execute(ctx, prompt)
 		}
 	}
@@ -91,6 +99,8 @@ func (e *Engine) executeStep(ctx context.Context, step WorkflowStep, execCtx *Ex
 	result.Status = "success"
 	result.Output = output
 	execCtx.History = append(execCtx.History, result)
+	execCtx.Variables["last_output"] = output
+	execCtx.Variables[fmt.Sprintf("step.%s.output", step.ID)] = output
 
 	return nil
 }
@@ -110,7 +120,13 @@ func (e *Engine) executeParallel(ctx context.Context, steps []WorkflowStep, pare
 			// For parallel agents, we just execute the prompt
 			// TODO: How to handle shared context writes? For now read-only.
 
-			prompt := e.interpolate(ctx, s.Action, parentCtx.Variables)
+			prompt, interpErr := e.interpolate(ctx, s.Action, parentCtx.Variables, s.AllowCommandInjection)
+			if interpErr != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("step %s failed: %w", s.ID, interpErr))
+				mu.Unlock()
+				return
+			}
 			out, err := e.executor.Execute(ctx, prompt)
 
 			mu.Lock()
@@ -140,8 +156,8 @@ func (e *Engine) executeParallel(ctx context.Context, steps []WorkflowStep, pare
 	return agg, nil
 }
 
-// Simple variable interpolation {{var}} and Command Injection !`cmd`
-func (e *Engine) interpolate(_ context.Context, text string, vars map[string]interface{}) string {
+// Simple variable interpolation {{var}} and gated Command Injection !`cmd`.
+func (e *Engine) interpolate(_ context.Context, text string, vars map[string]interface{}, allowCommandInjection bool) (string, error) {
 	// 1. Variable Substitution {{var}}
 	for k, v := range vars {
 		placeholder := fmt.Sprintf("{{%s}}", k)
@@ -156,6 +172,12 @@ func (e *Engine) interpolate(_ context.Context, text string, vars map[string]int
 		startIdx := strings.Index(text, "!`")
 		if startIdx == -1 {
 			break
+		}
+		if !allowCommandInjection {
+			return "", fmt.Errorf("command injection is disabled for this workflow step")
+		}
+		if e.cmdExecutor == nil {
+			return "", fmt.Errorf("command injection requested but no command executor is configured")
 		}
 
 		endIdx := strings.Index(text[startIdx+2:], "`")
@@ -181,5 +203,5 @@ func (e *Engine) interpolate(_ context.Context, text string, vars map[string]int
 		text = text[:startIdx] + output + text[endIdx+1:]
 	}
 
-	return text
+	return text, nil
 }

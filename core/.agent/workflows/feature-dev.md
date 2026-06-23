@@ -1,36 +1,52 @@
 ---
-description: Structured feature development workflow (Discovery -> Exploration -> Architecture -> Implementation -> Review)
+name: feature-dev
+description: Implement a feature with scoped discovery, careful edits, and verification.
+version: "1"
+command: /feature-dev
+risk: medium
+inputs:
+  - name: input
+    description: Feature request or implementation target.
+    required: true
+steps:
+  - id: discover
+    description: Inspect relevant context before editing.
+    type: agent
+    action: |-
+      User request:
+      {{input}}
+
+      Inspect the codebase before proposing or changing anything. Identify the entry points, existing patterns, tests, and project instructions that apply. Keep the scope narrow and call out any hard blocker.
+  - id: plan
+    description: Decide whether a formal plan is needed.
+    type: agent
+    action: |-
+      Based on the discovered context, decide whether this change needs a formal implementation plan.
+
+      Use submit_plan only if the task is complex, risky, ambiguous, or spans multiple modules. For a small safe change, proceed with a short internal checklist and state the assumption.
+  - id: implement
+    description: Make the smallest correct implementation.
+    type: agent
+    action: |-
+      Implement the requested feature using the existing architecture and style. Read files before editing them, avoid unrelated refactors, and preserve user changes in the worktree.
+  - id: verify
+    description: Verify and report.
+    type: agent
+    action: |-
+      Run the narrowest meaningful tests or checks for the touched area. If a check cannot run, explain exactly why. Final response must include changed behavior, verification performed, and residual risk.
+verification:
+  - Run the narrowest useful tests, build, or diagnostics for touched code.
+  - Re-read touched files or diff before final response.
+forbidden_actions:
+  - Do not edit files before repository discovery.
+  - Do not perform unrelated refactors.
+  - Do not claim verification without a command result or direct inspection.
+completion_criteria:
+  - Requested behavior is implemented or blocker is explicitly reported.
+  - Relevant checks are run or not-run reason is stated.
+  - Final response lists changed behavior, verification, and residual risk.
 ---
 
-# Feature Development Workflow
+# Feature Development
 
-This workflow guides you through the 5 phases of building a robust feature.
-
-## Phase 1: Discovery
-[User Input] What feature do you want to build? Be specific about requirements and constraints.
-
-## Phase 2: Exploration (Map the Terrain)
-> **Explorer Agent** is analyzing the codebase...
-
-Action: ` + "`" + `!explorer "Trace the execution paths relevant to: {{input}}. List key files and existing patterns to follow."` + "`" + `
-
-## Phase 3: Architecture (Design the Solution)
-> **Architect Agent** is designing the blueprint...
-
-Action: ` + "`" + `!architect "Based on the explorer's findings, design a solution for: {{input}}. Create a strict implementation plan (` + "`" + `PLAN.md` + "`" + `) listing every file change."` + "`" + `
-
-## Phase 4: Implementation (Build It)
-> **Code Agent** is writing the code...
-
-Action: ` + "`" + `!code "Implement the feature following ` + "`" + `PLAN.md` + "`" + ` exactly. Update ` + "`" + `PLAN.md` + "`" + ` as you complete items."` + "`" + `
-
-## Phase 5: Review (Verify Quality)
-> **Simplifier Agent** is reviewing the changes...
-
-Action: ` + "`" + `!simplifier "Review the changes made in Phase 4. Refactor for clarity and project patterns. Ensure no new technical debt was introduced."` + "`" + `
-
-## Completion
-✅ Feature complete.
-Recommended Next Steps:
-- Run tests: ` + "`" + `!test "Run tests for the new feature"` + "`" + `
-- Create PR: ` + "`" + `!workflow commit-push-pr` + "`" + `
+Use this workflow for implementation requests that should move from repository discovery to scoped edits and verification.

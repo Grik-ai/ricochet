@@ -4,6 +4,7 @@ import { CoreProcess } from './core-process';
 import { LanguageService } from './services/language';
 import { PendingChangesTreeProvider } from './services/review/PendingChangesTree';
 import * as dns from 'node:dns';
+import { getCliInstallStatus, installCli } from './commands/installCli';
 
 let coreProcess: CoreProcess | undefined;
 
@@ -17,11 +18,12 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Get workspace root path
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || context.extensionPath;
-    console.log(`Starting CoreProcess with workspace: ${workspacePath}`);
+    console.log(`Preparing lazy CoreProcess with workspace: ${workspacePath}`);
 
-    // Start the Go core process
+    // Create the Go core process wrapper, but do not spawn the binary until a
+    // Ricochet view/command actually sends a request. This prevents passive IDE
+    // windows from becoming Telegram/Discord gateway owners.
     coreProcess = new CoreProcess(workspacePath, context.extensionPath);
-    await coreProcess.start();
 
     // Initialize Language Service (LSP Bridge)
     new LanguageService(coreProcess);
@@ -92,24 +94,16 @@ export async function activate(context: vscode.ExtensionContext) {
     console.log('Ricochet extension activated');
 }
 
-import { installCli } from './commands/installCli';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-
 function checkCliInstallation(context: vscode.ExtensionContext) {
-    const homeDir = os.homedir();
-    const targetPath = path.join(homeDir, '.local', 'bin', 'ricochet');
+    const status = getCliInstallStatus(context);
 
-    // Simple check: does the file exist?
-    // In future we might check versions
-    if (!fs.existsSync(targetPath)) {
+    if (!status.healthy) {
         vscode.window.showInformationMessage(
-            "Ricochet CLI is not installed in ~/.local/bin. Install it for terminal integration?",
-            "Install",
+            `Ricochet CLI needs install/update: ${status.reason}. Install it for terminal integration?`,
+            "Install/Update",
             "Ignore"
         ).then(selection => {
-            if (selection === "Install") {
+            if (selection === "Install/Update") {
                 vscode.commands.executeCommand('ricochet.installCli');
             }
         });

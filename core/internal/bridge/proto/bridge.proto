@@ -12,6 +12,12 @@ service BridgeService {
 service ChatService {
   // SendMessage sends a message to a specific chat
   rpc SendMessage(OutgoingMessage) returns (MessageResponse);
+
+  // SendOutbound sends a v2 messenger-normalized message.
+  rpc SendOutbound(OutboundMessage) returns (MessageResponse);
+
+  // AckEvent acknowledges a cloud-delivered event so it is not replayed after reconnect.
+  rpc AckEvent(DeliveryAck) returns (MessageResponse);
   
   // StreamEvents receives all bridge events (messages, tool calls, etc.)
   rpc StreamEvents(Empty) returns (stream BridgeEvent);
@@ -58,7 +64,78 @@ message BridgeEvent {
     ToolCall tool_call = 4;
     ToolResult tool_result = 5;
     Heartbeat heartbeat = 6;
+    InboundMessage inbound_message = 7;
+    OutboundMessage outbound_message = 8;
+    DeliveryAck delivery_ack = 9;
+    SessionControl session_control = 10;
   }
+}
+
+message Envelope {
+  string event_id = 1;
+  string session_id = 2;
+  string platform = 3;
+  int64 chat_id = 4;
+  string channel_id = 5;
+  string user_id = 6;
+  string message_id = 7;
+  string thread_id = 8;
+  int64 timestamp = 9;
+  string correlation_id = 10;
+}
+
+message Attachment {
+  string id = 1;
+  string kind = 2;
+  string file_name = 3;
+  string mime_type = 4;
+  string url = 5;
+  int64 size_bytes = 6;
+}
+
+message Button {
+  string text = 1;
+  string data = 2;
+  string url = 3;
+}
+
+message ButtonRow {
+  repeated Button buttons = 1;
+}
+
+message InboundMessage {
+  Envelope envelope = 1;
+  string text = 2;
+  string normalized_command = 3;
+  repeated Attachment attachments = 4;
+  string transcript = 5;
+  string reply_to_message_id = 6;
+  string callback_data = 7;
+  string raw_metadata_json = 8;
+}
+
+message OutboundMessage {
+  Envelope envelope = 1;
+  string text = 2;
+  string parse_mode = 3;
+  repeated ButtonRow button_rows = 4;
+  repeated Attachment attachments = 5;
+  string edit_message_id = 6;
+  bool mobile_summary = 7;
+}
+
+message DeliveryAck {
+  Envelope envelope = 1;
+  string event_id = 2;
+  string status = 3; // received, started, completed, failed
+  string error = 4;
+}
+
+message SessionControl {
+  Envelope envelope = 1;
+  string action = 2; // start_session, switch_session, stop_run, cancel, status, heartbeat
+  string target_session_id = 3;
+  string body = 4;
 }
 
 message IncomingMessage {

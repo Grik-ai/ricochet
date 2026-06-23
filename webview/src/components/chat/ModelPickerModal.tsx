@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
-import { Search, Check, Cpu, X, Loader2, Key } from 'lucide-react';
+import { Search, Check, Cpu, X, Loader2, Key, UserCircle } from 'lucide-react';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
+import { isHostedSubscriptionAccess, type GrikAccountController } from '../../hooks/useGrikAccount';
 
 interface ModelInfo {
     id: string;
@@ -11,6 +12,13 @@ interface ModelInfo {
     isFree: boolean;
     supportsTools: boolean;
     description?: string;
+    recommended?: boolean;
+    accessMode?: 'free' | 'byok' | 'subscription';
+    keySource?: 'server' | 'user' | 'hosted' | 'none';
+    requiresSubscription?: boolean;
+    limited?: boolean;
+    deprecated?: boolean;
+    apiType?: string;
 }
 
 interface ProviderInfo {
@@ -18,7 +26,8 @@ interface ProviderInfo {
     name: string;
     hasKey: boolean;
     hasUserKey?: boolean;
-    keySource?: 'server' | 'user' | 'none';
+    keySource?: 'server' | 'user' | 'hosted' | 'none';
+    accessMode?: 'free' | 'byok' | 'subscription';
     available: boolean; // Changed from isAvailable to match Go backend
     models: ModelInfo[];
 }
@@ -28,6 +37,8 @@ interface ModelPickerModalProps {
     onClose: () => void;
     currentModel: { id: string; name: string; provider: string };
     onSelectModel: (model: { id: string; name: string; provider: string }) => void;
+    grikAccount?: GrikAccountController;
+    onOpenAccount?: () => void;
 }
 
 /**
@@ -38,6 +49,8 @@ export function ModelPickerModal({
     onClose,
     currentModel,
     onSelectModel,
+    grikAccount,
+    onOpenAccount,
 }: ModelPickerModalProps) {
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedIndex, setSelectedIndex] = useState(-1);
@@ -95,12 +108,18 @@ export function ModelPickerModal({
                 providerId: p.id,
                 hasKey: p.hasKey,
                 hasUserKey: p.hasUserKey,
-                keySource: p.keySource,
                 isFree: m.isFree,
                 description: m.description,
                 contextWindow: m.contextWindow,
                 inputPrice: m.inputPrice,
-                outputPrice: m.outputPrice
+                outputPrice: m.outputPrice,
+                providerKeySource: p.keySource,
+                accessMode: m.accessMode,
+                keySource: m.keySource || p.keySource,
+                requiresSubscription: m.requiresSubscription,
+                limited: m.limited,
+                deprecated: m.deprecated,
+                apiType: m.apiType
             }))
         );
     }, [providers]);
@@ -127,6 +146,15 @@ export function ModelPickerModal({
 
     // Get current provider info
     const currentProviderInfo = providers.find(p => p.id === selectedProvider);
+    const selectedProviderUsesGrikAccount = isHostedSubscriptionAccess(currentProviderInfo?.accessMode, currentProviderInfo?.keySource);
+    const selectedProviderAccountLabel = grikAccount?.summary.label || (currentProviderInfo?.available ? 'Subscription' : 'Sign in required');
+    const selectedProviderAccessLabel = grikAccount?.summary.accessLabel || (currentProviderInfo?.available ? 'Available' : 'Sign in required');
+
+    const isModelLockedByAccount = (model: { accessMode?: string; keySource?: string; requiresSubscription?: boolean; hasKey?: boolean }) => {
+        const usesGrikAccount = isHostedSubscriptionAccess(model.accessMode, model.keySource) || Boolean(model.requiresSubscription);
+        if (!usesGrikAccount) return false;
+        return grikAccount ? !grikAccount.summary.hostedAccess : !model.hasKey;
+    };
 
     // Focus search on open
     useEffect(() => {
@@ -162,6 +190,11 @@ export function ModelPickerModal({
         } else if (e.key === 'Enter' && selectedIndex >= 0) {
             e.preventDefault();
             const model = filteredModels[selectedIndex];
+            if (isModelLockedByAccount(model)) {
+                onOpenAccount?.();
+                onClose();
+                return;
+            }
             onSelectModel({ id: model.id, name: model.name, provider: model.providerId });
             onClose();
         } else if (e.key === 'Escape') {
@@ -221,13 +254,49 @@ export function ModelPickerModal({
                             </option>
                         ))}
                     </select>
-                    {currentProviderInfo?.available && (
+                    {currentProviderInfo?.available && !selectedProviderUsesGrikAccount && (
                         <span title={currentProviderInfo.keySource === 'user' ? 'User API key configured' : 'Server API key configured'}>
                             <Key className="w-3 h-3 text-green-400" />
                         </span>
                     )}
+                    {selectedProviderUsesGrikAccount && (
+                        <span className="inline-flex items-center gap-1 rounded bg-white/[0.04] px-1.5 py-0.5 text-[9px] text-vscode-fg/62" title={grikAccount?.summary.detail || 'Hosted models use your Grik account'}>
+                            <UserCircle className="h-3 w-3" />
+                            {selectedProviderAccountLabel}
+                        </span>
+                    )}
                 </div>
             </div>
+
+            {selectedProviderUsesGrikAccount && (
+                <div className="flex items-center justify-between gap-3 border-b border-vscode-border px-3 py-2 text-[11px]">
+                    <div className="min-w-0">
+                        <div className="font-medium text-vscode-fg/78">Grik account</div>
+                        <div className="truncate text-vscode-fg/45">{grikAccount?.summary.detail || 'Sign in to use Ricochet hosted subscription models.'}</div>
+                        {grikAccount?.summary.quotaWarning && (
+                            <div className={`mt-0.5 truncate ${grikAccount.summary.quotaWarning.tone === 'danger' ? 'text-rose-200/80' : 'text-amber-200/80'}`}>
+                                {grikAccount.summary.quotaWarning.label}
+                            </div>
+                        )}
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            if (grikAccount?.summary.hostedAccess) {
+                                grikAccount.openBilling({ target: 'dashboard' });
+                            } else if (onOpenAccount) {
+                                onOpenAccount();
+                            } else {
+                                grikAccount?.signIn();
+                            }
+                            onClose();
+                        }}
+                        className="h-7 shrink-0 rounded-md border border-vscode-border px-2 text-[10px] text-vscode-fg/72 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg transition-colors"
+                    >
+                        {modelPickerAccountActionLabel(grikAccount)}
+                    </button>
+                </div>
+            )}
 
             {/* Model list */}
             <div className="max-h-[300px] overflow-y-auto custom-scrollbar">
@@ -241,14 +310,23 @@ export function ModelPickerModal({
                         No models found
                     </div>
                 ) : (
-                    filteredModels.map((model, index) => (
+                    filteredModels.map((model, index) => {
+                        const usesGrikAccount = isHostedSubscriptionAccess(model.accessMode, model.keySource) || model.requiresSubscription;
+                        const lockedByAccount = isModelLockedByAccount(model);
+                        return (
                         <button
                             key={`${model.providerId}-${model.id}`}
                             onClick={() => {
+                                if (lockedByAccount) {
+                                    onOpenAccount?.();
+                                    onClose();
+                                    return;
+                                }
                                 onSelectModel({ id: model.id, name: model.name, provider: model.providerId });
                                 onClose();
                             }}
-                            className={`w-full flex items-center justify-between px-3 py-2.5 transition-colors ${index === selectedIndex ? 'bg-vscode-list-hoverBackground' :
+                            aria-disabled={lockedByAccount}
+                            className={`w-full flex items-center justify-between px-3 py-2.5 transition-colors ${lockedByAccount ? 'opacity-70' : ''} ${index === selectedIndex ? 'bg-vscode-list-hoverBackground' :
                                 model.id === currentModel.id ? 'bg-vscode-list-hoverBackground' : 'hover:bg-vscode-list-hoverBackground'
                                 }`}
                         >
@@ -258,7 +336,19 @@ export function ModelPickerModal({
                                     {model.isFree && (
                                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">FREE</span>
                                     )}
-                                    {(model.hasUserKey || model.hasKey) && (
+                                    {(model.requiresSubscription || model.accessMode === 'subscription') && (
+                                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300">SUB</span>
+                                    )}
+                                    {model.limited && (
+                                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">LIMITED</span>
+                                    )}
+                                    {model.deprecated && (
+                                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-500/20 text-red-300">OLD</span>
+                                    )}
+                                    {lockedByAccount && (
+                                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-200">{selectedProviderAccessLabel.toUpperCase()}</span>
+                                    )}
+                                    {!usesGrikAccount && (model.hasUserKey || model.hasKey) && (
                                         <span className="text-[9px] text-blue-400">✓</span>
                                     )}
                                 </div>
@@ -276,9 +366,19 @@ export function ModelPickerModal({
                                 <Check className="w-3.5 h-3.5 text-green-400" />
                             )}
                         </button>
-                    ))
+                    );
+                    })
                 )}
             </div>
         </div>
     );
+}
+
+function modelPickerAccountActionLabel(account?: GrikAccountController): string {
+    if (!account) return 'Sign in';
+    if (account.summary.hostedAccess) return 'Manage';
+    if (account.summary.accessState === 'upgrade_required') return 'Upgrade';
+    if (account.summary.accessState === 'signed_out') return 'Sign in';
+    if (account.summary.accessState === 'sync_issue') return 'Retry';
+    return 'Manage';
 }

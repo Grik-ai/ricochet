@@ -335,6 +335,10 @@ type BridgeEvent struct {
 	//	*BridgeEvent_ToolCall
 	//	*BridgeEvent_ToolResult
 	//	*BridgeEvent_Heartbeat
+	//	*BridgeEvent_InboundMessage
+	//	*BridgeEvent_OutboundMessage
+	//	*BridgeEvent_DeliveryAck
+	//	*BridgeEvent_SessionControl
 	Payload       isBridgeEvent_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -429,6 +433,42 @@ func (x *BridgeEvent) GetHeartbeat() *Heartbeat {
 	return nil
 }
 
+func (x *BridgeEvent) GetInboundMessage() *InboundMessage {
+	if x != nil {
+		if x, ok := x.Payload.(*BridgeEvent_InboundMessage); ok {
+			return x.InboundMessage
+		}
+	}
+	return nil
+}
+
+func (x *BridgeEvent) GetOutboundMessage() *OutboundMessage {
+	if x != nil {
+		if x, ok := x.Payload.(*BridgeEvent_OutboundMessage); ok {
+			return x.OutboundMessage
+		}
+	}
+	return nil
+}
+
+func (x *BridgeEvent) GetDeliveryAck() *DeliveryAck {
+	if x != nil {
+		if x, ok := x.Payload.(*BridgeEvent_DeliveryAck); ok {
+			return x.DeliveryAck
+		}
+	}
+	return nil
+}
+
+func (x *BridgeEvent) GetSessionControl() *SessionControl {
+	if x != nil {
+		if x, ok := x.Payload.(*BridgeEvent_SessionControl); ok {
+			return x.SessionControl
+		}
+	}
+	return nil
+}
+
 type isBridgeEvent_Payload interface {
 	isBridgeEvent_Payload()
 }
@@ -453,6 +493,22 @@ type BridgeEvent_Heartbeat struct {
 	Heartbeat *Heartbeat `protobuf:"bytes,6,opt,name=heartbeat,proto3,oneof"`
 }
 
+type BridgeEvent_InboundMessage struct {
+	InboundMessage *InboundMessage `protobuf:"bytes,7,opt,name=inbound_message,json=inboundMessage,proto3,oneof"`
+}
+
+type BridgeEvent_OutboundMessage struct {
+	OutboundMessage *OutboundMessage `protobuf:"bytes,8,opt,name=outbound_message,json=outboundMessage,proto3,oneof"`
+}
+
+type BridgeEvent_DeliveryAck struct {
+	DeliveryAck *DeliveryAck `protobuf:"bytes,9,opt,name=delivery_ack,json=deliveryAck,proto3,oneof"`
+}
+
+type BridgeEvent_SessionControl struct {
+	SessionControl *SessionControl `protobuf:"bytes,10,opt,name=session_control,json=sessionControl,proto3,oneof"`
+}
+
 func (*BridgeEvent_IncomingMessage) isBridgeEvent_Payload() {}
 
 func (*BridgeEvent_OutgoingMessage) isBridgeEvent_Payload() {}
@@ -462,6 +518,646 @@ func (*BridgeEvent_ToolCall) isBridgeEvent_Payload() {}
 func (*BridgeEvent_ToolResult) isBridgeEvent_Payload() {}
 
 func (*BridgeEvent_Heartbeat) isBridgeEvent_Payload() {}
+
+func (*BridgeEvent_InboundMessage) isBridgeEvent_Payload() {}
+
+func (*BridgeEvent_OutboundMessage) isBridgeEvent_Payload() {}
+
+func (*BridgeEvent_DeliveryAck) isBridgeEvent_Payload() {}
+
+func (*BridgeEvent_SessionControl) isBridgeEvent_Payload() {}
+
+type Envelope struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	SessionId     string                 `protobuf:"bytes,2,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Platform      string                 `protobuf:"bytes,3,opt,name=platform,proto3" json:"platform,omitempty"`
+	ChatId        int64                  `protobuf:"varint,4,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
+	ChannelId     string                 `protobuf:"bytes,5,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	UserId        string                 `protobuf:"bytes,6,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	MessageId     string                 `protobuf:"bytes,7,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	ThreadId      string                 `protobuf:"bytes,8,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	Timestamp     int64                  `protobuf:"varint,9,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	CorrelationId string                 `protobuf:"bytes,10,opt,name=correlation_id,json=correlationId,proto3" json:"correlation_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Envelope) Reset() {
+	*x = Envelope{}
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Envelope) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Envelope) ProtoMessage() {}
+
+func (x *Envelope) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Envelope.ProtoReflect.Descriptor instead.
+func (*Envelope) Descriptor() ([]byte, []int) {
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *Envelope) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *Envelope) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *Envelope) GetPlatform() string {
+	if x != nil {
+		return x.Platform
+	}
+	return ""
+}
+
+func (x *Envelope) GetChatId() int64 {
+	if x != nil {
+		return x.ChatId
+	}
+	return 0
+}
+
+func (x *Envelope) GetChannelId() string {
+	if x != nil {
+		return x.ChannelId
+	}
+	return ""
+}
+
+func (x *Envelope) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *Envelope) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
+func (x *Envelope) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *Envelope) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
+func (x *Envelope) GetCorrelationId() string {
+	if x != nil {
+		return x.CorrelationId
+	}
+	return ""
+}
+
+type Attachment struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Kind          string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	FileName      string                 `protobuf:"bytes,3,opt,name=file_name,json=fileName,proto3" json:"file_name,omitempty"`
+	MimeType      string                 `protobuf:"bytes,4,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	Url           string                 `protobuf:"bytes,5,opt,name=url,proto3" json:"url,omitempty"`
+	SizeBytes     int64                  `protobuf:"varint,6,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Attachment) Reset() {
+	*x = Attachment{}
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Attachment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Attachment) ProtoMessage() {}
+
+func (x *Attachment) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Attachment.ProtoReflect.Descriptor instead.
+func (*Attachment) Descriptor() ([]byte, []int) {
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *Attachment) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Attachment) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *Attachment) GetFileName() string {
+	if x != nil {
+		return x.FileName
+	}
+	return ""
+}
+
+func (x *Attachment) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
+func (x *Attachment) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+func (x *Attachment) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
+type Button struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	Data          string                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
+	Url           string                 `protobuf:"bytes,3,opt,name=url,proto3" json:"url,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Button) Reset() {
+	*x = Button{}
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Button) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Button) ProtoMessage() {}
+
+func (x *Button) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Button.ProtoReflect.Descriptor instead.
+func (*Button) Descriptor() ([]byte, []int) {
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *Button) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *Button) GetData() string {
+	if x != nil {
+		return x.Data
+	}
+	return ""
+}
+
+func (x *Button) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+type ButtonRow struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Buttons       []*Button              `protobuf:"bytes,1,rep,name=buttons,proto3" json:"buttons,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ButtonRow) Reset() {
+	*x = ButtonRow{}
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ButtonRow) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ButtonRow) ProtoMessage() {}
+
+func (x *ButtonRow) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ButtonRow.ProtoReflect.Descriptor instead.
+func (*ButtonRow) Descriptor() ([]byte, []int) {
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ButtonRow) GetButtons() []*Button {
+	if x != nil {
+		return x.Buttons
+	}
+	return nil
+}
+
+type InboundMessage struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Envelope          *Envelope              `protobuf:"bytes,1,opt,name=envelope,proto3" json:"envelope,omitempty"`
+	Text              string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	NormalizedCommand string                 `protobuf:"bytes,3,opt,name=normalized_command,json=normalizedCommand,proto3" json:"normalized_command,omitempty"`
+	Attachments       []*Attachment          `protobuf:"bytes,4,rep,name=attachments,proto3" json:"attachments,omitempty"`
+	Transcript        string                 `protobuf:"bytes,5,opt,name=transcript,proto3" json:"transcript,omitempty"`
+	ReplyToMessageId  string                 `protobuf:"bytes,6,opt,name=reply_to_message_id,json=replyToMessageId,proto3" json:"reply_to_message_id,omitempty"`
+	CallbackData      string                 `protobuf:"bytes,7,opt,name=callback_data,json=callbackData,proto3" json:"callback_data,omitempty"`
+	RawMetadataJson   string                 `protobuf:"bytes,8,opt,name=raw_metadata_json,json=rawMetadataJson,proto3" json:"raw_metadata_json,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *InboundMessage) Reset() {
+	*x = InboundMessage{}
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InboundMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InboundMessage) ProtoMessage() {}
+
+func (x *InboundMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InboundMessage.ProtoReflect.Descriptor instead.
+func (*InboundMessage) Descriptor() ([]byte, []int) {
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *InboundMessage) GetEnvelope() *Envelope {
+	if x != nil {
+		return x.Envelope
+	}
+	return nil
+}
+
+func (x *InboundMessage) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *InboundMessage) GetNormalizedCommand() string {
+	if x != nil {
+		return x.NormalizedCommand
+	}
+	return ""
+}
+
+func (x *InboundMessage) GetAttachments() []*Attachment {
+	if x != nil {
+		return x.Attachments
+	}
+	return nil
+}
+
+func (x *InboundMessage) GetTranscript() string {
+	if x != nil {
+		return x.Transcript
+	}
+	return ""
+}
+
+func (x *InboundMessage) GetReplyToMessageId() string {
+	if x != nil {
+		return x.ReplyToMessageId
+	}
+	return ""
+}
+
+func (x *InboundMessage) GetCallbackData() string {
+	if x != nil {
+		return x.CallbackData
+	}
+	return ""
+}
+
+func (x *InboundMessage) GetRawMetadataJson() string {
+	if x != nil {
+		return x.RawMetadataJson
+	}
+	return ""
+}
+
+type OutboundMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Envelope      *Envelope              `protobuf:"bytes,1,opt,name=envelope,proto3" json:"envelope,omitempty"`
+	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	ParseMode     string                 `protobuf:"bytes,3,opt,name=parse_mode,json=parseMode,proto3" json:"parse_mode,omitempty"`
+	ButtonRows    []*ButtonRow           `protobuf:"bytes,4,rep,name=button_rows,json=buttonRows,proto3" json:"button_rows,omitempty"`
+	Attachments   []*Attachment          `protobuf:"bytes,5,rep,name=attachments,proto3" json:"attachments,omitempty"`
+	EditMessageId string                 `protobuf:"bytes,6,opt,name=edit_message_id,json=editMessageId,proto3" json:"edit_message_id,omitempty"`
+	MobileSummary bool                   `protobuf:"varint,7,opt,name=mobile_summary,json=mobileSummary,proto3" json:"mobile_summary,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OutboundMessage) Reset() {
+	*x = OutboundMessage{}
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OutboundMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OutboundMessage) ProtoMessage() {}
+
+func (x *OutboundMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OutboundMessage.ProtoReflect.Descriptor instead.
+func (*OutboundMessage) Descriptor() ([]byte, []int) {
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *OutboundMessage) GetEnvelope() *Envelope {
+	if x != nil {
+		return x.Envelope
+	}
+	return nil
+}
+
+func (x *OutboundMessage) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *OutboundMessage) GetParseMode() string {
+	if x != nil {
+		return x.ParseMode
+	}
+	return ""
+}
+
+func (x *OutboundMessage) GetButtonRows() []*ButtonRow {
+	if x != nil {
+		return x.ButtonRows
+	}
+	return nil
+}
+
+func (x *OutboundMessage) GetAttachments() []*Attachment {
+	if x != nil {
+		return x.Attachments
+	}
+	return nil
+}
+
+func (x *OutboundMessage) GetEditMessageId() string {
+	if x != nil {
+		return x.EditMessageId
+	}
+	return ""
+}
+
+func (x *OutboundMessage) GetMobileSummary() bool {
+	if x != nil {
+		return x.MobileSummary
+	}
+	return false
+}
+
+type DeliveryAck struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Envelope      *Envelope              `protobuf:"bytes,1,opt,name=envelope,proto3" json:"envelope,omitempty"`
+	EventId       string                 `protobuf:"bytes,2,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"` // received, started, completed, failed
+	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeliveryAck) Reset() {
+	*x = DeliveryAck{}
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeliveryAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeliveryAck) ProtoMessage() {}
+
+func (x *DeliveryAck) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeliveryAck.ProtoReflect.Descriptor instead.
+func (*DeliveryAck) Descriptor() ([]byte, []int) {
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *DeliveryAck) GetEnvelope() *Envelope {
+	if x != nil {
+		return x.Envelope
+	}
+	return nil
+}
+
+func (x *DeliveryAck) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *DeliveryAck) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *DeliveryAck) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+type SessionControl struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Envelope        *Envelope              `protobuf:"bytes,1,opt,name=envelope,proto3" json:"envelope,omitempty"`
+	Action          string                 `protobuf:"bytes,2,opt,name=action,proto3" json:"action,omitempty"` // start_session, switch_session, stop_run, cancel, status, heartbeat
+	TargetSessionId string                 `protobuf:"bytes,3,opt,name=target_session_id,json=targetSessionId,proto3" json:"target_session_id,omitempty"`
+	Body            string                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SessionControl) Reset() {
+	*x = SessionControl{}
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionControl) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionControl) ProtoMessage() {}
+
+func (x *SessionControl) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionControl.ProtoReflect.Descriptor instead.
+func (*SessionControl) Descriptor() ([]byte, []int) {
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *SessionControl) GetEnvelope() *Envelope {
+	if x != nil {
+		return x.Envelope
+	}
+	return nil
+}
+
+func (x *SessionControl) GetAction() string {
+	if x != nil {
+		return x.Action
+	}
+	return ""
+}
+
+func (x *SessionControl) GetTargetSessionId() string {
+	if x != nil {
+		return x.TargetSessionId
+	}
+	return ""
+}
+
+func (x *SessionControl) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
 
 type IncomingMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -474,7 +1170,7 @@ type IncomingMessage struct {
 
 func (x *IncomingMessage) Reset() {
 	*x = IncomingMessage{}
-	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[7]
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -486,7 +1182,7 @@ func (x *IncomingMessage) String() string {
 func (*IncomingMessage) ProtoMessage() {}
 
 func (x *IncomingMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[7]
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -499,7 +1195,7 @@ func (x *IncomingMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IncomingMessage.ProtoReflect.Descriptor instead.
 func (*IncomingMessage) Descriptor() ([]byte, []int) {
-	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{7}
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *IncomingMessage) GetChatId() int64 {
@@ -535,7 +1231,7 @@ type OutgoingMessage struct {
 
 func (x *OutgoingMessage) Reset() {
 	*x = OutgoingMessage{}
-	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[8]
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -547,7 +1243,7 @@ func (x *OutgoingMessage) String() string {
 func (*OutgoingMessage) ProtoMessage() {}
 
 func (x *OutgoingMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[8]
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -560,7 +1256,7 @@ func (x *OutgoingMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OutgoingMessage.ProtoReflect.Descriptor instead.
 func (*OutgoingMessage) Descriptor() ([]byte, []int) {
-	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{8}
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *OutgoingMessage) GetChatId() int64 {
@@ -602,7 +1298,7 @@ type ToolCall struct {
 
 func (x *ToolCall) Reset() {
 	*x = ToolCall{}
-	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[9]
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -614,7 +1310,7 @@ func (x *ToolCall) String() string {
 func (*ToolCall) ProtoMessage() {}
 
 func (x *ToolCall) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[9]
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -627,7 +1323,7 @@ func (x *ToolCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCall.ProtoReflect.Descriptor instead.
 func (*ToolCall) Descriptor() ([]byte, []int) {
-	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{9}
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ToolCall) GetCallId() string {
@@ -662,7 +1358,7 @@ type ToolResult struct {
 
 func (x *ToolResult) Reset() {
 	*x = ToolResult{}
-	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[10]
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -674,7 +1370,7 @@ func (x *ToolResult) String() string {
 func (*ToolResult) ProtoMessage() {}
 
 func (x *ToolResult) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[10]
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -687,7 +1383,7 @@ func (x *ToolResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolResult.ProtoReflect.Descriptor instead.
 func (*ToolResult) Descriptor() ([]byte, []int) {
-	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{10}
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ToolResult) GetCallId() string {
@@ -720,7 +1416,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[11]
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -732,7 +1428,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[11]
+	mi := &file_internal_bridge_proto_bridge_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -745,7 +1441,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{11}
+	return file_internal_bridge_proto_bridge_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Heartbeat) GetTimestamp() int64 {
@@ -779,7 +1475,7 @@ const file_internal_bridge_proto_bridge_proto_rawDesc = "" +
 	"\x06format\x18\x02 \x01(\tR\x06format\"E\n" +
 	"\x15TranscriptionResponse\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x18\n" +
-	"\asuccess\x18\x02 \x01(\bR\asuccess\"\xde\x02\n" +
+	"\asuccess\x18\x02 \x01(\bR\asuccess\"\xe4\x04\n" +
 	"\vBridgeEvent\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12D\n" +
@@ -788,8 +1484,74 @@ const file_internal_bridge_proto_bridge_proto_rawDesc = "" +
 	"\ttool_call\x18\x04 \x01(\v2\x10.bridge.ToolCallH\x00R\btoolCall\x125\n" +
 	"\vtool_result\x18\x05 \x01(\v2\x12.bridge.ToolResultH\x00R\n" +
 	"toolResult\x121\n" +
-	"\theartbeat\x18\x06 \x01(\v2\x11.bridge.HeartbeatH\x00R\theartbeatB\t\n" +
-	"\apayload\"Z\n" +
+	"\theartbeat\x18\x06 \x01(\v2\x11.bridge.HeartbeatH\x00R\theartbeat\x12A\n" +
+	"\x0finbound_message\x18\a \x01(\v2\x16.bridge.InboundMessageH\x00R\x0einboundMessage\x12D\n" +
+	"\x10outbound_message\x18\b \x01(\v2\x17.bridge.OutboundMessageH\x00R\x0foutboundMessage\x128\n" +
+	"\fdelivery_ack\x18\t \x01(\v2\x13.bridge.DeliveryAckH\x00R\vdeliveryAck\x12A\n" +
+	"\x0fsession_control\x18\n" +
+	" \x01(\v2\x16.bridge.SessionControlH\x00R\x0esessionControlB\t\n" +
+	"\apayload\"\xb2\x02\n" +
+	"\bEnvelope\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\x12\x1a\n" +
+	"\bplatform\x18\x03 \x01(\tR\bplatform\x12\x17\n" +
+	"\achat_id\x18\x04 \x01(\x03R\x06chatId\x12\x1d\n" +
+	"\n" +
+	"channel_id\x18\x05 \x01(\tR\tchannelId\x12\x17\n" +
+	"\auser_id\x18\x06 \x01(\tR\x06userId\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\a \x01(\tR\tmessageId\x12\x1b\n" +
+	"\tthread_id\x18\b \x01(\tR\bthreadId\x12\x1c\n" +
+	"\ttimestamp\x18\t \x01(\x03R\ttimestamp\x12%\n" +
+	"\x0ecorrelation_id\x18\n" +
+	" \x01(\tR\rcorrelationId\"\x9b\x01\n" +
+	"\n" +
+	"Attachment\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x1b\n" +
+	"\tfile_name\x18\x03 \x01(\tR\bfileName\x12\x1b\n" +
+	"\tmime_type\x18\x04 \x01(\tR\bmimeType\x12\x10\n" +
+	"\x03url\x18\x05 \x01(\tR\x03url\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\x06 \x01(\x03R\tsizeBytes\"B\n" +
+	"\x06Button\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\tR\x04data\x12\x10\n" +
+	"\x03url\x18\x03 \x01(\tR\x03url\"5\n" +
+	"\tButtonRow\x12(\n" +
+	"\abuttons\x18\x01 \x03(\v2\x0e.bridge.ButtonR\abuttons\"\xd7\x02\n" +
+	"\x0eInboundMessage\x12,\n" +
+	"\benvelope\x18\x01 \x01(\v2\x10.bridge.EnvelopeR\benvelope\x12\x12\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text\x12-\n" +
+	"\x12normalized_command\x18\x03 \x01(\tR\x11normalizedCommand\x124\n" +
+	"\vattachments\x18\x04 \x03(\v2\x12.bridge.AttachmentR\vattachments\x12\x1e\n" +
+	"\n" +
+	"transcript\x18\x05 \x01(\tR\n" +
+	"transcript\x12-\n" +
+	"\x13reply_to_message_id\x18\x06 \x01(\tR\x10replyToMessageId\x12#\n" +
+	"\rcallback_data\x18\a \x01(\tR\fcallbackData\x12*\n" +
+	"\x11raw_metadata_json\x18\b \x01(\tR\x0frawMetadataJson\"\xab\x02\n" +
+	"\x0fOutboundMessage\x12,\n" +
+	"\benvelope\x18\x01 \x01(\v2\x10.bridge.EnvelopeR\benvelope\x12\x12\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text\x12\x1d\n" +
+	"\n" +
+	"parse_mode\x18\x03 \x01(\tR\tparseMode\x122\n" +
+	"\vbutton_rows\x18\x04 \x03(\v2\x11.bridge.ButtonRowR\n" +
+	"buttonRows\x124\n" +
+	"\vattachments\x18\x05 \x03(\v2\x12.bridge.AttachmentR\vattachments\x12&\n" +
+	"\x0fedit_message_id\x18\x06 \x01(\tR\reditMessageId\x12%\n" +
+	"\x0emobile_summary\x18\a \x01(\bR\rmobileSummary\"\x84\x01\n" +
+	"\vDeliveryAck\x12,\n" +
+	"\benvelope\x18\x01 \x01(\v2\x10.bridge.EnvelopeR\benvelope\x12\x19\n" +
+	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12\x16\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\"\x96\x01\n" +
+	"\x0eSessionControl\x12,\n" +
+	"\benvelope\x18\x01 \x01(\v2\x10.bridge.EnvelopeR\benvelope\x12\x16\n" +
+	"\x06action\x18\x02 \x01(\tR\x06action\x12*\n" +
+	"\x11target_session_id\x18\x03 \x01(\tR\x0ftargetSessionId\x12\x12\n" +
+	"\x04body\x18\x04 \x01(\tR\x04body\"Z\n" +
 	"\x0fIncomingMessage\x12\x17\n" +
 	"\achat_id\x18\x01 \x01(\x03R\x06chatId\x12\x12\n" +
 	"\x04body\x18\x02 \x01(\tR\x04body\x12\x1a\n" +
@@ -813,9 +1575,11 @@ const file_internal_bridge_proto_bridge_proto_rawDesc = "" +
 	"\tHeartbeat\x12\x1c\n" +
 	"\ttimestamp\x18\x01 \x01(\x03R\ttimestamp2Q\n" +
 	"\rBridgeService\x12@\n" +
-	"\tHandshake\x12\x18.bridge.HandshakeRequest\x1a\x19.bridge.HandshakeResponse2\x84\x01\n" +
+	"\tHandshake\x12\x18.bridge.HandshakeRequest\x1a\x19.bridge.HandshakeResponse2\x80\x02\n" +
 	"\vChatService\x12?\n" +
-	"\vSendMessage\x12\x17.bridge.OutgoingMessage\x1a\x17.bridge.MessageResponse\x124\n" +
+	"\vSendMessage\x12\x17.bridge.OutgoingMessage\x1a\x17.bridge.MessageResponse\x12@\n" +
+	"\fSendOutbound\x12\x17.bridge.OutboundMessage\x1a\x17.bridge.MessageResponse\x128\n" +
+	"\bAckEvent\x12\x13.bridge.DeliveryAck\x1a\x17.bridge.MessageResponse\x124\n" +
 	"\fStreamEvents\x12\r.bridge.Empty\x1a\x13.bridge.BridgeEvent0\x012O\n" +
 	"\n" +
 	"STTService\x12A\n" +
@@ -834,7 +1598,7 @@ func file_internal_bridge_proto_bridge_proto_rawDescGZIP() []byte {
 	return file_internal_bridge_proto_bridge_proto_rawDescData
 }
 
-var file_internal_bridge_proto_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_internal_bridge_proto_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_internal_bridge_proto_bridge_proto_goTypes = []any{
 	(*Empty)(nil),                 // 0: bridge.Empty
 	(*HandshakeRequest)(nil),      // 1: bridge.HandshakeRequest
@@ -843,31 +1607,55 @@ var file_internal_bridge_proto_bridge_proto_goTypes = []any{
 	(*AudioChunk)(nil),            // 4: bridge.AudioChunk
 	(*TranscriptionResponse)(nil), // 5: bridge.TranscriptionResponse
 	(*BridgeEvent)(nil),           // 6: bridge.BridgeEvent
-	(*IncomingMessage)(nil),       // 7: bridge.IncomingMessage
-	(*OutgoingMessage)(nil),       // 8: bridge.OutgoingMessage
-	(*ToolCall)(nil),              // 9: bridge.ToolCall
-	(*ToolResult)(nil),            // 10: bridge.ToolResult
-	(*Heartbeat)(nil),             // 11: bridge.Heartbeat
+	(*Envelope)(nil),              // 7: bridge.Envelope
+	(*Attachment)(nil),            // 8: bridge.Attachment
+	(*Button)(nil),                // 9: bridge.Button
+	(*ButtonRow)(nil),             // 10: bridge.ButtonRow
+	(*InboundMessage)(nil),        // 11: bridge.InboundMessage
+	(*OutboundMessage)(nil),       // 12: bridge.OutboundMessage
+	(*DeliveryAck)(nil),           // 13: bridge.DeliveryAck
+	(*SessionControl)(nil),        // 14: bridge.SessionControl
+	(*IncomingMessage)(nil),       // 15: bridge.IncomingMessage
+	(*OutgoingMessage)(nil),       // 16: bridge.OutgoingMessage
+	(*ToolCall)(nil),              // 17: bridge.ToolCall
+	(*ToolResult)(nil),            // 18: bridge.ToolResult
+	(*Heartbeat)(nil),             // 19: bridge.Heartbeat
 }
 var file_internal_bridge_proto_bridge_proto_depIdxs = []int32{
-	7,  // 0: bridge.BridgeEvent.incoming_message:type_name -> bridge.IncomingMessage
-	8,  // 1: bridge.BridgeEvent.outgoing_message:type_name -> bridge.OutgoingMessage
-	9,  // 2: bridge.BridgeEvent.tool_call:type_name -> bridge.ToolCall
-	10, // 3: bridge.BridgeEvent.tool_result:type_name -> bridge.ToolResult
-	11, // 4: bridge.BridgeEvent.heartbeat:type_name -> bridge.Heartbeat
-	1,  // 5: bridge.BridgeService.Handshake:input_type -> bridge.HandshakeRequest
-	8,  // 6: bridge.ChatService.SendMessage:input_type -> bridge.OutgoingMessage
-	0,  // 7: bridge.ChatService.StreamEvents:input_type -> bridge.Empty
-	4,  // 8: bridge.STTService.Transcribe:input_type -> bridge.AudioChunk
-	2,  // 9: bridge.BridgeService.Handshake:output_type -> bridge.HandshakeResponse
-	3,  // 10: bridge.ChatService.SendMessage:output_type -> bridge.MessageResponse
-	6,  // 11: bridge.ChatService.StreamEvents:output_type -> bridge.BridgeEvent
-	5,  // 12: bridge.STTService.Transcribe:output_type -> bridge.TranscriptionResponse
-	9,  // [9:13] is the sub-list for method output_type
-	5,  // [5:9] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	15, // 0: bridge.BridgeEvent.incoming_message:type_name -> bridge.IncomingMessage
+	16, // 1: bridge.BridgeEvent.outgoing_message:type_name -> bridge.OutgoingMessage
+	17, // 2: bridge.BridgeEvent.tool_call:type_name -> bridge.ToolCall
+	18, // 3: bridge.BridgeEvent.tool_result:type_name -> bridge.ToolResult
+	19, // 4: bridge.BridgeEvent.heartbeat:type_name -> bridge.Heartbeat
+	11, // 5: bridge.BridgeEvent.inbound_message:type_name -> bridge.InboundMessage
+	12, // 6: bridge.BridgeEvent.outbound_message:type_name -> bridge.OutboundMessage
+	13, // 7: bridge.BridgeEvent.delivery_ack:type_name -> bridge.DeliveryAck
+	14, // 8: bridge.BridgeEvent.session_control:type_name -> bridge.SessionControl
+	9,  // 9: bridge.ButtonRow.buttons:type_name -> bridge.Button
+	7,  // 10: bridge.InboundMessage.envelope:type_name -> bridge.Envelope
+	8,  // 11: bridge.InboundMessage.attachments:type_name -> bridge.Attachment
+	7,  // 12: bridge.OutboundMessage.envelope:type_name -> bridge.Envelope
+	10, // 13: bridge.OutboundMessage.button_rows:type_name -> bridge.ButtonRow
+	8,  // 14: bridge.OutboundMessage.attachments:type_name -> bridge.Attachment
+	7,  // 15: bridge.DeliveryAck.envelope:type_name -> bridge.Envelope
+	7,  // 16: bridge.SessionControl.envelope:type_name -> bridge.Envelope
+	1,  // 17: bridge.BridgeService.Handshake:input_type -> bridge.HandshakeRequest
+	16, // 18: bridge.ChatService.SendMessage:input_type -> bridge.OutgoingMessage
+	12, // 19: bridge.ChatService.SendOutbound:input_type -> bridge.OutboundMessage
+	13, // 20: bridge.ChatService.AckEvent:input_type -> bridge.DeliveryAck
+	0,  // 21: bridge.ChatService.StreamEvents:input_type -> bridge.Empty
+	4,  // 22: bridge.STTService.Transcribe:input_type -> bridge.AudioChunk
+	2,  // 23: bridge.BridgeService.Handshake:output_type -> bridge.HandshakeResponse
+	3,  // 24: bridge.ChatService.SendMessage:output_type -> bridge.MessageResponse
+	3,  // 25: bridge.ChatService.SendOutbound:output_type -> bridge.MessageResponse
+	3,  // 26: bridge.ChatService.AckEvent:output_type -> bridge.MessageResponse
+	6,  // 27: bridge.ChatService.StreamEvents:output_type -> bridge.BridgeEvent
+	5,  // 28: bridge.STTService.Transcribe:output_type -> bridge.TranscriptionResponse
+	23, // [23:29] is the sub-list for method output_type
+	17, // [17:23] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_internal_bridge_proto_bridge_proto_init() }
@@ -881,6 +1669,10 @@ func file_internal_bridge_proto_bridge_proto_init() {
 		(*BridgeEvent_ToolCall)(nil),
 		(*BridgeEvent_ToolResult)(nil),
 		(*BridgeEvent_Heartbeat)(nil),
+		(*BridgeEvent_InboundMessage)(nil),
+		(*BridgeEvent_OutboundMessage)(nil),
+		(*BridgeEvent_DeliveryAck)(nil),
+		(*BridgeEvent_SessionControl)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -888,7 +1680,7 @@ func file_internal_bridge_proto_bridge_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_bridge_proto_bridge_proto_rawDesc), len(file_internal_bridge_proto_bridge_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   3,
 		},

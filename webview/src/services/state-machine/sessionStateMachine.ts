@@ -30,7 +30,7 @@ type AskCommandEvent = { type: "ask_command"; partial: boolean }
 type AskBrowserActionLaunchEvent = { type: "ask_browser_action_launch"; partial: boolean }
 type AskUseMcpServerEvent = { type: "ask_use_mcp_server"; partial: boolean }
 type AskFollowupEvent = { type: "ask_followup"; partial: boolean }
-type AskCompletionResultEvent = { type: "ask_completion_result" }
+type AskCompletionResultEvent = { type: "ask_completion_result"; payload?: any }
 type SubmitInputEvent = { type: "submit_input" } // Optimistic transition
 type ProcessErrorEvent = { type: "process_error"; error: string }
 type ApproveActionEvent = { type: "approve_action" }
@@ -364,11 +364,29 @@ function transitionFromCreating(event: SessionEvent, context: SessionContext): T
         case "process_error":
             return {
                 nextState: SessionState.error,
-                contextUpdate: { errorMessage: event.error },
+                contextUpdate: {
+                    errorMessage: event.error,
+                    activeToolCalls: clearActiveRuntimeCalls(),
+                    pendingChoice: undefined,
+                    pendingTool: undefined,
+                    missionStatus: 'failed',
+                    parentTurnStatus: 'failed',
+                    lastEventAt: Date.now(),
+                },
             }
 
         case "cancel_session":
-            return { nextState: SessionState.stopped }
+            return {
+                nextState: SessionState.stopped,
+                contextUpdate: {
+                    activeToolCalls: clearActiveRuntimeCalls(),
+                    pendingChoice: undefined,
+                    pendingTool: undefined,
+                    missionStatus: 'stopped',
+                    parentTurnStatus: 'failed',
+                    lastEventAt: Date.now(),
+                },
+            }
 
         default:
             return { nextState: SessionState.creating }
@@ -394,8 +412,31 @@ function hasActiveWorkers(workers: Record<string, WorkerState>): boolean {
     return Object.values(workers).some(worker => worker.isActive || worker.status === 'queued' || worker.status === 'running' || worker.status === 'In Progress');
 }
 
+function hasBlockingActiveWorkers(context: SessionContext): boolean {
+    return Boolean(context.missionTitle) && hasActiveWorkers(context.workers);
+}
+
+function completeRuntimeWorkers(workers: Record<string, WorkerState>, timestamp = Date.now()): Record<string, WorkerState> {
+    return Object.fromEntries(Object.entries(workers).map(([id, worker]) => {
+        if (!worker.isActive && !/queued|running|in progress|active/i.test(worker.status || '')) {
+            return [id, worker];
+        }
+        return [id, {
+            ...worker,
+            status: worker.status === 'failed' ? worker.status : 'completed',
+            isActive: false,
+            completedAt: worker.completedAt || timestamp,
+            updatedAt: timestamp,
+        }];
+    }));
+}
+
 function hasRunningTools(activeToolCalls: SessionContext['activeToolCalls']): boolean {
-    return Object.values(activeToolCalls).some(tool => tool.status === 'running');
+    const now = Date.now();
+    return Object.values(activeToolCalls).some(tool => (
+        tool.status === 'running' &&
+        (!tool.updatedAt || now - tool.updatedAt < 5 * 60 * 1000)
+    ));
 }
 
 function clearActiveRuntimeCalls(): SessionContext['activeToolCalls'] {
@@ -561,7 +602,7 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
 
         // Completion
         case "ask_completion_result":
-            if (hasActiveWorkers(context.workers)) {
+            if (hasBlockingActiveWorkers(context)) {
                 return {
                     nextState: SessionState.streaming,
                     contextUpdate: {
@@ -584,6 +625,7 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
                     activeToolCalls: clearActiveRuntimeCalls(),
                     pendingChoice: undefined,
                     pendingTool: undefined,
+                    workers: completeRuntimeWorkers(context.workers, timestamp),
                     missionStatus: 'completed',
                     parentTurnStatus: 'completed',
                     lastEventAt: timestamp,
@@ -601,6 +643,7 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
         case "ask_mistake_limit_reached":
         case "ask_invalid_model":
         case "ask_payment_required_prompt":
+        case "process_error":
             return {
                 nextState: SessionState.error,
                 contextUpdate: {
@@ -610,6 +653,9 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
                         type: 'mission_failed',
                         content: "An error occurred during execution."
                     }],
+                    activeToolCalls: clearActiveRuntimeCalls(),
+                    pendingChoice: undefined,
+                    pendingTool: undefined,
                     missionStatus: 'failed',
                     parentTurnStatus: 'failed',
                     lastEventAt: timestamp,
@@ -625,6 +671,9 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
             return {
                 nextState: SessionState.stopped,
                 contextUpdate: {
+                    activeToolCalls: clearActiveRuntimeCalls(),
+                    pendingChoice: undefined,
+                    pendingTool: undefined,
                     logs: [{
                         id: `log-${timestamp}`,
                         timestamp,
@@ -747,7 +796,7 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
                 });
             }
 
-            if (currentState === SessionState.completed && isFinalNoWorkUpdate) {
+            if (isFinalNoWorkUpdate) {
                 return {
                     nextState: SessionState.completed,
                     contextUpdate: {
@@ -819,6 +868,7 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
 	                }
 	            } else if (p.status) {
 	                const status = String(p.status).toLowerCase();
+                    const result = String(p.result || '').toLowerCase();
 	                if (status.includes('waiting for approval')) {
 	                    missionStatus = 'waiting';
 	                    parentTurnStatus = 'waiting';
@@ -835,6 +885,26 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
 	                        timestamp,
 	                        type: 'info',
 	                        content: 'Loop warning: repeated narration detected; agent is changing strategy.',
+	                        metadata: p
+	                    });
+	                } else if (result === 'budget_exceeded' || result === 'stopped' || status.includes('stopped')) {
+	                    missionStatus = 'stopped';
+	                    parentTurnStatus = 'failed';
+	                    logs.push({
+	                        id: `mission-stopped-${timestamp}`,
+	                        timestamp,
+	                        type: 'info',
+	                        content: p.status || 'Run stopped.',
+	                        metadata: p
+	                    });
+	                } else if (result === 'error' || status.includes('no hub tasks were created') || status.includes('failed') || status.includes('error')) {
+	                    missionStatus = 'failed';
+	                    parentTurnStatus = 'failed';
+	                    logs.push({
+	                        id: `mission-failed-${timestamp}`,
+	                        timestamp,
+	                        type: 'mission_failed',
+	                        content: p.status || 'Mission needs attention.',
 	                        metadata: p
 	                    });
 	                } else if (status.includes('mission accomplished') || status.includes('completed')) {
@@ -865,12 +935,18 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
                 });
             }
 
+            const nextState = missionStatus === 'completed'
+                ? SessionState.completed
+                : missionStatus === 'stopped'
+                    ? SessionState.stopped
+                    : missionStatus === 'failed'
+                        ? SessionState.error
+                        : currentState === SessionState.creating
+                            ? SessionState.streaming
+                            : currentState;
+
             return {
-                nextState: missionStatus === 'completed'
-                    ? SessionState.completed
-                    : currentState === SessionState.creating
-                        ? SessionState.streaming
-                        : currentState,
+                nextState,
                 contextUpdate: {
                     workers,
                     logs,
@@ -916,7 +992,17 @@ function transitionFromWaitingApproval(event: SessionEvent, context?: SessionCon
             }
 
         case "cancel_session":
-            return { nextState: SessionState.stopped }
+            return {
+                nextState: SessionState.stopped,
+                contextUpdate: {
+                    activeToolCalls: clearActiveRuntimeCalls(),
+                    pendingTool: undefined,
+                    pendingChoice: undefined,
+                    missionStatus: 'stopped',
+                    parentTurnStatus: 'failed',
+                    lastEventAt: Date.now(),
+                },
+            }
 
         case "chat_update":
         case "task_progress":
@@ -939,7 +1025,17 @@ function transitionFromWaitingInput(event: SessionEvent, context?: SessionContex
             }
 
         case "cancel_session":
-            return { nextState: SessionState.stopped }
+            return {
+                nextState: SessionState.stopped,
+                contextUpdate: {
+                    activeToolCalls: clearActiveRuntimeCalls(),
+                    pendingTool: undefined,
+                    pendingChoice: undefined,
+                    missionStatus: 'stopped',
+                    parentTurnStatus: 'failed',
+                    lastEventAt: Date.now(),
+                },
+            }
 
         case "chat_update":
         case "task_progress":
@@ -961,11 +1057,12 @@ function transitionFromCompleted(event: SessionEvent, context?: SessionContext):
             const msg = event.message;
             const toolCalls = Array.isArray(msg?.toolCalls) ? msg.toolCalls : [];
             const hasRunningToolCalls = toolCalls.some((tc: any) => tc.status !== 'completed' && tc.status !== 'error');
-            if (msg?.isStreaming === false && !hasRunningToolCalls && !hasActiveWorkers(ctx.workers)) {
+            if (msg?.isStreaming === false && !hasRunningToolCalls && !hasBlockingActiveWorkers(ctx)) {
                 return {
                     nextState: SessionState.completed,
                     contextUpdate: {
                         activeToolCalls: clearActiveRuntimeCalls(),
+                        workers: completeRuntimeWorkers(ctx.workers, msg.timestamp || Date.now()),
                         missionStatus: 'completed',
                         parentTurnStatus: 'completed',
                         lastEventAt: msg.timestamp || Date.now(),
@@ -978,10 +1075,12 @@ function transitionFromCompleted(event: SessionEvent, context?: SessionContext):
         case "task_progress": {
             const ctx = context || createInitialContext();
             const p = event.payload;
-            if (!p?.is_active && !hasActiveWorkers(ctx.workers)) {
+            if (!p?.is_active && !hasBlockingActiveWorkers(ctx)) {
                 return {
                     nextState: SessionState.completed,
                     contextUpdate: {
+                        activeToolCalls: clearActiveRuntimeCalls(),
+                        workers: completeRuntimeWorkers(ctx.workers, Date.now()),
                         missionStatus: 'completed',
                         parentTurnStatus: 'completed',
                         lastEventAt: Date.now(),
@@ -1016,7 +1115,17 @@ function transitionFromPaused(event: SessionEvent, context?: SessionContext): Tr
             return transitionFromStreaming(event, context || createInitialContext(), SessionState.paused)
 
         case "cancel_session":
-            return { nextState: SessionState.stopped }
+            return {
+                nextState: SessionState.stopped,
+                contextUpdate: {
+                    activeToolCalls: clearActiveRuntimeCalls(),
+                    pendingTool: undefined,
+                    pendingChoice: undefined,
+                    missionStatus: 'stopped',
+                    parentTurnStatus: 'failed',
+                    lastEventAt: Date.now(),
+                },
+            }
 
         default:
             return { nextState: SessionState.paused }
@@ -1037,7 +1146,17 @@ function transitionFromError(event: SessionEvent, context?: SessionContext): Tra
             return { nextState: SessionState.streaming }
 
         case "cancel_session":
-            return { nextState: SessionState.stopped }
+            return {
+                nextState: SessionState.stopped,
+                contextUpdate: {
+                    activeToolCalls: clearActiveRuntimeCalls(),
+                    pendingTool: undefined,
+                    pendingChoice: undefined,
+                    missionStatus: 'stopped',
+                    parentTurnStatus: 'failed',
+                    lastEventAt: Date.now(),
+                },
+            }
 
         default:
             return { nextState: SessionState.error }

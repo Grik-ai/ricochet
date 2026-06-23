@@ -17,6 +17,7 @@ import (
 	"github.com/igoryan-dao/ricochet/internal/codegraph"
 	"github.com/igoryan-dao/ricochet/internal/config"
 	"github.com/igoryan-dao/ricochet/internal/host"
+	"github.com/igoryan-dao/ricochet/internal/keepawake"
 	"github.com/igoryan-dao/ricochet/internal/livemode"
 	"github.com/igoryan-dao/ricochet/internal/mcp"
 	"github.com/igoryan-dao/ricochet/internal/modes"
@@ -60,6 +61,8 @@ type Handler struct {
 	StartedAt             time.Time `json:"-"`
 	HealthMu              sync.RWMutex
 	ActiveChat            bool
+	ActiveRunsMu          sync.RWMutex
+	ActiveRuns            map[string]string
 	LastProviderRequestAt int64
 	LastProviderSuccessAt int64
 	LastProviderError     string
@@ -97,10 +100,87 @@ func NewHandler(
 	}
 }
 
+func (h *Handler) getLiveModeStatus() *livemode.Status {
+	if h.LiveMode != nil {
+		return h.LiveMode.GetStatus()
+	}
+
+	var telegramToken string
+	var telegramChatID int64
+	var discordToken string
+	var discordApplicationID string
+	allowRemoteSessionStart := false
+
+	if h.Settings != nil {
+		settings := h.Settings.Get()
+		telegramToken = settings.LiveMode.TelegramToken
+		telegramChatID = settings.LiveMode.TelegramChatID
+		discordToken = settings.LiveMode.DiscordToken
+		discordApplicationID = settings.LiveMode.DiscordApplicationID
+		allowRemoteSessionStart = settings.LiveMode.AllowRemoteSessionStart
+	}
+	if h.LiveModeConfig != nil {
+		if h.LiveModeConfig.TelegramToken != "" {
+			telegramToken = h.LiveModeConfig.TelegramToken
+		}
+		if h.LiveModeConfig.TelegramChatID != 0 {
+			telegramChatID = h.LiveModeConfig.TelegramChatID
+		}
+		if h.LiveModeConfig.DiscordToken != "" {
+			discordToken = h.LiveModeConfig.DiscordToken
+		}
+		if h.LiveModeConfig.DiscordApplicationID != "" {
+			discordApplicationID = h.LiveModeConfig.DiscordApplicationID
+		}
+		allowRemoteSessionStart = h.LiveModeConfig.AllowRemoteSessionStart
+	}
+
+	return &livemode.Status{
+		Enabled:                 false,
+		AllowRemoteSessionStart: allowRemoteSessionStart,
+		Channels: map[string]livemode.ChannelStatus{
+			"telegram": {
+				Configured: strings.TrimSpace(telegramToken) != "" || telegramChatID != 0,
+				Active:     false,
+				Label:      "Telegram",
+			},
+			"discord": {
+				Configured: strings.TrimSpace(discordToken) != "" || strings.TrimSpace(discordApplicationID) != "",
+				Active:     false,
+				Label:      "Discord",
+			},
+		},
+	}
+}
+
 func (h *Handler) setActiveChat(active bool) {
 	h.HealthMu.Lock()
 	h.ActiveChat = active
 	h.HealthMu.Unlock()
+}
+
+func (h *Handler) isSessionActive(sessionID string) bool {
+	h.ActiveRunsMu.RLock()
+	defer h.ActiveRunsMu.RUnlock()
+	if h.ActiveRuns == nil {
+		return false
+	}
+	return h.ActiveRuns[sessionID] != ""
+}
+
+func (h *Handler) setSessionActive(sessionID, runID string, active bool) {
+	h.ActiveRunsMu.Lock()
+	if h.ActiveRuns == nil {
+		h.ActiveRuns = make(map[string]string)
+	}
+	if active {
+		h.ActiveRuns[sessionID] = runID
+	} else {
+		delete(h.ActiveRuns, sessionID)
+	}
+	activeChat := len(h.ActiveRuns) > 0
+	h.ActiveRunsMu.Unlock()
+	h.setActiveChat(activeChat)
 }
 
 func (h *Handler) recordProviderEvent(e agent.Event) {
@@ -350,10 +430,24 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 
 	case "abort_chat":
 		log.Printf("Received abort_chat request")
-		if h.Agent != nil {
-			h.Agent.AbortCurrentSession()
+		var payload struct {
+			SessionID string `json:"session_id"`
+			RunID     string `json:"run_id"`
 		}
-		writer.Send(protocol.RPCMessage{ID: msg.ID, Type: "aborted", Payload: protocol.EncodeRPC(map[string]bool{"success": true})})
+		_ = json.Unmarshal(msg.Payload, &payload)
+		success := false
+		if h.Agent != nil {
+			switch {
+			case payload.SessionID != "" && payload.RunID != "":
+				success = h.Agent.AbortRun(payload.SessionID, payload.RunID)
+			case payload.SessionID != "":
+				success = h.Agent.AbortSession(payload.SessionID)
+			default:
+				h.Agent.AbortCurrentSession()
+				success = true
+			}
+		}
+		writer.Send(protocol.RPCMessage{ID: msg.ID, Type: "aborted", Payload: protocol.EncodeRPC(map[string]bool{"success": success})})
 
 	case "plan_decision":
 		var payload struct {
@@ -372,15 +466,19 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 				return
 			}
 		}
+		log.Printf("[PlanDecision] received session_id=%s artifact_id=%s path=%s decision=%s webview_timeline_mutated=false", payload.SessionID, payload.ArtifactID, payload.Path, payload.Decision)
 		decision, err := h.Agent.HandlePlanDecision(payload.SessionID, payload.ArtifactID, payload.Path, payload.Decision)
 		if err != nil {
+			log.Printf("[PlanDecision] failed session_id=%s artifact_id=%s decision=%s error=%v webview_timeline_mutated=false", payload.SessionID, payload.ArtifactID, payload.Decision, err)
 			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
 			return
 		}
+		log.Printf("[PlanDecision] applied session_id=%s artifact_id=%s normalized_decision=%s webview_timeline_mutated=false", payload.SessionID, payload.ArtifactID, decision)
 		writer.Send(protocol.RPCMessage{
 			ID:   msg.ID,
 			Type: "plan_decision_result",
 			Payload: protocol.EncodeRPC(map[string]interface{}{
+				"ok":           true,
 				"session_id":   payload.SessionID,
 				"artifact_id":  payload.ArtifactID,
 				"path":         payload.Path,
@@ -445,10 +543,7 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 			sessionID = "default"
 		}
 
-		h.HealthMu.RLock()
-		activeChat := h.ActiveChat
-		h.HealthMu.RUnlock()
-		if activeChat {
+		if h.isSessionActive(sessionID) {
 			var queued protocol.QueuedMessage
 			var ok bool
 			if strings.EqualFold(fullPayload.Delivery, "steer") {
@@ -524,7 +619,11 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 			}
 		}
 
-		h.setActiveChat(true)
+		h.setSessionActive(sessionID, fullPayload.RunID, true)
+		awake, awakeErr := keepawake.Start("ricochet active run")
+		if awakeErr != nil {
+			log.Printf("Warning: keep-awake unavailable: %v", awakeErr)
+		}
 		err := h.Agent.Chat(h.GlobalCtx, agent.ChatRequestInput{
 			SessionID:    sessionID,
 			Content:      fullPayload.Content,
@@ -533,11 +632,16 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 			PlanMode:     fullPayload.PlanMode,
 			ContextFiles: fullPayload.ContextFiles,
 		}, sendUpdate)
-		h.setActiveChat(false)
+		awake.Stop()
+		h.setSessionActive(sessionID, fullPayload.RunID, false)
 
 		if err == nil {
 			for _, queued := range h.Agent.DrainQueuedMessages(sessionID) {
-				h.setActiveChat(true)
+				h.setSessionActive(queued.SessionID, queued.RunID, true)
+				awake, awakeErr := keepawake.Start("ricochet queued run")
+				if awakeErr != nil {
+					log.Printf("Warning: keep-awake unavailable: %v", awakeErr)
+				}
 				qErr := h.Agent.Chat(h.GlobalCtx, agent.ChatRequestInput{
 					SessionID:    queued.SessionID,
 					Content:      queued.Text,
@@ -545,7 +649,8 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 					RunID:        queued.RunID,
 					ContextFiles: queued.ContextFiles,
 				}, sendUpdate)
-				h.setActiveChat(false)
+				awake.Stop()
+				h.setSessionActive(queued.SessionID, queued.RunID, false)
 				if qErr != nil {
 					writer.Send(protocol.RPCMessage{
 						Type:  "queued_message_error",
@@ -554,6 +659,7 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 							"session_id": queued.SessionID,
 							"run_id":     queued.RunID,
 							"message_id": queued.ID,
+							"error":      qErr.Error(),
 						}),
 					})
 				}
@@ -694,6 +800,14 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 			if s.Provider.APIKey != "" && s.Provider.Provider != "" {
 				h.Providers.SetUserKey(s.Provider.Provider, s.Provider.APIKey)
 			}
+		}
+
+		if !strings.EqualFold(os.Getenv("RICOCHET_DISABLE_OPENROUTER_MODEL_SYNC"), "1") {
+			syncCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if err := h.Providers.RefreshOpenRouterFreeModels(syncCtx); err != nil {
+				log.Printf("get_models: OpenRouter free model sync skipped: %v", err)
+			}
+			cancel()
 		}
 
 		providers := h.Providers.GetAvailableProviders()
@@ -1030,23 +1144,31 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 		}
 		s := h.Settings.Get()
 		settings := map[string]interface{}{
-			"provider":            s.Provider.Provider,
-			"model":               s.Provider.Model,
-			"apiKeys":             s.Provider.APIKeys,
-			"embeddingProvider":   s.Provider.EmbeddingProvider,
-			"embeddingModel":      s.Provider.EmbeddingModel,
-			"temperature":         s.Provider.Temperature,
-			"topP":                s.Provider.TopP,
-			"maxTokens":           s.Provider.MaxTokens,
-			"telegramToken":       s.LiveMode.TelegramToken,
-			"telegramChatId":      s.LiveMode.TelegramChatID,
-			"context":             s.Context,
-			"auto_approval":       s.AutoApproval,
-			"mode_models":         s.ModeModels,
-			"terminal":            s.Terminal,
-			"theme":               s.Theme,
-			"custom_instructions": s.CustomInstructions,
-			"customInstructions":  s.CustomInstructions,
+			"provider":                 s.Provider.Provider,
+			"model":                    s.Provider.Model,
+			"apiKeys":                  s.Provider.APIKeys,
+			"embeddingProvider":        s.Provider.EmbeddingProvider,
+			"embeddingModel":           s.Provider.EmbeddingModel,
+			"temperature":              s.Provider.Temperature,
+			"topP":                     s.Provider.TopP,
+			"maxTokens":                s.Provider.MaxTokens,
+			"telegramToken":            s.LiveMode.TelegramToken,
+			"telegramChatId":           s.LiveMode.TelegramChatID,
+			"discordToken":             s.LiveMode.DiscordToken,
+			"discordApplicationId":     s.LiveMode.DiscordApplicationID,
+			"discordGuildId":           s.LiveMode.DiscordGuildID,
+			"discordAllowedUserIds":    s.LiveMode.DiscordAllowedUserIDs,
+			"discordAllowedChannelIds": s.LiveMode.DiscordAllowedChannelIDs,
+			"discordRequireMention":    s.LiveMode.DiscordRequireMention,
+			"discordTextMode":          s.LiveMode.DiscordTextMode,
+			"allowRemoteSessionStart":  s.LiveMode.AllowRemoteSessionStart,
+			"context":                  s.Context,
+			"auto_approval":            s.AutoApproval,
+			"mode_models":              s.ModeModels,
+			"terminal":                 s.Terminal,
+			"theme":                    s.Theme,
+			"custom_instructions":      s.CustomInstructions,
+			"customInstructions":       s.CustomInstructions,
 		}
 		writer.Send(protocol.RPCMessage{ID: msg.ID, Type: "settings_loaded", Payload: protocol.EncodeRPC(settings)})
 
@@ -1091,21 +1213,15 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 	case "set_live_mode":
 		h.handleSetLiveMode(msg, writer)
 
+	case "set_remote_session_start":
+		h.handleSetRemoteSessionStart(msg, writer)
+
 	case "get_live_mode_status":
-		if h.LiveMode != nil {
-			status := h.LiveMode.GetStatus()
-			writer.Send(protocol.RPCMessage{
-				ID:      msg.ID,
-				Type:    "live_mode_status",
-				Payload: protocol.EncodeRPC(status),
-			})
-		} else {
-			writer.Send(protocol.RPCMessage{
-				ID:      msg.ID,
-				Type:    "live_mode_status",
-				Payload: protocol.EncodeRPC(map[string]interface{}{"enabled": false, "error": "Live Mode not initialized"}),
-			})
-		}
+		writer.Send(protocol.RPCMessage{
+			ID:      msg.ID,
+			Type:    "live_mode_status",
+			Payload: protocol.EncodeRPC(h.getLiveModeStatus()),
+		})
 	case "get_tasks":
 		var tasks []agent.TaskItem
 		if h.Agent != nil {
@@ -1783,23 +1899,31 @@ func trimText(value string, limit int) string {
 
 func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWriter) {
 	var payload struct {
-		APIKeys                 *map[string]string           `json:"apiKeys"`
-		Provider                *string                      `json:"provider"`
-		Model                   *string                      `json:"model"`
-		EmbeddingProvider       *string                      `json:"embeddingProvider"`
-		EmbeddingModel          *string                      `json:"embeddingModel"`
-		TelegramToken           *string                      `json:"telegramToken"`
-		TelegramChatID          *int64                       `json:"telegramChatId"`
-		Context                 *config.ContextSettings      `json:"context,omitempty"`
-		AutoApproval            *config.AutoApprovalSettings `json:"auto_approval,omitempty"`
-		ModeModels              *config.ModeModelSettings    `json:"mode_models,omitempty"`
-		Terminal                *config.TerminalSettings     `json:"terminal,omitempty"`
-		Temperature             *float64                     `json:"temperature"`
-		TopP                    *float64                     `json:"topP"`
-		TopPSnake               *float64                     `json:"top_p"`
-		MaxTokens               *int                         `json:"maxTokens"`
-		CustomInstructions      *string                      `json:"customInstructions"`
-		CustomInstructionsSnake *string                      `json:"custom_instructions"`
+		APIKeys                  *map[string]string           `json:"apiKeys"`
+		Provider                 *string                      `json:"provider"`
+		Model                    *string                      `json:"model"`
+		EmbeddingProvider        *string                      `json:"embeddingProvider"`
+		EmbeddingModel           *string                      `json:"embeddingModel"`
+		TelegramToken            *string                      `json:"telegramToken"`
+		TelegramChatID           *int64                       `json:"telegramChatId"`
+		DiscordToken             *string                      `json:"discordToken"`
+		DiscordApplicationID     *string                      `json:"discordApplicationId"`
+		DiscordGuildID           *string                      `json:"discordGuildId"`
+		DiscordAllowedUserIDs    *[]string                    `json:"discordAllowedUserIds"`
+		DiscordAllowedChannelIDs *[]string                    `json:"discordAllowedChannelIds"`
+		DiscordRequireMention    *bool                        `json:"discordRequireMention"`
+		DiscordTextMode          *bool                        `json:"discordTextMode"`
+		AllowRemoteSessionStart  *bool                        `json:"allowRemoteSessionStart"`
+		Context                  *config.ContextSettings      `json:"context,omitempty"`
+		AutoApproval             *config.AutoApprovalSettings `json:"auto_approval,omitempty"`
+		ModeModels               *config.ModeModelSettings    `json:"mode_models,omitempty"`
+		Terminal                 *config.TerminalSettings     `json:"terminal,omitempty"`
+		Temperature              *float64                     `json:"temperature"`
+		TopP                     *float64                     `json:"topP"`
+		TopPSnake                *float64                     `json:"top_p"`
+		MaxTokens                *int                         `json:"maxTokens"`
+		CustomInstructions       *string                      `json:"customInstructions"`
+		CustomInstructionsSnake  *string                      `json:"custom_instructions"`
 	}
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
@@ -1833,6 +1957,7 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 	previousModel := ""
 	previousAPIKey := ""
 	previousTelegramToken := ""
+	previousDiscordToken := ""
 	if h.Config != nil {
 		previousProvider = h.Config.Provider.Provider
 		previousModel = h.Config.Provider.Model
@@ -1840,6 +1965,7 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 	}
 	if h.Settings != nil {
 		previousTelegramToken = h.Settings.Get().LiveMode.TelegramToken
+		previousDiscordToken = h.Settings.Get().LiveMode.DiscordToken
 	}
 	liveModeRestartRequired := false
 
@@ -1889,6 +2015,44 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 			if payload.TelegramChatID != nil {
 				s.LiveMode.TelegramChatID = *payload.TelegramChatID
 				h.LiveModeConfig.TelegramChatID = *payload.TelegramChatID
+			}
+			if payload.DiscordToken != nil {
+				s.LiveMode.DiscordToken = *payload.DiscordToken
+				h.LiveModeConfig.DiscordToken = *payload.DiscordToken
+				if h.LiveMode != nil && previousDiscordToken != *payload.DiscordToken {
+					liveModeRestartRequired = true
+				}
+			}
+			if payload.DiscordApplicationID != nil {
+				s.LiveMode.DiscordApplicationID = *payload.DiscordApplicationID
+				h.LiveModeConfig.DiscordApplicationID = *payload.DiscordApplicationID
+			}
+			if payload.DiscordGuildID != nil {
+				s.LiveMode.DiscordGuildID = *payload.DiscordGuildID
+				h.LiveModeConfig.DiscordGuildID = *payload.DiscordGuildID
+			}
+			if payload.DiscordAllowedUserIDs != nil {
+				s.LiveMode.DiscordAllowedUserIDs = *payload.DiscordAllowedUserIDs
+				h.LiveModeConfig.DiscordAllowedUserIDs = *payload.DiscordAllowedUserIDs
+			}
+			if payload.DiscordAllowedChannelIDs != nil {
+				s.LiveMode.DiscordAllowedChannelIDs = *payload.DiscordAllowedChannelIDs
+				h.LiveModeConfig.DiscordAllowedChannelIDs = *payload.DiscordAllowedChannelIDs
+			}
+			if payload.DiscordRequireMention != nil {
+				s.LiveMode.DiscordRequireMention = *payload.DiscordRequireMention
+				h.LiveModeConfig.DiscordRequireMention = *payload.DiscordRequireMention
+			}
+			if payload.DiscordTextMode != nil {
+				s.LiveMode.DiscordTextMode = *payload.DiscordTextMode
+				h.LiveModeConfig.DiscordTextMode = *payload.DiscordTextMode
+			}
+			if payload.AllowRemoteSessionStart != nil {
+				s.LiveMode.AllowRemoteSessionStart = *payload.AllowRemoteSessionStart
+				h.LiveModeConfig.AllowRemoteSessionStart = *payload.AllowRemoteSessionStart
+				if h.LiveMode != nil {
+					h.LiveMode.SetAllowRemoteSessionStart(*payload.AllowRemoteSessionStart)
+				}
 			}
 			if payload.Context != nil {
 				s.Context = *payload.Context
@@ -1948,7 +2112,7 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 				}
 			}
 
-			s.LiveMode.Enabled = s.LiveMode.TelegramToken != ""
+			s.LiveMode.Enabled = s.LiveMode.TelegramToken != "" || s.LiveMode.DiscordToken != ""
 		})
 	}
 
@@ -1995,9 +2159,44 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 		Type: "settings_saved",
 		Payload: protocol.EncodeRPC(map[string]interface{}{
 			"success":                 true,
-			"liveModeAvailable":       h.LiveModeConfig.TelegramToken != "",
+			"liveModeAvailable":       h.LiveModeConfig.TelegramToken != "" || h.LiveModeConfig.DiscordToken != "",
 			"liveModeRestartRequired": liveModeRestartRequired,
 		}),
+	})
+	writer.Send(protocol.RPCMessage{
+		Type:    "live_mode_status",
+		Payload: protocol.EncodeRPC(h.getLiveModeStatus()),
+	})
+}
+
+func (h *Handler) handleSetRemoteSessionStart(msg protocol.RPCMessage, writer ResponseWriter) {
+	var payload struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
+		return
+	}
+
+	if h.LiveModeConfig != nil {
+		h.LiveModeConfig.AllowRemoteSessionStart = payload.Enabled
+	}
+	if h.Settings != nil {
+		if err := h.Settings.Update(func(s *config.Settings) {
+			s.LiveMode.AllowRemoteSessionStart = payload.Enabled
+		}); err != nil {
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
+			return
+		}
+	}
+	if h.LiveMode != nil {
+		h.LiveMode.SetAllowRemoteSessionStart(payload.Enabled)
+	}
+
+	writer.Send(protocol.RPCMessage{
+		ID:      msg.ID,
+		Type:    "live_mode_status",
+		Payload: protocol.EncodeRPC(h.getLiveModeStatus()),
 	})
 }
 

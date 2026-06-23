@@ -83,6 +83,18 @@ export function BatchDashboard({ sessionId, defaultGoal = '' }: BatchDashboardPr
                     setBusy(null);
                     break;
                 }
+                case 'batch_worker_artifacts':
+                case 'batch_worker_artifacts_result': {
+                    const payload = (message.payload || {}) as { worker_id?: string; artifacts?: BatchWorkerPayload['artifacts'] };
+                    if (payload.worker_id) {
+                        setRuns(prev => updateWorkerInRuns(prev, payload.worker_id!, worker => ({
+                            ...worker,
+                            artifacts: payload.artifacts || worker.artifacts || [],
+                        })));
+                    }
+                    setBusy(null);
+                    break;
+                }
                 case 'batch_event': {
                     const payload = message.payload as BatchEventPayload;
                     if (payload?.run) {
@@ -143,20 +155,23 @@ export function BatchDashboard({ sessionId, defaultGoal = '' }: BatchDashboardPr
     return (
         <div className="flex-1 overflow-y-auto bg-sidebar-background p-3">
             <div className="grid gap-3 xl:grid-cols-[360px_minmax(0,1fr)]">
-                <section className="rounded-md border border-vscode-border/30 bg-input-background/20 p-3">
+                <section className="rounded-md bg-input-background/20 p-3">
                     <div className="mb-3 flex items-center gap-2">
                         <Boxes className="h-4 w-4 text-foreground/55" />
                         <div>
                             <h2 className="text-[12px] font-medium text-foreground/80">Batch Worktrees</h2>
-                            <p className="text-[10.5px] text-foreground/45">Durable workers with review gates.</p>
+                            <p className="text-[10.5px] text-foreground/45">Advanced parallel worktree workers with review gates.</p>
                         </div>
+                    </div>
+                    <div className="mb-3 rounded bg-vscode-editor-background/45 px-2.5 py-2 text-[10.5px] leading-4 text-foreground/42">
+                        Use Batch when one broad goal should be split into isolated worker branches, reviewed, and applied deliberately. Normal chat activity and Task Steps are tracked outside this tab.
                     </div>
 
                     <label className="mb-1 block text-[10px] text-foreground/45">Goal</label>
                     <textarea
                         value={goal}
                         onChange={event => setGoal(event.target.value)}
-                        className="mb-3 min-h-[74px] w-full resize-none rounded border border-input-border bg-input-background px-2 py-2 text-[11.5px] text-input-foreground outline-none"
+                        className="mb-3 min-h-[74px] w-full resize-none rounded bg-input-background px-2 py-2 text-[11.5px] text-input-foreground outline-none"
                         placeholder="Describe a broad change to split into worktree agents"
                     />
 
@@ -164,7 +179,7 @@ export function BatchDashboard({ sessionId, defaultGoal = '' }: BatchDashboardPr
                     <textarea
                         value={workerText}
                         onChange={event => setWorkerText(event.target.value)}
-                        className="mb-3 min-h-[86px] w-full resize-none rounded border border-input-border bg-input-background px-2 py-2 text-[11px] text-input-foreground outline-none"
+                        className="mb-3 min-h-[86px] w-full resize-none rounded bg-input-background px-2 py-2 text-[11px] text-input-foreground outline-none"
                         placeholder={"API changes\nUI changes\nTests"}
                     />
 
@@ -172,7 +187,7 @@ export function BatchDashboard({ sessionId, defaultGoal = '' }: BatchDashboardPr
                     <textarea
                         value={verificationText}
                         onChange={event => setVerificationText(event.target.value)}
-                        className="mb-3 min-h-[58px] w-full resize-none rounded border border-input-border bg-input-background px-2 py-2 font-mono text-[10.5px] text-input-foreground outline-none"
+                        className="mb-3 min-h-[58px] w-full resize-none rounded bg-input-background px-2 py-2 font-mono text-[10.5px] text-input-foreground outline-none"
                         placeholder={"npm test -- --run\nnpm run build"}
                     />
 
@@ -185,11 +200,11 @@ export function BatchDashboard({ sessionId, defaultGoal = '' }: BatchDashboardPr
                         Create reviewed batch
                     </button>
 
-                    {error && <div className="mt-3 rounded border border-error/30 bg-error/10 px-2 py-1.5 text-[10.5px] text-error">{error}</div>}
+                    {error && <div className="mt-3 rounded bg-error/10 px-2 py-1.5 text-[10.5px] text-error">{error}</div>}
                 </section>
 
-                <section className="min-w-0 rounded-md border border-vscode-border/30 bg-input-background/20">
-                    <div className="flex items-center justify-between gap-2 border-b border-vscode-border/30 px-3 py-2">
+                <section className="min-w-0 rounded-md bg-input-background/20">
+                    <div className="flex items-center justify-between gap-2 px-3 py-2">
                         <div className="min-w-0">
                             <h2 className="truncate text-[12px] font-medium text-foreground/80">
                                 {selectedRun ? selectedRun.goal : 'No batch run selected'}
@@ -204,14 +219,14 @@ export function BatchDashboard({ sessionId, defaultGoal = '' }: BatchDashboardPr
                         </div>
                         <button
                             onClick={() => postMessage({ type: 'batch_run_list', payload: {} })}
-                            className="rounded border border-vscode-border px-2 py-1 text-[10.5px] text-foreground/60 hover:bg-list-background-hover"
+                            className="rounded bg-vscode-editor-background/45 px-2 py-1 text-[10.5px] text-foreground/60 hover:bg-list-background-hover"
                         >
                             Refresh
                         </button>
                     </div>
 
                     {runs.length > 0 && (
-                        <div className="flex gap-1 overflow-x-auto border-b border-vscode-border/30 px-2 py-2">
+                        <div className="flex gap-1 overflow-x-auto px-2 py-2">
                             {runs.map(run => (
                                 <button
                                     key={run.id}
@@ -262,14 +277,14 @@ export function BatchDashboard({ sessionId, defaultGoal = '' }: BatchDashboardPr
                             </div>
 
                             {selectedRun.merge_plan?.warnings && selectedRun.merge_plan.warnings.length > 0 && (
-                                <div className="mt-3 rounded border border-vscode-border/40 bg-vscode-editor-background px-3 py-2 text-[10.5px] text-foreground/50">
+                                <div className="mt-3 rounded bg-vscode-editor-background px-3 py-2 text-[10.5px] text-foreground/50">
                                     {selectedRun.merge_plan.warnings.map(warning => <div key={warning}>{warning}</div>)}
                                 </div>
                             )}
 
                             {workerDiff && (
-                                <div className="mt-3 overflow-hidden rounded border border-vscode-border/40 bg-vscode-editor-background">
-                                    <div className="flex items-center gap-2 border-b border-vscode-border/30 px-3 py-2 text-[11px] text-foreground/75">
+                                <div className="mt-3 overflow-hidden rounded bg-vscode-editor-background">
+                                    <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-foreground/75">
                                         <FileDiff className="h-3.5 w-3.5 text-foreground/45" />
                                         Diff: {workerDiff.worker_id}
                                     </div>
@@ -280,8 +295,8 @@ export function BatchDashboard({ sessionId, defaultGoal = '' }: BatchDashboardPr
                             )}
 
                             {summaryWorker && (
-                                <div className="mt-3 overflow-hidden rounded border border-vscode-border/40 bg-vscode-editor-background">
-                                    <div className="flex items-center justify-between gap-2 border-b border-vscode-border/30 px-3 py-2 text-[11px] text-foreground/75">
+                                <div className="mt-3 overflow-hidden rounded bg-vscode-editor-background">
+                                    <div className="flex items-center justify-between gap-2 px-3 py-2 text-[11px] text-foreground/75">
                                         <span className="inline-flex items-center gap-2">
                                             <FileText className="h-3.5 w-3.5 text-foreground/45" />
                                             Summary: {summaryWorker.id}
@@ -295,8 +310,8 @@ export function BatchDashboard({ sessionId, defaultGoal = '' }: BatchDashboardPr
                             )}
                         </div>
                     ) : (
-                        <div className="flex min-h-[260px] items-center justify-center text-[11px] text-foreground/40">
-                            Create a batch run to prepare durable worker worktrees.
+                        <div className="flex min-h-[260px] items-center justify-center px-6 text-center text-[11px] leading-5 text-foreground/40">
+                            Create a reviewed batch only when you want parallel durable worktrees. Ordinary chat runs do not need anything here.
                         </div>
                     )}
                 </section>
@@ -321,7 +336,7 @@ function WorkerCard({
     onSummary: () => void;
 }) {
     return (
-        <div className="rounded-md border border-vscode-border/35 bg-vscode-editor-background px-3 py-2">
+        <div className="rounded-md bg-vscode-editor-background px-3 py-2">
             <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                     <div className="flex items-center gap-2">
@@ -340,6 +355,15 @@ function WorkerCard({
                     )}
                     {worker.error && <div className="mt-1 text-[10.5px] text-error">{worker.error}</div>}
                     {(worker.summary || worker.output_preview) && <div className="mt-1 line-clamp-2 text-[10.5px] text-foreground/50">{worker.summary || worker.output_preview}</div>}
+                    {worker.artifacts && worker.artifacts.length > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                            {worker.artifacts.slice(0, 3).map(artifact => (
+                                <span key={`${artifact.type}-${artifact.path}`} className="rounded bg-input-background px-1.5 py-0.5 font-mono text-[9.5px] text-foreground/45">
+                                    {artifact.type}: {artifact.path}
+                                </span>
+                            ))}
+                        </div>
+                    )}
                 </div>
                 <div className="flex shrink-0 gap-1">
                     <ToolbarButton
@@ -393,7 +417,24 @@ export function upsertWorker(runs: BatchRunPayload[], worker: BatchWorkerPayload
         const index = workers.findIndex(item => item.id === worker.id);
         const nextWorkers = [...workers];
         if (index === -1) nextWorkers.push(worker);
-        else nextWorkers[index] = worker;
+        else nextWorkers[index] = { ...nextWorkers[index], ...worker };
+        return { ...run, workers: nextWorkers, updated_at: Date.now() };
+    });
+}
+
+export function updateWorkerInRuns(
+    runs: BatchRunPayload[],
+    workerId: string,
+    update: (worker: BatchWorkerPayload) => BatchWorkerPayload,
+    runId?: string,
+): BatchRunPayload[] {
+    return runs.map(run => {
+        if (runId && run.id !== runId) return run;
+        const workers = run.workers || [];
+        const index = workers.findIndex(item => item.id === workerId);
+        if (index === -1) return run;
+        const nextWorkers = [...workers];
+        nextWorkers[index] = update(nextWorkers[index]);
         return { ...run, workers: nextWorkers, updated_at: Date.now() };
     });
 }
@@ -403,7 +444,7 @@ function ToolbarButton({ label, icon, busy, onClick }: { label: string; icon: Re
         <button
             onClick={onClick}
             disabled={busy}
-            className="inline-flex items-center gap-1.5 rounded border border-vscode-border bg-input-background px-2 py-1 text-[10.5px] text-foreground/65 hover:bg-list-background-hover hover:text-foreground disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded bg-input-background px-2 py-1 text-[10.5px] text-foreground/65 hover:bg-list-background-hover hover:text-foreground disabled:opacity-50"
         >
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : icon}
             {label}

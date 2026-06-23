@@ -1,24 +1,42 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import { ChatView } from '@components/chat/ChatView';
 import { Settings } from '@components/settings/Settings';
 import { useVSCodeApi } from '@hooks/useVSCodeApi';
 
 import { McpView } from '@components/mcp/McpView';
 import { HistoryView } from './components/history/HistoryView';
-import { AgentView } from './components/agent/AgentView';
+import { AgentView, type MissionDashboardTab } from './components/agent/AgentView';
 import { AccountView } from './components/account/AccountView';
 import { useAgentStateMachine } from './hooks/useAgentStateMachine';
 import { useAgentSync } from './hooks/useAgentSync';
+import { useGrikAccount } from './hooks/useGrikAccount';
 import { DEFAULT_MODEL } from './components/chat/ChatInput';
 
 type View = 'chat' | 'settings' | 'mcp' | 'history' | 'agent' | 'account';
 
+function editsFromPayload(payload: unknown): any[] {
+    if (Array.isArray(payload)) return payload;
+    if (payload && typeof payload === 'object' && Array.isArray((payload as any).edits)) {
+        return (payload as any).edits;
+    }
+    return [];
+}
+
 export default function App() {
     const [currentView, setCurrentView] = useState<View>('chat');
+    const [settingsInitialTab, setSettingsInitialTab] = useState<string | undefined>();
     const [mode, setMode] = useState<'plan' | 'act' | 'mission'>('act');
     const [model, setModel] = useState(DEFAULT_MODEL);
+    const [pendingEdits, setPendingEdits] = useState<any[]>([]);
+    const [agentInitialTab, setAgentInitialTab] = useState<MissionDashboardTab | undefined>();
     const { onMessage } = useVSCodeApi();
     const agentState = useAgentStateMachine();
+    const grikAccount = useGrikAccount();
+
+    const openSettings = useCallback((tab?: string) => {
+        setSettingsInitialTab(tab);
+        setCurrentView('settings');
+    }, []);
 
     // Global synchronization of agent state machine
     useAgentSync(agentState);
@@ -27,8 +45,11 @@ export default function App() {
     useEffect(() => {
         const unsubscribe = onMessage((message) => {
             if (message.type === 'open_settings') {
-                setCurrentView('settings');
+                const payload = message.payload as { tab?: unknown } | undefined;
+                openSettings(typeof payload?.tab === 'string' ? payload.tab : undefined);
             } else if (message.type === 'open_agent') {
+                const payload = message.payload as { tab?: unknown } | undefined;
+                setAgentInitialTab(isMissionDashboardTab(payload?.tab) ? payload.tab : undefined);
                 setCurrentView('agent');
             } else if (message.type === 'open_history') {
                 setCurrentView('history');
@@ -36,10 +57,12 @@ export default function App() {
                 setCurrentView('mcp');
             } else if (message.type === 'open_account') {
                 setCurrentView('account');
+            } else if (message.type === 'pending_edits') {
+                setPendingEdits(editsFromPayload(message.payload));
             }
         });
         return () => { unsubscribe(); };
-    }, [onMessage]);
+    }, [onMessage, openSettings]);
 
     return (
         <div className="flex flex-col h-full w-full overflow-hidden bg-vscode-editor-background text-vscode-fg font-sans selection:bg-vscode-editor-selectionBackground">
@@ -52,6 +75,8 @@ export default function App() {
                         onOpenHistory={() => setCurrentView('history')}
                         onOpenAgent={() => setCurrentView('agent')}
                         onOpenAccount={() => setCurrentView('account')}
+                        onOpenSettings={openSettings}
+                        grikAccount={grikAccount}
                         agentState={agentState}
                         mode={mode}
                         onModeChange={setMode}
@@ -63,7 +88,7 @@ export default function App() {
                 {/* Modal overlays / Specialized Views */}
                 {currentView === 'settings' && (
                     <div className="absolute inset-0 z-50 bg-vscode-editor-background animate-fade-in">
-                        <Settings onClose={() => setCurrentView('chat')} />
+                        <Settings initialTab={settingsInitialTab} onClose={() => setCurrentView('chat')} grikAccount={grikAccount} />
                     </div>
                 )}
                 {currentView === 'history' && (
@@ -90,6 +115,8 @@ export default function App() {
                                 onModeChange={setMode}
                                 model={model}
                                 onModelChange={setModel}
+                                pendingEdits={pendingEdits}
+                                initialTab={agentInitialTab}
                                 onBack={() => setCurrentView('chat')}
                             />
                         </div>
@@ -97,7 +124,7 @@ export default function App() {
                 )}
                 {currentView === 'account' && (
                     <div className="absolute inset-0 z-50 bg-vscode-editor-background h-full flex flex-col animate-fade-in">
-                        <AccountView onBack={() => setCurrentView('chat')} />
+                        <AccountView onBack={() => setCurrentView('chat')} account={grikAccount} />
                     </div>
                 )}
             </main>
@@ -122,4 +149,8 @@ export default function App() {
             `}</style>
         </div>
     );
+}
+
+function isMissionDashboardTab(value: unknown): value is MissionDashboardTab {
+    return value === 'tasks' || value === 'events' || value === 'hub' || value === 'batch';
 }

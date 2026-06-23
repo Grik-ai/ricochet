@@ -1,5 +1,6 @@
-import { useRef, useEffect, KeyboardEvent, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type ReactNode } from 'react';
-import { Send, Mic, Square, ChevronDown, FileCode, StopCircle, X, Plus, Bot, Hand, ShieldCheck, ShieldAlert, CheckCircle2, Play, Info, Gauge, Paperclip, Image as ImageIcon, type LucideIcon } from 'lucide-react';
+import { useRef, useEffect, KeyboardEvent, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { Send, Mic, Square, ChevronDown, FileCode, StopCircle, X, Plus, Bot, Hand, ShieldCheck, ShieldAlert, CheckCircle2, Play, Info, Gauge, Paperclip, Image as ImageIcon, Settings, type LucideIcon } from 'lucide-react';
 import { AffectedFilesList } from './AffectedFilesList';
 import { useAudioRecorder } from '../../hooks/useAudioRecorder';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
@@ -9,6 +10,9 @@ import { ModelPickerModal } from './ModelPickerModal';
 import { EtherStatus } from './EtherPanel';
 import { NetworkDisplayStatus } from '../../hooks/useNetworkHealth';
 import { NetworkStatusPill } from './NetworkStatusPill';
+import { DiscordIcon, TelegramIcon } from './MessengerIcon';
+import { EtherIcon } from './EtherIcon';
+import type { GrikAccountController } from '../../hooks/useGrikAccount';
 
 interface ChatInputProps {
     value: string;
@@ -21,7 +25,8 @@ interface ChatInputProps {
     placeholder?: string;
     currentMode: 'plan' | 'act' | 'mission';
     onModeChange: (mode: 'plan' | 'act' | 'mission') => void;
-    onOpenSettings?: () => void;
+    onOpenSettings?: (tab?: string) => void;
+    onOpenAccount?: () => void;
     fileResults?: FileSearchResult[];
     searchFiles?: (query: string) => void;
     liveStatus?: EtherStatus;
@@ -36,7 +41,35 @@ interface ChatInputProps {
     usageSnapshot?: UsageSnapshot | null;
     networkStatus?: NetworkDisplayStatus;
     missionStatus?: ReactNode;
+    accountStatus?: ReactNode;
+    grikAccount?: GrikAccountController;
     sessionId?: string;
+}
+
+export type EtherAdapterKey = 'telegram' | 'discord';
+
+export interface EtherAdapterDisplayState {
+    key: EtherAdapterKey;
+    configured: boolean;
+    active: boolean;
+}
+
+export function etherAdapterStatusLabel(adapter: EtherAdapterDisplayState): 'connected' | 'Gateway enabled' | 'Not configured' {
+    if (adapter.active) return 'connected';
+    if (adapter.configured) return 'Gateway enabled';
+    return 'Not configured';
+}
+
+export function etherAdapterVisibleStatusLabel(adapter: EtherAdapterDisplayState): '' | 'Active' {
+    return adapter.active ? 'Active' : '';
+}
+
+export function etherAdapterButtonClass(adapter: EtherAdapterDisplayState, selected: boolean): string {
+    const base = 'relative flex h-8 min-w-[92px] items-center justify-start gap-2 rounded-md px-2 text-left transition-colors';
+    if (!adapter.configured) {
+        return `${base} bg-transparent text-vscode-fg/32 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg/62`;
+    }
+    return `${base} bg-vscode-editor-background text-vscode-fg/70 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg ${selected ? 'ring-1 ring-vscode-button-bg/60' : ''}`;
 }
 
 export const MAX_CHAT_ATTACHMENTS = 8;
@@ -47,9 +80,8 @@ export function isReadyContextFile(file: ContextFilePayload): boolean {
 }
 
 export function buildContextMessage(value: string, contextFiles: ContextFilePayload[]): string {
-    const sendableFiles = contextFiles.filter(isReadyContextFile);
-    if (sendableFiles.length === 0) return value;
-    return `${value}\n\nContext Files:\n${sendableFiles.map(file => `@${file.stagedPath || file.path}`).join('\n')}`;
+    void contextFiles;
+    return value;
 }
 
 export function attachmentLimitError(fileCount: number, existingCount: number): string | null {
@@ -114,9 +146,11 @@ export function shouldRenderInputStatusStrip(
     networkStatus?: NetworkDisplayStatus,
     contextStatus?: ContextStatus | null,
     usageSnapshot?: UsageSnapshot | null,
-    hasMissionStatus?: boolean
+    hasMissionStatus?: boolean,
+    hasUsageStatus?: boolean,
+    hasAccountStatus?: boolean
 ): boolean {
-    return Boolean(networkStatus || contextStatus || usageSnapshot || hasMissionStatus);
+    return Boolean(networkStatus || contextStatus || usageSnapshot || hasMissionStatus || hasUsageStatus || hasAccountStatus);
 }
 
 export function getPlanFirstToggleState(currentMode: 'plan' | 'act' | 'mission') {
@@ -133,6 +167,14 @@ function formatTokens(tokens?: number): string {
     return String(value);
 }
 
+export function buildUsageExtraLabels(usageSnapshot?: UsageSnapshot | null): string[] {
+    const labels: string[] = [];
+    if (usageSnapshot?.cachedInputTokens) labels.push(`Cache read ${formatTokens(usageSnapshot.cachedInputTokens)}`);
+    if (usageSnapshot?.cacheCreationTokens) labels.push(`Cache write ${formatTokens(usageSnapshot.cacheCreationTokens)}`);
+    if (usageSnapshot?.reasoningOutputTokens) labels.push(`Reasoning ${formatTokens(usageSnapshot.reasoningOutputTokens)}`);
+    return labels;
+}
+
 function formatCost(cost?: number): string {
     const value = cost || 0;
     if (value === 0) return '$0.00';
@@ -146,23 +188,86 @@ function usageSourceLabel(source?: string): string {
     return 'est';
 }
 
+export const USAGE_BADGE_BUTTON_CLASS = 'inline-flex h-6 max-w-full items-center gap-1.5 rounded-md bg-transparent px-1.5 text-vscode-fg/55 transition-colors hover:bg-transparent hover:text-vscode-fg/85 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vscode-focusBorder';
+export const USAGE_POPOVER_CLASS = 'fixed w-80 max-w-[calc(100vw-32px)] rounded-md border border-vscode-border bg-vscode-input-bg shadow-2xl z-[2147483647] overflow-y-auto animate-in fade-in slide-in-from-bottom-2';
+
+export interface UsageBadgeDisplayState {
+    contextTokens: number;
+    contextWindow: number;
+    contextPercent: number;
+    source: string;
+    hasUsageTotals: boolean;
+    hasContextSnapshot: boolean;
+    buttonLabel: string;
+    buttonDetail: string;
+    popoverStatus: string;
+    contextLine: string;
+}
+
+export function buildUsageBadgeDisplay(
+    contextStatus?: ContextStatus | null,
+    usageSnapshot?: UsageSnapshot | null,
+    isActive = false
+): UsageBadgeDisplayState {
+    const contextTokens = contextStatus?.tokens_used ?? usageSnapshot?.contextTokens ?? 0;
+    const contextWindow = contextStatus?.tokens_max ?? usageSnapshot?.contextWindow ?? 0;
+    const contextPercent = contextWindow > 0
+        ? Math.round((contextTokens / contextWindow) * 100)
+        : Math.round(contextStatus?.percentage || 0);
+    const source = usageSourceLabel(usageSnapshot?.source);
+    const hasUsageTotals = Boolean(usageSnapshot && (
+        usageSnapshot.requestCount > 0
+        || usageSnapshot.inputTokens > 0
+        || usageSnapshot.outputTokens > 0
+        || usageSnapshot.estimatedCostUsd > 0
+    ));
+    const hasContextSnapshot = contextWindow > 0 || contextTokens > 0 || Boolean(contextStatus?.report);
+    const buttonLabel = contextWindow > 0
+        ? isActive ? 'Usage details' : `Context ${formatTokens(contextTokens)}/${formatTokens(contextWindow)}`
+        : isActive ? 'Context pending' : 'No context yet';
+    const buttonDetail = contextWindow > 0 && contextPercent > 0
+        ? isActive ? `· context ${contextPercent}%` : `· ${contextPercent}%`
+        : hasUsageTotals ? `· ${formatCost(usageSnapshot?.estimatedCostUsd)} ${source}` : isActive ? '· pending' : '';
+    const popoverStatus = hasUsageTotals
+        ? (source === 'actual' ? 'Provider reported' : 'Estimated')
+        : isActive ? 'Waiting for provider usage' : 'No model usage yet';
+    const contextLine = contextWindow > 0
+        ? `${formatTokens(contextTokens)} of ${formatTokens(contextWindow)} tokens in latest request context`
+        : 'No request context has been built for this session yet.';
+
+    return {
+        contextTokens,
+        contextWindow,
+        contextPercent,
+        source,
+        hasUsageTotals,
+        hasContextSnapshot,
+        buttonLabel,
+        buttonDetail,
+        popoverStatus,
+        contextLine,
+    };
+}
+
 function UsageBadge({
     contextStatus,
     usageSnapshot,
     isActive,
     isOpen,
     onToggle,
+    onClose,
 }: {
     contextStatus?: ContextStatus | null;
     usageSnapshot?: UsageSnapshot | null;
     isActive?: boolean;
     isOpen: boolean;
     onToggle: () => void;
+    onClose: () => void;
 }) {
-    const contextTokens = usageSnapshot?.contextTokens || contextStatus?.tokens_used || 0;
-    const contextWindow = usageSnapshot?.contextWindow || contextStatus?.tokens_max || 0;
-    const contextPercent = contextWindow > 0 ? Math.round((contextTokens / contextWindow) * 100) : Math.round(contextStatus?.percentage || 0);
-    const source = usageSourceLabel(usageSnapshot?.source);
+    const buttonRef = useRef<HTMLButtonElement>(null);
+    const popoverRef = useRef<HTMLDivElement>(null);
+    const [popoverStyle, setPopoverStyle] = useState<CSSProperties>({});
+    const display = buildUsageBadgeDisplay(contextStatus, usageSnapshot, isActive);
     const models = usageSnapshot?.models || [];
     const contextReport = contextStatus?.report;
     const contextWarnings = contextStatus?.warnings || contextReport?.warnings || [];
@@ -170,139 +275,203 @@ function UsageBadge({
     const topContributors = contextReport?.top_contributors || [];
     const compression = contextReport?.compression;
     const compressedFragments = compression?.fragments || [];
-    const hasUsageTotals = Boolean(usageSnapshot && (usageSnapshot.requestCount > 0 || usageSnapshot.inputTokens > 0 || usageSnapshot.outputTokens > 0 || usageSnapshot.estimatedCostUsd > 0));
+    const usageExtraLabels = buildUsageExtraLabels(usageSnapshot);
+
+    useEffect(() => {
+        if (!isOpen || typeof window === 'undefined') return;
+
+        const updatePopoverPosition = () => {
+            const rect = buttonRef.current?.getBoundingClientRect();
+            if (!rect) return;
+
+            const viewportWidth = window.innerWidth || 0;
+            const viewportHeight = window.innerHeight || 0;
+            const width = Math.min(320, Math.max(240, viewportWidth - 32));
+            let left = rect.right - width;
+            left = Math.max(16, Math.min(left, viewportWidth - width - 16));
+
+            setPopoverStyle({
+                width,
+                left,
+                bottom: Math.max(12, viewportHeight - rect.top + 8),
+                maxHeight: Math.max(220, rect.top - 24),
+            });
+        };
+
+        updatePopoverPosition();
+        window.addEventListener('resize', updatePopoverPosition);
+        window.addEventListener('scroll', updatePopoverPosition, true);
+        return () => {
+            window.removeEventListener('resize', updatePopoverPosition);
+            window.removeEventListener('scroll', updatePopoverPosition, true);
+        };
+    }, [isOpen]);
+
+    useEffect(() => {
+        if (!isOpen || typeof document === 'undefined') return;
+
+        const handlePointerDown = (event: globalThis.MouseEvent) => {
+            const target = event.target as Node | null;
+            if (target && (buttonRef.current?.contains(target) || popoverRef.current?.contains(target))) return;
+            onClose();
+        };
+        const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+            if (event.key === 'Escape') onClose();
+        };
+
+        document.addEventListener('mousedown', handlePointerDown);
+        document.addEventListener('keydown', handleKeyDown);
+        return () => {
+            document.removeEventListener('mousedown', handlePointerDown);
+            document.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [isOpen, onClose]);
+
+    const popover = isOpen ? (
+        <div
+            ref={popoverRef}
+            className={USAGE_POPOVER_CLASS}
+            style={popoverStyle}
+            role="dialog"
+            aria-label="Context and usage details"
+        >
+            <div className="flex items-center justify-between px-3 py-2 border-b border-vscode-border bg-vscode-editor-background">
+                <span className="text-[10px] font-medium text-vscode-fg/60">Context & usage</span>
+                <span className="text-[10px] text-vscode-fg/40">
+                    {display.popoverStatus}
+                </span>
+            </div>
+            <div className="p-3 space-y-3">
+                <div>
+                    <div className="mb-1 flex items-center justify-between text-[10px] text-vscode-fg/45">
+                        <span>Latest request context</span>
+                        <span>{display.contextPercent || 0}%</span>
+                    </div>
+                    <div className="h-1.5 rounded bg-vscode-editor-background overflow-hidden">
+                        <div className="h-full bg-vscode-button-bg" style={{ width: `${Math.min(100, Math.max(0, display.contextPercent || 0))}%` }} />
+                    </div>
+                    <div className="mt-1 text-[10px] text-vscode-fg/40">{display.contextLine}</div>
+                </div>
+
+                {(contextWarnings.length > 0 || contextSuggestions.length > 0) && (
+                    <div className="space-y-1 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                        <div className="text-[10px] font-medium text-vscode-fg/55">Context health</div>
+                        {contextWarnings.slice(0, 2).map((warning, index) => (
+                            <div key={`context-warning-${index}`} className="text-[10px] leading-snug text-vscode-fg/55">{warning}</div>
+                        ))}
+                        {contextSuggestions.slice(0, 2).map((suggestion, index) => (
+                            <div key={`context-suggestion-${index}`} className="text-[9px] leading-snug text-vscode-fg/35">{suggestion}</div>
+                        ))}
+                    </div>
+                )}
+
+                {compression?.saved_tokens ? (
+                    <div className="space-y-1 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                            <div className="text-[10px] font-medium text-vscode-fg/55">Context compression</div>
+                            <div className="text-[10px] text-vscode-fg/45">
+                                {formatTokens(compression.original_tokens)} → {formatTokens(compression.compressed_tokens)}
+                            </div>
+                        </div>
+                        <div className="text-[9px] text-vscode-fg/35">
+                            Saved {formatTokens(compression.saved_tokens)} across {compressedFragments.length} fragment{compressedFragments.length === 1 ? '' : 's'}.
+                        </div>
+                        {compressedFragments.slice(0, 3).map((fragment) => (
+                            <div key={`${fragment.hash}-${fragment.id}`} className="flex items-center justify-between gap-2 text-[9px] text-vscode-fg/40">
+                                <span className="min-w-0 truncate">{fragment.type} · {fragment.id}</span>
+                                <span className="shrink-0">{formatTokens(fragment.saved_tokens)} saved</span>
+                            </div>
+                        ))}
+                    </div>
+                ) : null}
+
+                {topContributors.length > 0 && (
+                    <div className="space-y-1.5">
+                        <div className="text-[10px] text-vscode-fg/45">Largest context contributors</div>
+                        {topContributors.slice(0, 5).map((item) => (
+                            <div key={`${item.id}-${item.type}`} className="flex items-center justify-between gap-2 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                                <div className="min-w-0">
+                                    <div className="truncate text-[10px] text-vscode-fg/70">{item.id}</div>
+                                    <div className="text-[9px] text-vscode-fg/35">{item.type}{item.source ? ` · ${item.source}` : ''}</div>
+                                </div>
+                                <div className="shrink-0 text-[10px] text-vscode-fg/45">{formatTokens(item.tokens)}</div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                <div className="space-y-1.5">
+                    <div className="text-[10px] text-vscode-fg/45">Session usage totals</div>
+                    <div className="grid grid-cols-3 gap-2">
+                        <div className="rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                            <div className="text-[9px] text-vscode-fg/40">Input</div>
+                            <div className="text-[11px] font-medium text-vscode-fg/80">{formatTokens(usageSnapshot?.inputTokens)}</div>
+                        </div>
+                        <div className="rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                            <div className="text-[9px] text-vscode-fg/40">Output</div>
+                            <div className="text-[11px] font-medium text-vscode-fg/80">{formatTokens(usageSnapshot?.outputTokens)}</div>
+                        </div>
+                        <div className="rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                            <div className="text-[9px] text-vscode-fg/40">Cost</div>
+                            <div className="text-[11px] font-medium text-vscode-fg/80">{display.hasUsageTotals ? formatCost(usageSnapshot?.estimatedCostUsd) : 'pending'}</div>
+                        </div>
+                    </div>
+                </div>
+
+                {usageExtraLabels.length > 0 ? (
+                    <div className="flex flex-wrap gap-2 text-[10px] text-vscode-fg/45">
+                        {usageExtraLabels.map(label => (
+                            <span key={label}>{label}</span>
+                        ))}
+                    </div>
+                ) : null}
+
+                <div className="space-y-1.5">
+                    <div className="text-[10px] text-vscode-fg/45">Models used</div>
+                    {models.length === 0 ? (
+                        <div className="text-[10px] text-vscode-fg/35">No completed model usage yet.</div>
+                    ) : models.map(model => (
+                        <div key={`${model.provider}-${model.model}-${model.keySource || 'none'}`} className="flex items-center justify-between gap-2 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
+                            <div className="min-w-0">
+                                <div className="truncate text-[11px] text-vscode-fg/80">{model.model}</div>
+                                <div className="text-[9px] text-vscode-fg/40">{model.provider} · {model.keySource === 'user' ? 'Your key' : model.keySource === 'server' ? 'Server key' : 'No key'} · {usageSourceLabel(model.source)}</div>
+                            </div>
+                            <div className="shrink-0 text-right text-[10px] text-vscode-fg/45">
+                                <div>{formatTokens(model.inputTokens)} / {formatTokens(model.outputTokens)}</div>
+                                <div>{formatCost(model.estimatedCostUsd)}</div>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="text-[9px] leading-relaxed text-vscode-fg/35">
+                    Context is the latest request window for this session. Input, output, and cost are cumulative session usage totals.
+                </div>
+            </div>
+        </div>
+    ) : null;
 
     return (
         <div className="relative shrink-0">
             <button
+                ref={buttonRef}
                 type="button"
                 onClick={onToggle}
-                className="inline-flex h-6 max-w-full items-center gap-1.5 rounded-md border border-vscode-border/70 bg-vscode-editor-background/80 px-2 text-vscode-fg/55 transition-colors hover:bg-vscode-list-hoverBackground hover:text-vscode-fg/85"
-                title="Session usage"
+                className={USAGE_BADGE_BUTTON_CLASS}
+                title="Context and session usage"
+                aria-expanded={isOpen}
+                aria-haspopup="dialog"
             >
                 <Gauge className="h-3.5 w-3.5" />
                 <span className="text-[11px] font-medium leading-none">
-                    {contextWindow > 0 ? `${formatTokens(contextTokens)}/${formatTokens(contextWindow)}` : formatTokens((usageSnapshot?.inputTokens || 0) + (usageSnapshot?.outputTokens || 0))}
+                    {display.buttonLabel}
                 </span>
-                <span className="hidden sm:inline text-[10px] leading-none text-vscode-fg/35">ctx</span>
                 <span className="hidden md:inline text-[10px] leading-none text-vscode-fg/35">
-                    {contextPercent > 0 ? `· ${contextPercent}%` : hasUsageTotals ? `· ${formatCost(usageSnapshot?.estimatedCostUsd)} ${source}` : isActive ? '· pending' : ''}
+                    {display.buttonDetail}
                 </span>
             </button>
 
-            {isOpen && (
-                <div className="absolute bottom-full right-0 mb-2 w-80 max-w-[calc(100vw-32px)] rounded-md border border-vscode-border bg-vscode-input-bg shadow-lg z-[9999] overflow-hidden animate-in fade-in slide-in-from-bottom-2">
-                    <div className="flex items-center justify-between px-3 py-2 border-b border-vscode-border bg-vscode-editor-background">
-                        <span className="text-[10px] font-medium text-vscode-fg/60">Usage</span>
-                        <span className="text-[10px] text-vscode-fg/40">
-                            {hasUsageTotals ? (source === 'actual' ? 'Provider reported' : 'Estimated') : isActive ? 'Waiting for provider usage' : 'No model usage yet'}
-                        </span>
-                    </div>
-                    <div className="p-3 space-y-3">
-                        <div>
-                            <div className="mb-1 flex items-center justify-between text-[10px] text-vscode-fg/45">
-                                <span>Context</span>
-                                <span>{contextPercent || 0}%</span>
-                            </div>
-                            <div className="h-1.5 rounded bg-vscode-editor-background overflow-hidden">
-                                <div className="h-full bg-vscode-button-bg" style={{ width: `${Math.min(100, Math.max(0, contextPercent || 0))}%` }} />
-                            </div>
-                            <div className="mt-1 text-[10px] text-vscode-fg/40">{formatTokens(contextTokens)} of {contextWindow ? formatTokens(contextWindow) : 'unknown'} tokens in current context</div>
-                        </div>
-
-                        {(contextWarnings.length > 0 || contextSuggestions.length > 0) && (
-                            <div className="space-y-1 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
-                                <div className="text-[10px] font-medium text-vscode-fg/55">Context health</div>
-                                {contextWarnings.slice(0, 2).map((warning, index) => (
-                                    <div key={`context-warning-${index}`} className="text-[10px] leading-snug text-vscode-fg/55">{warning}</div>
-                                ))}
-                                {contextSuggestions.slice(0, 2).map((suggestion, index) => (
-                                    <div key={`context-suggestion-${index}`} className="text-[9px] leading-snug text-vscode-fg/35">{suggestion}</div>
-                                ))}
-                            </div>
-                        )}
-
-                        {compression?.saved_tokens ? (
-                            <div className="space-y-1 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
-                                <div className="flex items-center justify-between gap-2">
-                                    <div className="text-[10px] font-medium text-vscode-fg/55">Context compression</div>
-                                    <div className="text-[10px] text-vscode-fg/45">
-                                        {formatTokens(compression.original_tokens)} → {formatTokens(compression.compressed_tokens)}
-                                    </div>
-                                </div>
-                                <div className="text-[9px] text-vscode-fg/35">
-                                    Saved {formatTokens(compression.saved_tokens)} across {compressedFragments.length} fragment{compressedFragments.length === 1 ? '' : 's'}.
-                                </div>
-                                {compressedFragments.slice(0, 3).map((fragment) => (
-                                    <div key={`${fragment.hash}-${fragment.id}`} className="flex items-center justify-between gap-2 text-[9px] text-vscode-fg/40">
-                                        <span className="min-w-0 truncate">{fragment.type} · {fragment.id}</span>
-                                        <span className="shrink-0">{formatTokens(fragment.saved_tokens)} saved</span>
-                                    </div>
-                                ))}
-                            </div>
-                        ) : null}
-
-                        {topContributors.length > 0 && (
-                            <div className="space-y-1.5">
-                                <div className="text-[10px] text-vscode-fg/45">Largest context contributors</div>
-                                {topContributors.slice(0, 5).map((item) => (
-                                    <div key={`${item.id}-${item.type}`} className="flex items-center justify-between gap-2 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
-                                        <div className="min-w-0">
-                                            <div className="truncate text-[10px] text-vscode-fg/70">{item.id}</div>
-                                            <div className="text-[9px] text-vscode-fg/35">{item.type}{item.source ? ` · ${item.source}` : ''}</div>
-                                        </div>
-                                        <div className="shrink-0 text-[10px] text-vscode-fg/45">{formatTokens(item.tokens)}</div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-
-                        <div className="grid grid-cols-3 gap-2">
-                            <div className="rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
-                                <div className="text-[9px] text-vscode-fg/40">Input</div>
-                                <div className="text-[11px] font-medium text-vscode-fg/80">{formatTokens(usageSnapshot?.inputTokens)}</div>
-                            </div>
-                            <div className="rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
-                                <div className="text-[9px] text-vscode-fg/40">Output</div>
-                                <div className="text-[11px] font-medium text-vscode-fg/80">{formatTokens(usageSnapshot?.outputTokens)}</div>
-                            </div>
-                            <div className="rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
-                                <div className="text-[9px] text-vscode-fg/40">Cost</div>
-                                <div className="text-[11px] font-medium text-vscode-fg/80">{hasUsageTotals ? formatCost(usageSnapshot?.estimatedCostUsd) : 'pending'}</div>
-                            </div>
-                        </div>
-
-                        {(usageSnapshot?.cachedInputTokens || usageSnapshot?.reasoningOutputTokens) ? (
-                            <div className="flex flex-wrap gap-2 text-[10px] text-vscode-fg/45">
-                                {!!usageSnapshot.cachedInputTokens && <span>Cached input {formatTokens(usageSnapshot.cachedInputTokens)}</span>}
-                                {!!usageSnapshot.reasoningOutputTokens && <span>Reasoning {formatTokens(usageSnapshot.reasoningOutputTokens)}</span>}
-                            </div>
-                        ) : null}
-
-                        <div className="space-y-1.5">
-                            <div className="text-[10px] text-vscode-fg/45">Models used</div>
-                            {models.length === 0 ? (
-                                <div className="text-[10px] text-vscode-fg/35">No completed model usage yet.</div>
-                            ) : models.map(model => (
-                                <div key={`${model.provider}-${model.model}-${model.keySource || 'none'}`} className="flex items-center justify-between gap-2 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
-                                    <div className="min-w-0">
-                                        <div className="truncate text-[11px] text-vscode-fg/80">{model.model}</div>
-                                        <div className="text-[9px] text-vscode-fg/40">{model.provider} · {model.keySource === 'user' ? 'Your key' : model.keySource === 'server' ? 'Server key' : 'No key'} · {usageSourceLabel(model.source)}</div>
-                                    </div>
-                                    <div className="shrink-0 text-right text-[10px] text-vscode-fg/45">
-                                        <div>{formatTokens(model.inputTokens)} / {formatTokens(model.outputTokens)}</div>
-                                        <div>{formatCost(model.estimatedCostUsd)}</div>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-
-                        <div className="text-[9px] leading-relaxed text-vscode-fg/35">
-                            Transparency meter only. Estimated rows use Ricochet token approximation when a provider does not return usage.
-                        </div>
-                    </div>
-                </div>
-            )}
+            {popover && typeof document !== 'undefined' ? createPortal(popover, document.body) : popover}
         </div>
     );
 }
@@ -322,9 +491,9 @@ interface ChoiceOptionMetadata {
     danger?: boolean;
 }
 
-type ApprovalMode = 'ask' | 'auto' | 'full';
+export type ApprovalMode = 'ask' | 'auto' | 'full';
 
-interface AutoApprovalSettings {
+export interface AutoApprovalSettings {
     enabled?: boolean;
     read_files?: boolean;
     read_files_external?: boolean;
@@ -339,7 +508,7 @@ interface AutoApprovalSettings {
     enable_notifications?: boolean;
 }
 
-const APPROVAL_PRESETS: Record<ApprovalMode, AutoApprovalSettings> = {
+export const APPROVAL_PRESETS: Record<ApprovalMode, AutoApprovalSettings> = {
     ask: {
         enabled: false,
         read_files: false,
@@ -365,7 +534,7 @@ const APPROVAL_PRESETS: Record<ApprovalMode, AutoApprovalSettings> = {
         execute_safe_commands: true,
         execute_all_commands: false,
         use_browser: false,
-        use_mcp: true,
+        use_mcp: false,
         enable_notifications: false,
     },
     full: {
@@ -390,7 +559,7 @@ const APPROVAL_OPTIONS: Array<{ id: ApprovalMode; label: string; description: st
     { id: 'full', label: 'Full access', description: 'Allow edits, commands, browser, and MCP actions.', icon: ShieldAlert },
 ];
 
-function approvalModeFromSettings(settings?: AutoApprovalSettings): ApprovalMode {
+export function approvalModeFromSettings(settings?: AutoApprovalSettings): ApprovalMode {
     if (!settings?.enabled) return 'ask';
     if (
         settings.execute_all_commands ||
@@ -407,11 +576,17 @@ function approvalModeFromSettings(settings?: AutoApprovalSettings): ApprovalMode
 }
 
 const DEFAULT_COMMANDS = [
+    { command: '/help', description: 'Show available Ricochet commands' },
+    { command: '/status', description: 'Show session, provider, model, and Live status' },
+    { command: '/login', description: 'Sign in to Ricochet Cloud/Grik' },
+    { command: '/provider', description: 'Choose or inspect the default provider' },
+    { command: '/model', description: 'Choose or inspect the default model' },
+    { command: '/apikey', description: 'Manage BYOK provider keys' },
+    { command: '/permissions', description: 'Show or change approval mode' },
+    { command: '/mcp', description: 'Manage MCP servers' },
+    { command: '/ether', description: 'Manage Live/Ether remote control' },
+    { command: '/version', description: 'Show core version diagnostics' },
     { command: '/clear', description: 'Clear chat history' },
-    { command: '/reset', description: 'Reset session context' },
-    { command: '/mode code', description: 'Switch to Code mode' },
-    { command: '/mode architect', description: 'Switch to Architect mode' },
-    { command: '/mode ask', description: 'Switch to Ask mode' },
 ];
 
 const DEFAULT_PLAN_CHOICE_DESCRIPTIONS: Record<string, string> = {
@@ -438,16 +613,25 @@ function normalizeChoiceOption(choice: string, index: number, metadata?: ChoiceO
     };
 }
 
-function VoiceIcon({ className }: { className?: string }) {
-    return (
-        <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
-            <path d="M17 7C17 6.44772 16.5523 6 16 6C15.4477 6 15 6.44772 15 7V25C15 25.5523 15.4477 26 16 26C16.5523 26 17 25.5523 17 25V7Z" fill="currentColor" />
-            <path d="M21 10C21 9.44772 20.5523 9 20 9C19.4477 9 19 10V22C19 22.5523 20 23 21 22V10Z" fill="currentColor" />
-            <path d="M13 10C13 9.44772 12 10 12 10V22C12 22.5523 13 22 13 22V10Z" fill="currentColor" />
-            <path d="M25 14C25 13.4477 24 13 24 13C23 13 23 14 23 14V18C23 18.5523 24 19 25 18V14Z" fill="currentColor" />
-            <path d="M9 14C9 13.4477 8 13 8 13C7 13 7 14 7 14V18C7 18.5523 8 19 9 18V14Z" fill="currentColor" />
-        </svg>
-    );
+export function selectEtherBadgeAdapter<T extends EtherAdapterDisplayState>(
+    adapters: T[],
+    preferredKey?: EtherAdapterKey | null,
+    lastSource?: string | null
+): T | null {
+    const activeAdapters = adapters.filter(adapter => adapter.active);
+    if (activeAdapters.length === 0) return null;
+
+    if (preferredKey) {
+        const preferred = activeAdapters.find(adapter => adapter.key === preferredKey);
+        if (preferred) return preferred;
+    }
+
+    if (lastSource === 'telegram' || lastSource === 'discord') {
+        const lastUsed = activeAdapters.find(adapter => adapter.key === lastSource);
+        if (lastUsed) return lastUsed;
+    }
+
+    return activeAdapters[0] || null;
 }
 
 export function ChatInput(props: ChatInputProps) {
@@ -469,30 +653,37 @@ export function ChatInput(props: ChatInputProps) {
         currentModel: propCurrentModel,
         onModelChange,
         recentlyEditedFiles,
-        pendingEdits,
         pendingChoice,
         onChoiceResponse,
         contextStatus,
         usageSnapshot,
         networkStatus,
         missionStatus,
-        sessionId
+        accountStatus,
+        grikAccount,
+        sessionId,
+        onOpenSettings,
+        onOpenAccount
     } = props;
 
     const isLiveMode = liveStatus?.enabled ?? false;
     const isRemoteProcessing = isLiveMode && (liveStatus?.stage === 'processing' || liveStatus?.stage === 'receiving');
-    const hasUsageStatus = Boolean(contextStatus || usageSnapshot);
+    const hasUsageStatus = Boolean(sessionId || contextStatus || usageSnapshot);
     const hasMissionStatus = Boolean(missionStatus);
-    const hasInputStatusStrip = shouldRenderInputStatusStrip(networkStatus, contextStatus, usageSnapshot, hasMissionStatus);
+    const hasAccountStatus = Boolean(accountStatus);
+    const hasInputStatusStrip = shouldRenderInputStatusStrip(networkStatus, contextStatus, usageSnapshot, hasMissionStatus, hasUsageStatus, hasAccountStatus);
     const planFirstToggle = getPlanFirstToggleState(currentMode);
 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const etherMenuRef = useRef<HTMLDivElement>(null);
     const { isRecording, toggleRecording } = useAudioRecorder();
 
     const [showModelMenu, setShowModelMenu] = useState(false);
     const [showContextMenu, setShowContextMenu] = useState(false);
     const [showUsageMenu, setShowUsageMenu] = useState(false);
+    const [showEtherMenu, setShowEtherMenu] = useState(false);
+    const [preferredEtherAdapter, setPreferredEtherAdapter] = useState<EtherAdapterKey | null>(null);
     const [showApprovalMenu, setShowApprovalMenu] = useState(false);
     const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
     const [currentModel, setCurrentModel] = useState(propCurrentModel ?? DEFAULT_MODEL);
@@ -517,10 +708,31 @@ export function ChatInput(props: ChatInputProps) {
         };
     }, []);
 
+    useEffect(() => {
+        if (!showEtherMenu) return;
+
+        const handlePointerDown = (event: globalThis.MouseEvent) => {
+            const target = event.target as Node | null;
+            if (target && etherMenuRef.current?.contains(target)) return;
+            setShowEtherMenu(false);
+        };
+        const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+            if (event.key === 'Escape') setShowEtherMenu(false);
+        };
+
+        document.addEventListener('mousedown', handlePointerDown);
+        document.addEventListener('keydown', handleKeyDown);
+        return () => {
+            document.removeEventListener('mousedown', handlePointerDown);
+            document.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [showEtherMenu]);
+
     const closeAllMenus = () => {
         setShowModelMenu(false);
         setShowContextMenu(false);
         setShowUsageMenu(false);
+        setShowEtherMenu(false);
         setShowApprovalMenu(false);
         setShowFileMenu(false);
         setShowCommandMenu(false);
@@ -868,7 +1080,6 @@ export function ChatInput(props: ChatInputProps) {
     };
 
     const handleApprovalModeChange = (mode: ApprovalMode) => {
-        setApprovalMode(mode);
         setShowApprovalMenu(false);
         postMessage({ type: 'auto_approve_settings', payload: APPROVAL_PRESETS[mode] });
     };
@@ -885,18 +1096,64 @@ export function ChatInput(props: ChatInputProps) {
         textareaRef.current?.focus();
     };
 
-    const handleAcceptAll = () => {
-        postMessage({ type: 'execute_command', payload: { command: '/accept-all' } });
-    };
-
-    const handleRejectAll = () => {
-        postMessage({ type: 'execute_command', payload: { command: '/reject-all' } });
-    };
-
     const choiceOptions = (pendingChoice?.choices || []).map((choice, index) => {
         const metadata = pendingChoice?.choiceMetadata?.find(item => item.value === choice) || pendingChoice?.choiceMetadata?.[index];
         return normalizeChoiceOption(choice, index, metadata);
     });
+    const connectedVia = String(liveStatus?.connectedVia || '');
+    const connectedPlatforms = new Set(connectedVia.split('+').map(item => item.trim()).filter(Boolean));
+    const telegramStatus = liveStatus?.channels?.telegram;
+    const discordStatus = liveStatus?.channels?.discord;
+    const etherAdapters = [
+        {
+            key: 'telegram' as const,
+            label: telegramStatus?.label || 'Telegram',
+            short: 'TG',
+            Icon: TelegramIcon,
+            brandClass: 'text-sky-400',
+            configured: Boolean(telegramStatus?.configured || connectedPlatforms.has('telegram')),
+            active: Boolean(telegramStatus?.active || (isLiveMode && connectedPlatforms.has('telegram'))),
+        },
+        {
+            key: 'discord' as const,
+            label: discordStatus?.label || 'Discord',
+            short: 'DC',
+            Icon: DiscordIcon,
+            brandClass: 'text-indigo-300',
+            configured: Boolean(discordStatus?.configured || connectedPlatforms.has('discord')),
+            active: Boolean(discordStatus?.active || (isLiveMode && connectedPlatforms.has('discord'))),
+        },
+    ];
+    const activeEtherBadgeAdapter = selectEtherBadgeAdapter(etherAdapters, preferredEtherAdapter, liveStatus?.lastSource || null);
+    const hasConfiguredEtherAdapter = etherAdapters.some(adapter => adapter.configured);
+    const showRemoteStartChip = hasConfiguredEtherAdapter && liveStatus?.allowRemoteSessionStart === false;
+    const handleEtherAdapterClick = (adapter: typeof etherAdapters[number]) => {
+        if (!adapter.configured) {
+            setShowEtherMenu(false);
+            onOpenSettings?.('integrations');
+            return;
+        }
+        setPreferredEtherAdapter(adapter.key);
+        if (!isLiveMode) {
+            onToggleLiveMode?.();
+        }
+        setShowEtherMenu(false);
+    };
+    useEffect(() => {
+        if (!preferredEtherAdapter) return;
+        const preferred = etherAdapters.find(adapter => adapter.key === preferredEtherAdapter);
+        if (!preferred?.configured) {
+            setPreferredEtherAdapter(null);
+        }
+    }, [
+        preferredEtherAdapter,
+        connectedVia,
+        telegramStatus?.configured,
+        discordStatus?.configured
+    ]);
+    const allowRemoteSessionStart = () => {
+        postMessage({ type: 'set_remote_session_start', payload: { enabled: true } });
+    };
 
     return (
         <div className="w-full relative">
@@ -909,6 +1166,8 @@ export function ChatInput(props: ChatInputProps) {
                     isOpen={showModelMenu}
                     onClose={() => setShowModelMenu(false)}
                     currentModel={currentModel}
+                    grikAccount={grikAccount}
+                    onOpenAccount={onOpenAccount}
                     onSelectModel={(model) => {
                         setCurrentModel(model);
                         onModelChange(model);
@@ -1023,61 +1282,6 @@ export function ChatInput(props: ChatInputProps) {
                 </div>
             )}
 
-            {/* Pending Edits Bar */}
-            {pendingEdits && pendingEdits.length > 0 && (
-                <div className="flex flex-wrap items-center gap-2 px-3 py-2 mb-2 bg-vscode-input-bg border border-vscode-border rounded-md animate-in fade-in slide-in-from-bottom-1">
-                    <div className="flex min-w-0 flex-1 items-center gap-3 overflow-x-auto no-scrollbar">
-                        <span className="flex items-center gap-1.5 text-[10px] font-medium text-vscode-fg/65 shrink-0">
-                            <FileCode className="h-3 w-3" />
-                            {pendingEdits.length} edited {pendingEdits.length === 1 ? 'file' : 'files'}
-                        </span>
-                        <div className="flex gap-2">
-                            {pendingEdits.map((edit, i) => (
-                                <button
-                                    key={`pending-${i}`}
-                                    onClick={() => postMessage({ type: 'open_file', payload: { path: edit.filePath } })}
-                                    title={edit.conflictReason || edit.filePath}
-                                    className={`flex items-center gap-2 px-2.5 py-1 rounded text-[10px] font-medium transition-colors shrink-0 border ${
-                                        edit.status === 'conflicted'
-                                            ? 'bg-rose-500/10 hover:bg-rose-500/15 text-rose-300 border-rose-500/20'
-                                            : 'bg-vscode-editor-background hover:bg-vscode-list-hoverBackground text-vscode-fg/70 border-vscode-border'
-                                    }`}
-                                >
-                                    <span className="opacity-60">{edit.filePath.split('/').pop()}</span>
-                                    {edit.status === 'conflicted' && (
-                                        <span className="text-[9px] text-rose-300/70">conflict</span>
-                                    )}
-                                    {edit.status === 'reviewing' && (
-                                        <span className="text-[9px] text-vscode-fg/45">diff</span>
-                                    )}
-                                    <div className="flex items-center gap-1 font-mono text-[9px]">
-                                        {edit.additions > 0 && <span className="text-emerald-500">+{edit.additions}</span>}
-                                        {edit.deletions > 0 && <span className="text-rose-500">-{edit.deletions}</span>}
-                                        {edit.additions === 0 && edit.deletions === 0 && <span className="text-blue-500/50">unchanged</span>}
-                                    </div>
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                    <div className="ml-auto flex shrink-0 items-center gap-2">
-                        <button
-                            onClick={handleRejectAll}
-                            className="px-3 py-1 text-[10px] font-medium text-vscode-fg/50 hover:text-vscode-fg/80 transition-colors hover:bg-vscode-list-hoverBackground rounded"
-                        >
-                            Cancel
-                        </button>
-                        <button
-                            onClick={handleAcceptAll}
-                            className="px-3 py-1 bg-vscode-button-bg text-vscode-button-fg text-[10px] font-medium rounded hover:bg-vscode-button-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                            disabled={pendingEdits.some(edit => edit.status === 'conflicted')}
-                            title={pendingEdits.some(edit => edit.status === 'conflicted') ? 'Resolve conflicted files before proceeding' : 'Proceed with all pending Ricochet edits'}
-                        >
-                            Proceed
-                        </button>
-                    </div>
-                </div>
-            )}
-
             {pendingChoice && choiceOptions.length > 0 && (
                 <div className="mb-2 rounded-md border border-vscode-border bg-vscode-input-bg animate-in fade-in slide-in-from-bottom-1">
                     <div className="flex items-center justify-between gap-3 border-b border-vscode-border px-3 py-2">
@@ -1126,6 +1330,7 @@ export function ChatInput(props: ChatInputProps) {
                         {missionStatus}
                     </div>
                     <div className="ml-auto flex items-center justify-end gap-1.5">
+                        {accountStatus}
                         {networkStatus && <NetworkStatusPill status={networkStatus} />}
                         {hasUsageStatus && (
                             <UsageBadge
@@ -1138,10 +1343,39 @@ export function ChatInput(props: ChatInputProps) {
                                     setShowContextMenu(false);
                                     setShowApprovalMenu(false);
                                     setShowModelMenu(false);
+                                    setShowEtherMenu(false);
                                 }}
+                                onClose={() => setShowUsageMenu(false)}
                             />
                         )}
                     </div>
+                </div>
+            )}
+
+            {showRemoteStartChip && (
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-400/25 bg-amber-400/10 px-2.5 py-2 text-[11px] text-amber-100/85">
+                    <span className="inline-flex min-w-0 items-center gap-2">
+                        <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-amber-300" />
+                        <span className="truncate">Remote session start is blocked</span>
+                    </span>
+                    <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                        <button
+                            type="button"
+                            onClick={allowRemoteSessionStart}
+                            className="rounded bg-amber-300/20 px-2 py-1 text-[10px] font-medium text-amber-100 transition-colors hover:bg-amber-300/30"
+                        >
+                            Allow
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => onOpenSettings?.('integrations')}
+                            title="Open Integrations"
+                            aria-label="Open Integrations"
+                            className="rounded p-1 text-amber-100/65 transition-colors hover:bg-amber-300/15 hover:text-amber-100"
+                        >
+                            <Settings className="h-3.5 w-3.5" />
+                        </button>
+                    </span>
                 </div>
             )}
 
@@ -1187,6 +1421,7 @@ export function ChatInput(props: ChatInputProps) {
                                     setShowApprovalMenu(false);
                                     setShowModelMenu(false);
                                     setShowUsageMenu(false);
+                                    setShowEtherMenu(false);
                                 }}
                                 className="p-1.5 rounded text-vscode-fg/50 hover:text-vscode-fg/85 hover:bg-vscode-list-hoverBackground transition-colors"
                                 title="Add context or start an agent"
@@ -1259,6 +1494,7 @@ export function ChatInput(props: ChatInputProps) {
                                     setShowContextMenu(false);
                                     setShowModelMenu(false);
                                     setShowUsageMenu(false);
+                                    setShowEtherMenu(false);
                                 }}
                                 className="flex items-center gap-1.5 px-2 py-1.5 rounded border border-vscode-border bg-vscode-editor-background text-vscode-fg/65 hover:text-vscode-fg/90 hover:bg-vscode-list-hoverBackground transition-colors"
                                 title="Approval policy"
@@ -1300,6 +1536,7 @@ export function ChatInput(props: ChatInputProps) {
                                 setShowContextMenu(false);
                                 setShowApprovalMenu(false);
                                 setShowUsageMenu(false);
+                                setShowEtherMenu(false);
                             }}
                             className="flex min-w-0 max-w-full items-center gap-2 px-2 py-1.5 rounded hover:bg-vscode-list-hoverBackground transition-colors text-vscode-fg/55 hover:text-vscode-fg/85"
                         >
@@ -1310,9 +1547,93 @@ export function ChatInput(props: ChatInputProps) {
                     </div>
 
                     <div className="ml-auto flex shrink-0 items-center gap-2">
-                        <button onClick={onToggleLiveMode} className={`p-2 rounded transition-colors ${isLiveMode ? 'bg-vscode-button-bg text-vscode-button-fg' : 'text-vscode-fg/40 hover:text-vscode-fg/75 hover:bg-vscode-list-hoverBackground'}`}>
-                            <VoiceIcon className="w-4 h-4" />
-                        </button>
+                        <div ref={etherMenuRef} className="relative shrink-0">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setShowEtherMenu(prev => !prev);
+                                    setShowContextMenu(false);
+                                    setShowApprovalMenu(false);
+                                    setShowModelMenu(false);
+                                    setShowUsageMenu(false);
+                                }}
+                                className={`relative p-2 rounded transition-colors ${
+                                    isLiveMode
+                                        ? 'bg-vscode-button-bg text-vscode-button-fg'
+                                        : 'text-vscode-fg/40 hover:text-vscode-fg/75 hover:bg-vscode-list-hoverBackground'
+                                }`}
+                                title="Ether accepts only sent Telegram or Discord messages. It does not read typing in other apps."
+                                aria-label="Ether Gateway accepts sent Telegram and Discord messages only"
+                            >
+                                <EtherIcon className="w-4 h-4" />
+                                {activeEtherBadgeAdapter && (
+                                    <span className="absolute -right-1 -top-1 flex gap-0.5">
+                                        <span className="flex h-3.5 min-w-3.5 items-center justify-center rounded-sm bg-vscode-editor-background px-0.5 text-[7px] font-semibold leading-none text-vscode-button-bg ring-1 ring-vscode-button-bg/45">
+                                            {activeEtherBadgeAdapter.short}
+                                        </span>
+                                    </span>
+                                )}
+                            </button>
+
+                            {showEtherMenu && (
+                                <div className="absolute bottom-full right-0 z-[9999] mb-2 flex items-center gap-1.5 rounded-md border border-vscode-border bg-vscode-input-bg p-1.5 shadow-lg animate-in fade-in slide-in-from-bottom-2">
+                                    {etherAdapters.map(adapter => {
+                                        const Icon = adapter.Icon;
+                                        const selected = activeEtherBadgeAdapter?.key === adapter.key;
+                                        const statusLabel = etherAdapterStatusLabel(adapter);
+                                        const visibleStatusLabel = etherAdapterVisibleStatusLabel(adapter);
+                                        const selectedLabel = selected ? 'selected source, ' : '';
+                                        const adapterTitle = adapter.configured
+                                            ? `${adapter.label}: ${selectedLabel}${statusLabel}. Receives sent messages only.`
+                                            : `${adapter.label}: Not configured. Open Integrations to receive sent messages.`;
+                                        return (
+                                            <button
+                                                key={adapter.key}
+                                                type="button"
+                                                onClick={() => handleEtherAdapterClick(adapter)}
+                                                title={adapterTitle}
+                                                aria-label={adapterTitle}
+                                                className={etherAdapterButtonClass(adapter, selected)}
+                                            >
+                                                <Icon className={`h-4 w-4 shrink-0 ${adapter.configured ? adapter.brandClass : ''}`} />
+                                                <span className="min-w-0 flex flex-1 items-center gap-1.5 leading-none">
+                                                    <span className="block truncate text-[11px] font-medium">{adapter.label}</span>
+                                                    <span
+                                                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                                                            adapter.active
+                                                                ? 'bg-emerald-300 shadow-[0_0_8px_rgba(110,231,183,0.32)]'
+                                                                : adapter.configured
+                                                                    ? 'bg-vscode-fg/40'
+                                                                    : 'bg-transparent ring-1 ring-vscode-fg/30'
+                                                        }`}
+                                                        aria-hidden="true"
+                                                    />
+                                                    {visibleStatusLabel && (
+                                                        <span className="sr-only">{visibleStatusLabel}</span>
+                                                    )}
+                                                </span>
+                                                {selected && (
+                                                    <span className="codicon codicon-check text-[11px] text-vscode-button-bg" />
+                                                )}
+                                            </button>
+                                        );
+                                    })}
+                                    <div className="h-6 w-px bg-vscode-border/80" />
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setShowEtherMenu(false);
+                                            onOpenSettings?.('integrations');
+                                        }}
+                                        title="Open Integrations"
+                                        aria-label="Open Integrations"
+                                        className="flex h-8 w-8 items-center justify-center rounded-md border border-vscode-border/60 bg-vscode-editor-background text-vscode-fg/55 transition-colors hover:bg-vscode-list-hoverBackground hover:text-vscode-fg"
+                                    >
+                                        <Settings className="h-4 w-4" />
+                                    </button>
+                                </div>
+                            )}
+                        </div>
                         <button onClick={toggleRecording} className={`p-2 rounded transition-colors ${isRecording ? 'bg-red-500/15 text-red-400' : 'text-vscode-fg/40 hover:text-vscode-fg/75 hover:bg-vscode-list-hoverBackground'}`}>
                             {isRecording ? <Square className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
                         </button>

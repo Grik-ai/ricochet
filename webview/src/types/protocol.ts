@@ -11,6 +11,10 @@ export type InteractionRequestKind = 'permission' | 'choice';
 export interface InteractionRequestPayload {
     id: string;
     sessionId?: string;
+    runId?: string;
+    run_id?: string;
+    toolName?: string;
+    tool_name?: string;
     question: string;
     choices: string[];
     choiceMetadata?: ChoiceMetadata[];
@@ -289,6 +293,16 @@ export interface ToolLifecycleEventPayload {
     duration_ms?: number;
     args_summary?: string;
     affected_files?: string[];
+    lineRange?: string;
+    line_range?: string;
+    readLineStart?: number | string;
+    readLineEnd?: number | string;
+    read_line_start?: number | string;
+    read_line_end?: number | string;
+    startLine?: number | string;
+    endLine?: number | string;
+    start_line?: number | string;
+    end_line?: number | string;
     error?: string;
     output_preview?: string;
     timestamp?: number;
@@ -430,9 +444,24 @@ export interface BatchEventPayload {
 
 export interface QueuedMessagePayload {
     session_id?: string;
+    sessionId?: string;
+    run_id?: string;
+    runId?: string;
     message_id?: string;
     queue_length?: number;
     status?: string;
+    text?: string;
+    error?: string;
+    message?: {
+        id?: string;
+        session_id?: string;
+        run_id?: string;
+        text?: string;
+        via?: string;
+        delivery?: string;
+        timestamp?: number;
+        updated_at?: number;
+    };
 }
 
 export type NetworkHealthState = 'unknown' | 'online' | 'degraded' | 'reconnecting' | 'offline';
@@ -477,6 +506,10 @@ export function normalizeInteractionRequest(message: ExtensionMessage): Interact
         choiceMetadata?: ChoiceMetadata[];
         question?: string;
         sessionId?: string;
+        runId?: string;
+        run_id?: string;
+        toolName?: string;
+        tool_name?: string;
         kind?: InteractionRequestKind;
     };
     const id = payload.id || message.id;
@@ -488,6 +521,10 @@ export function normalizeInteractionRequest(message: ExtensionMessage): Interact
     return {
         id,
         sessionId: payload.sessionId,
+        runId: payload.runId || payload.run_id,
+        run_id: payload.run_id || payload.runId,
+        toolName: payload.toolName || payload.tool_name,
+        tool_name: payload.tool_name || payload.toolName,
         question: payload.question,
         choices: payload.choices?.length ? payload.choices : [...DEFAULT_PERMISSION_CHOICES],
         choiceMetadata: payload.choiceMetadata,

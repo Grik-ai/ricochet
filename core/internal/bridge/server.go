@@ -91,6 +91,24 @@ func (s *Server) SendMessage(ctx context.Context, msg *proto.OutgoingMessage) (*
 	}, nil
 }
 
+func (s *Server) SendOutbound(ctx context.Context, msg *proto.OutboundMessage) (*proto.MessageResponse, error) {
+	if msg.GetEnvelope() != nil {
+		log.Printf("Server received v2 message for chat %d: %s", msg.GetEnvelope().GetChatId(), msg.GetText())
+	}
+	return &proto.MessageResponse{
+		MessageId: "cloud-msg-123",
+		Success:   true,
+	}, nil
+}
+
+func (s *Server) AckEvent(ctx context.Context, ack *proto.DeliveryAck) (*proto.MessageResponse, error) {
+	log.Printf("Server received ack for event %s: %s", ack.GetEventId(), ack.GetStatus())
+	return &proto.MessageResponse{
+		MessageId: ack.GetEventId(),
+		Success:   true,
+	}, nil
+}
+
 // StreamEvents implementation
 func (s *Server) StreamEvents(empty *proto.Empty, stream proto.ChatService_StreamEventsServer) error {
 	log.Println("New events stream established")

@@ -141,3 +141,26 @@ func TestEphemeralMessage_Structure(t *testing.T) {
 		t.Error("Should have introduction text")
 	}
 }
+
+func TestEphemeralMessage_CommunicationContract(t *testing.T) {
+	ctx := EphemeralContext{
+		Mode:         "verification",
+		IsInTaskMode: true,
+		SessionID:    "session-123",
+	}
+
+	result := BuildEphemeralMessage(ctx)
+
+	if strings.Contains(result, "write_file") {
+		t.Fatalf("ephemeral reminder should not route reports through write_file:\n%s", result)
+	}
+	if strings.Contains(result, ".ricochet/brain") {
+		t.Fatalf("ephemeral reminder should not mention the old brain artifact path:\n%s", result)
+	}
+	if !strings.Contains(result, "submit_plan") {
+		t.Fatalf("ephemeral reminder should preserve submit_plan guidance:\n%s", result)
+	}
+	if !strings.Contains(result, ".ricochet/artifacts/session-123/filename.resolved") {
+		t.Fatalf("ephemeral reminder should use session-scoped artifact path:\n%s", result)
+	}
+}

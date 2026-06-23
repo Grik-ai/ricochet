@@ -73,9 +73,16 @@ type SkillsSettings struct {
 	Config []SkillConfigEntry `json:"config,omitempty"`
 }
 
+type AuthSettings struct {
+	GrikAccessToken  string `json:"grik_access_token,omitempty"`
+	GrikRefreshToken string `json:"grik_refresh_token,omitempty"`
+	GrikExpiresAt    int64  `json:"grik_expires_at,omitempty"`
+}
+
 type Settings struct {
 	Tools              ToolsSettings        `json:"tools"`
 	Provider           ProviderSettings     `json:"provider"`
+	Auth               AuthSettings         `json:"auth,omitempty"`
 	LiveMode           LiveModeSettings     `json:"live_mode"`
 	Context            ContextSettings      `json:"context"`
 	AutoApproval       AutoApprovalSettings `json:"auto_approval"`
@@ -99,12 +106,20 @@ type ProviderSettings struct {
 }
 
 type LiveModeSettings struct {
-	Enabled        bool    `json:"enabled"`
-	TelegramToken  string  `json:"telegram_token"`
-	TelegramChatID int64   `json:"telegram_chat_id"`
-	AllowedUserIDs []int64 `json:"allowed_user_ids"`
-	WhisperBinary  string  `json:"whisper_binary,omitempty"` // Path to whisper executable
-	WhisperModel   string  `json:"whisper_model,omitempty"`  // Path to ggml model
+	Enabled                  bool     `json:"enabled"`
+	TelegramToken            string   `json:"telegram_token"`
+	TelegramChatID           int64    `json:"telegram_chat_id"`
+	AllowedUserIDs           []int64  `json:"allowed_user_ids"`
+	WhisperBinary            string   `json:"whisper_binary,omitempty"` // Path to whisper executable
+	WhisperModel             string   `json:"whisper_model,omitempty"`  // Path to ggml model
+	DiscordToken             string   `json:"discord_token,omitempty"`
+	DiscordApplicationID     string   `json:"discord_application_id,omitempty"`
+	DiscordGuildID           string   `json:"discord_guild_id,omitempty"`
+	DiscordAllowedUserIDs    []string `json:"discord_allowed_user_ids,omitempty"`
+	DiscordAllowedChannelIDs []string `json:"discord_allowed_channel_ids,omitempty"`
+	DiscordRequireMention    bool     `json:"discord_require_mention"`
+	DiscordTextMode          bool     `json:"discord_text_mode,omitempty"`
+	AllowRemoteSessionStart  bool     `json:"allow_remote_session_start,omitempty"`
 }
 
 type Store struct {
@@ -124,14 +139,18 @@ func NewStore() (*Store, error) {
 		return nil, fmt.Errorf("failed to create config dir: %w", err)
 	}
 
-	// Default provider - user must enter their own API key in Settings
-	// NO hardcoded keys - security first!
-	defaultProvider := "deepseek"
-	defaultModel := "deepseek-chat"
+	// Default provider - user must enter their own API key in Settings.
+	// NO hardcoded keys - security first.
+	defaultProvider := "openrouter"
+	defaultModel := "qwen/qwen3-coder:free"
 	defaultAPIKey := "" // User enters in Settings UI
 
 	// Optional: Check for dev environment variables (local dev only)
-	if envKey := os.Getenv("RICOCHET_DEEPSEEK_KEY"); envKey != "" {
+	if envKey := os.Getenv("RICOCHET_OPENROUTER_KEY"); envKey != "" {
+		defaultAPIKey = envKey
+	} else if envKey := os.Getenv("RICOCHET_DEEPSEEK_KEY"); envKey != "" {
+		defaultProvider = "deepseek"
+		defaultModel = "deepseek-chat"
 		defaultAPIKey = envKey
 	} else if envKey := os.Getenv("RICOCHET_GEMINI_KEY"); envKey != "" {
 		defaultProvider = "gemini"
@@ -159,7 +178,9 @@ func NewStore() (*Store, error) {
 				TopP:        1,
 				MaxTokens:   4096,
 			},
-			LiveMode: LiveModeSettings{},
+			LiveMode: LiveModeSettings{
+				DiscordRequireMention: true,
+			},
 			Context: ContextSettings{
 				AutoCondense:               true,
 				CondenseThreshold:          70,
@@ -224,15 +245,41 @@ func (s *Store) Load() error {
 	if err := json.Unmarshal(data, &settings); err != nil {
 		return fmt.Errorf("failed to parse settings.json: %w", err)
 	}
+	if !settingsHasLiveModeField(data, "discord_require_mention") {
+		settings.LiveMode.DiscordRequireMention = true
+	}
 	normalizeSettings(&settings)
 
 	s.settings = &settings
 	return nil
 }
 
+func settingsHasLiveModeField(data []byte, field string) bool {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return false
+	}
+	liveRaw, ok := root["live_mode"]
+	if !ok {
+		return false
+	}
+	var live map[string]json.RawMessage
+	if err := json.Unmarshal(liveRaw, &live); err != nil {
+		return false
+	}
+	_, ok = live[field]
+	return ok
+}
+
 func normalizeSettings(settings *Settings) {
 	if settings.Provider.APIKeys == nil {
 		settings.Provider.APIKeys = make(map[string]string)
+	}
+	if settings.Auth.GrikAccessToken != "" {
+		settings.Provider.APIKeys["grik"] = settings.Auth.GrikAccessToken
+		if settings.Provider.Provider == "grik" {
+			settings.Provider.APIKey = settings.Auth.GrikAccessToken
+		}
 	}
 	if settings.Provider.TopP == 0 {
 		settings.Provider.TopP = 1

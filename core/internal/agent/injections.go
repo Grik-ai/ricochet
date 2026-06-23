@@ -20,8 +20,21 @@ func NewInjectionProcessor(cwd string) *InjectionProcessor {
 
 // Process expands injections in the input text
 func (p *InjectionProcessor) Process(input string) (string, []string) {
+	return p.ProcessIgnoringPaths(input, nil)
+}
+
+// ProcessIgnoringPaths expands injections while skipping paths already handled by
+// a structured attachment channel.
+func (p *InjectionProcessor) ProcessIgnoringPaths(input string, ignoredPaths []string) (string, []string) {
 	result := input
 	var infoMessages []string
+	ignored := make(map[string]bool, len(ignoredPaths))
+	for _, path := range ignoredPaths {
+		normalized := normalizeInjectionPath(path)
+		if normalized != "" {
+			ignored[normalized] = true
+		}
+	}
 
 	// 1. Process @path/to/file
 	// Regex matches @ followed by a path-like string (letters, numbers, dots, slashes, underscores, hyphens)
@@ -33,6 +46,9 @@ func (p *InjectionProcessor) Process(input string) (string, []string) {
 			continue
 		}
 		path := match[1]
+		if ignored[normalizeInjectionPath(path)] {
+			continue
+		}
 		content, err := os.ReadFile(path)
 		if err != nil {
 			infoMessages = append(infoMessages, fmt.Sprintf("⚠️ Could not read file @%s: %v", path, err))
@@ -102,4 +118,8 @@ func (p *InjectionProcessor) Process(input string) (string, []string) {
 	}
 
 	return result, infoMessages
+}
+
+func normalizeInjectionPath(path string) string {
+	return strings.TrimPrefix(strings.TrimSpace(path), "@")
 }

@@ -1,10 +1,16 @@
 package config
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,19 +28,30 @@ type ProviderConfig struct {
 	Enabled          bool          `yaml:"enabled"`
 	Key              string        `yaml:"key"`      // Can be ${ENV_VAR} reference
 	BaseURL          string        `yaml:"base_url"` // Optional custom endpoint
+	KeySource        string        `yaml:"key_source,omitempty"`
+	AccessMode       string        `yaml:"access_mode,omitempty"`
 	Models           []ModelConfig `yaml:"models"`
 	AttemptTimeoutMs int           `yaml:"attempt_timeout_ms,omitempty"`
 }
 
 // ModelConfig defines a model available from the provider
 type ModelConfig struct {
-	ID            string  `yaml:"id"`
-	Name          string  `yaml:"name"`
-	ContextWindow int     `yaml:"context_window"`
-	InputPrice    float64 `yaml:"input_price"`
-	OutputPrice   float64 `yaml:"output_price"`
-	IsFree        bool    `yaml:"free"`
-	SupportsTools bool    `yaml:"supports_tools"`
+	ID                   string  `yaml:"id"`
+	Name                 string  `yaml:"name"`
+	ContextWindow        int     `yaml:"context_window"`
+	InputPrice           float64 `yaml:"input_price"`
+	OutputPrice          float64 `yaml:"output_price"`
+	IsFree               bool    `yaml:"free"`
+	SupportsTools        bool    `yaml:"supports_tools"`
+	Recommended          bool    `yaml:"recommended,omitempty"`
+	AccessMode           string  `yaml:"access_mode,omitempty"`
+	KeySource            string  `yaml:"key_source,omitempty"`
+	RequiresSubscription bool    `yaml:"requires_subscription,omitempty"`
+	BillingSKU           string  `yaml:"billing_sku,omitempty"`
+	Limited              bool    `yaml:"limited,omitempty"`
+	Deprecated           bool    `yaml:"deprecated,omitempty"`
+	APIType              string  `yaml:"api_type,omitempty"`
+	Source               string  `yaml:"source,omitempty"`
 }
 
 // BYOKConfig defines bring-your-own-key settings
@@ -49,26 +66,53 @@ type AvailableProvider struct {
 	Name       string           `json:"name"`
 	HasKey     bool             `json:"hasKey"`     // Server has key configured
 	HasUserKey bool             `json:"hasUserKey"` // User has configured a BYOK key
-	KeySource  string           `json:"keySource"`  // "server", "user", "none"
-	Available  bool             `json:"available"`  // User can use (server key OR BYOK)
+	KeySource  string           `json:"keySource"`  // "server", "user", "hosted", "none"
+	AccessMode string           `json:"accessMode,omitempty"`
+	Available  bool             `json:"available"` // User can use (server key OR BYOK)
 	Models     []AvailableModel `json:"models"`
 }
 
 // AvailableModel is returned to frontend
 type AvailableModel struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name"`
-	ContextWindow int     `json:"contextWindow"`
-	InputPrice    float64 `json:"inputPrice"`
-	OutputPrice   float64 `json:"outputPrice"`
-	IsFree        bool    `json:"isFree"`
-	SupportsTools bool    `json:"supportsTools"`
+	ID                   string  `json:"id"`
+	Name                 string  `json:"name"`
+	ContextWindow        int     `json:"contextWindow"`
+	InputPrice           float64 `json:"inputPrice"`
+	OutputPrice          float64 `json:"outputPrice"`
+	IsFree               bool    `json:"isFree"`
+	SupportsTools        bool    `json:"supportsTools"`
+	Recommended          bool    `json:"recommended,omitempty"`
+	AccessMode           string  `json:"accessMode,omitempty"`
+	KeySource            string  `json:"keySource,omitempty"`
+	RequiresSubscription bool    `json:"requiresSubscription,omitempty"`
+	BillingSKU           string  `json:"billingSku,omitempty"`
+	Limited              bool    `json:"limited,omitempty"`
+	Deprecated           bool    `json:"deprecated,omitempty"`
+	APIType              string  `json:"apiType,omitempty"`
+	Source               string  `json:"source,omitempty"`
 }
 
 // ProvidersManager handles loading and querying providers config
 type ProvidersManager struct {
-	config   *ProvidersConfig
-	userKeys map[string]string // User-provided keys from Settings
+	config                *ProvidersConfig
+	userKeys              map[string]string // User-provided keys from Settings
+	openRouterRefreshOnce sync.Once
+	openRouterRefreshErr  error
+}
+
+func providersDebugEnabled() bool {
+	switch strings.ToLower(os.Getenv("RICOCHET_DEBUG")) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func providersDebugf(format string, args ...interface{}) {
+	if providersDebugEnabled() {
+		fmt.Fprintf(os.Stderr, format, args...)
+	}
 }
 
 // NewProvidersManager creates a new providers manager
@@ -113,17 +157,20 @@ func (pm *ProvidersManager) loadEnvLocal() {
 	// Get executable directory for relative paths
 	execPath, _ := os.Executable()
 	execDir := filepath.Dir(execPath)
+	cwd, _ := os.Getwd()
 
 	// Get home directory
 	home, _ := os.UserHomeDir()
 
 	// Look for .env.local in various locations
 	paths := []string{
-		// Absolute dev paths (Ricochet project)
-		"/Users/igoryan_dao/GRIKAI/Ricochet/core/config/.env.local",
 		// Relative to executable (bin/darwin-arm64 -> ../../core/config)
 		filepath.Join(execDir, "..", "..", "core", "config", ".env.local"),
+		filepath.Join(execDir, "config", ".env.local"),
+		filepath.Join(execDir, "..", "config", ".env.local"),
 		// Current directory variations
+		filepath.Join(cwd, "config", ".env.local"),
+		filepath.Join(cwd, "core", "config", ".env.local"),
 		"config/.env.local",
 		"core/config/.env.local",
 		".env.local",
@@ -137,7 +184,7 @@ func (pm *ProvidersManager) loadEnvLocal() {
 			continue
 		}
 
-		fmt.Fprintf(os.Stderr, "[Providers] Found .env.local at: %s\n", path)
+		providersDebugf("[Providers] Found .env.local at: %s\n", path)
 
 		// Parse KEY=VALUE lines
 		lines := strings.Split(string(data), "\n")
@@ -151,12 +198,12 @@ func (pm *ProvidersManager) loadEnvLocal() {
 				key := strings.TrimSpace(parts[0])
 				value := strings.TrimSpace(parts[1])
 				os.Setenv(key, value)
-				fmt.Fprintf(os.Stderr, "[Providers] Set ENV: %s=***\n", key)
+				providersDebugf("[Providers] Set ENV: %s=***\n", key)
 			}
 		}
 		return // Only load first found file
 	}
-	fmt.Fprintf(os.Stderr, "[Providers] No .env.local found in search paths\n")
+	providersDebugf("[Providers] No .env.local found in search paths\n")
 }
 
 // resolveEnvVars replaces ${ENV_VAR} with actual values from environment
@@ -165,13 +212,13 @@ func (pm *ProvidersManager) resolveEnvVars() {
 		if strings.HasPrefix(p.Key, "${") && strings.HasSuffix(p.Key, "}") {
 			envVar := p.Key[2 : len(p.Key)-1]
 			val := os.Getenv(envVar)
-			fmt.Fprintf(os.Stderr, "[Providers] Resolving %s -> (len=%d)\n", p.Key, len(val))
+			providersDebugf("[Providers] Resolving %s -> (len=%d)\n", p.Key, len(val))
 			p.Key = val
 		}
 		if strings.HasPrefix(p.BaseURL, "${") && strings.HasSuffix(p.BaseURL, "}") {
 			envVar := p.BaseURL[2 : len(p.BaseURL)-1]
 			val := os.Getenv(envVar)
-			fmt.Fprintf(os.Stderr, "[Providers] Resolving %s -> (len=%d)\n", p.BaseURL, len(val))
+			providersDebugf("[Providers] Resolving %s -> (len=%d)\n", p.BaseURL, len(val))
 			p.BaseURL = val
 		}
 		pm.config.Providers[id] = p
@@ -219,17 +266,35 @@ func (pm *ProvidersManager) GetAvailableProviders() []AvailableProvider {
 		} else if hasServerKey {
 			keySource = "server"
 		}
+		if p.KeySource != "" && (hasServerKey || hasUserKey) {
+			keySource = p.KeySource
+		}
+		accessMode := p.AccessMode
 
 		models := make([]AvailableModel, 0, len(p.Models))
 		for _, m := range p.Models {
+			modelAccessMode := normalizeModelAccessMode(m, accessMode)
+			modelKeySource := m.KeySource
+			if modelKeySource == "" && modelAccessMode == "subscription" {
+				modelKeySource = "hosted"
+			}
 			models = append(models, AvailableModel{
-				ID:            m.ID,
-				Name:          m.Name,
-				ContextWindow: m.ContextWindow,
-				InputPrice:    m.InputPrice,
-				OutputPrice:   m.OutputPrice,
-				IsFree:        m.IsFree,
-				SupportsTools: m.SupportsTools,
+				ID:                   m.ID,
+				Name:                 m.Name,
+				ContextWindow:        m.ContextWindow,
+				InputPrice:           m.InputPrice,
+				OutputPrice:          m.OutputPrice,
+				IsFree:               m.IsFree,
+				SupportsTools:        m.SupportsTools,
+				Recommended:          m.Recommended,
+				AccessMode:           modelAccessMode,
+				KeySource:            modelKeySource,
+				RequiresSubscription: m.RequiresSubscription,
+				BillingSKU:           m.BillingSKU,
+				Limited:              m.Limited,
+				Deprecated:           m.Deprecated,
+				APIType:              m.APIType,
+				Source:               m.Source,
 			})
 		}
 
@@ -244,12 +309,145 @@ func (pm *ProvidersManager) GetAvailableProviders() []AvailableProvider {
 			HasKey:     hasServerKey,
 			HasUserKey: hasUserKey,
 			KeySource:  keySource,
+			AccessMode: accessMode,
 			Available:  available,
 			Models:     models,
 		})
 	}
 
 	return result
+}
+
+func normalizeModelAccessMode(model ModelConfig, providerAccessMode string) string {
+	if model.AccessMode != "" {
+		return model.AccessMode
+	}
+	if model.IsFree {
+		return "free"
+	}
+	if model.RequiresSubscription || providerAccessMode == "subscription" {
+		return "subscription"
+	}
+	return "byok"
+}
+
+type openRouterModelsResponse struct {
+	Data []struct {
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		ContextLength int    `json:"context_length"`
+		Pricing       struct {
+			Prompt     string `json:"prompt"`
+			Completion string `json:"completion"`
+		} `json:"pricing"`
+		SupportedParameters []string `json:"supported_parameters"`
+	} `json:"data"`
+}
+
+// RefreshOpenRouterFreeModels merges the current OpenRouter free model catalog
+// into the static curated list. Failures are non-fatal by design.
+func (pm *ProvidersManager) RefreshOpenRouterFreeModels(ctx context.Context) error {
+	pm.openRouterRefreshOnce.Do(func() {
+		pm.openRouterRefreshErr = pm.refreshOpenRouterFreeModels(ctx)
+	})
+	return pm.openRouterRefreshErr
+}
+
+func (pm *ProvidersManager) refreshOpenRouterFreeModels(ctx context.Context) error {
+	if pm == nil || pm.config == nil {
+		return nil
+	}
+	provider, ok := pm.config.Providers["openrouter"]
+	if !ok || !provider.Enabled {
+		return nil
+	}
+
+	modelsURL := strings.TrimSpace(os.Getenv("OPENROUTER_MODELS_URL"))
+	if modelsURL == "" {
+		modelsURL = "https://openrouter.ai/api/v1/models"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("openrouter models returned HTTP %d", resp.StatusCode)
+	}
+
+	var payload openRouterModelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return err
+	}
+
+	seen := make(map[string]int, len(provider.Models))
+	for i, model := range provider.Models {
+		seen[model.ID] = i
+	}
+	for _, item := range payload.Data {
+		if item.ID == "" || !isOpenRouterFreeModel(item.ID, item.Pricing.Prompt, item.Pricing.Completion) {
+			continue
+		}
+		model := ModelConfig{
+			ID:            item.ID,
+			Name:          firstNonEmpty(item.Name, item.ID),
+			ContextWindow: item.ContextLength,
+			IsFree:        true,
+			SupportsTools: stringSliceContains(item.SupportedParameters, "tools"),
+			AccessMode:    "free",
+			Source:        "openrouter-live",
+		}
+		if idx, ok := seen[item.ID]; ok {
+			existing := provider.Models[idx]
+			existing.Name = firstNonEmpty(existing.Name, model.Name)
+			if existing.ContextWindow == 0 {
+				existing.ContextWindow = model.ContextWindow
+			}
+			existing.IsFree = true
+			existing.AccessMode = "free"
+			existing.Source = firstNonEmpty(existing.Source, model.Source)
+			if !existing.SupportsTools {
+				existing.SupportsTools = model.SupportsTools
+			}
+			provider.Models[idx] = existing
+			continue
+		}
+		provider.Models = append(provider.Models, model)
+		seen[item.ID] = len(provider.Models) - 1
+	}
+	pm.config.Providers["openrouter"] = provider
+	return nil
+}
+
+func isOpenRouterFreeModel(id, promptPrice, completionPrice string) bool {
+	if strings.Contains(strings.ToLower(id), ":free") {
+		return true
+	}
+	prompt, promptErr := strconv.ParseFloat(promptPrice, 64)
+	completion, completionErr := strconv.ParseFloat(completionPrice, 64)
+	return promptErr == nil && completionErr == nil && prompt == 0 && completion == 0
+}
+
+func stringSliceContains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // GetAPIKey returns the API key to use for a provider (server key or user key)
@@ -278,7 +476,7 @@ func (pm *ProvidersManager) GetDefaultProvider() string {
 	if pm.config.DefaultProvider != "" {
 		return pm.config.DefaultProvider
 	}
-	return "deepseek"
+	return "openrouter"
 }
 
 // GetDefaultModel returns the default model ID
@@ -286,7 +484,7 @@ func (pm *ProvidersManager) GetDefaultModel() string {
 	if pm.config.DefaultModel != "" {
 		return pm.config.DefaultModel
 	}
-	return "deepseek-chat"
+	return "qwen/qwen3-coder:free"
 }
 
 // defaultConfig returns default configuration when no yaml file
@@ -294,21 +492,31 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 	return &ProvidersConfig{
 		Providers: map[string]ProviderConfig{
 			"grik": {
-				Enabled: true,
-				Key:     os.Getenv("GRIKAI_ACCESS_TOKEN"),
-				BaseURL: os.Getenv("GRIKAI_CODE_GATEWAY_URL"),
+				Enabled:    true,
+				Key:        os.Getenv("GRIKAI_ACCESS_TOKEN"),
+				BaseURL:    os.Getenv("GRIKAI_CODE_GATEWAY_URL"),
+				KeySource:  "hosted",
+				AccessMode: "subscription",
 				Models: []ModelConfig{
-					{ID: "ricochet-code", Name: "Grik Ricochet Code", ContextWindow: 200000, SupportsTools: true},
+					{ID: "ricochet-code", Name: "Grik Ricochet Code", ContextWindow: 200000, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", Recommended: true},
+					{ID: "openai/gpt-5.5", Name: "GPT-5.5 (Subscription)", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 30.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses", Recommended: true},
+					{ID: "anthropic/claude-fable-5", Name: "Claude Fable 5 (Subscription)", ContextWindow: 1000000, InputPrice: 10.0, OutputPrice: 50.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
+					{ID: "anthropic/claude-opus-4-8", Name: "Claude Opus 4.8 (Subscription)", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 25.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", Recommended: true},
+					{ID: "anthropic/claude-sonnet-4-6", Name: "Claude Sonnet 4.6 (Subscription)", ContextWindow: 1000000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
+					{ID: "xai/grok-4.3", Name: "Grok 4.3 (Subscription)", ContextWindow: 1000000, InputPrice: 1.25, OutputPrice: 2.50, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
+					{ID: "deepseek/deepseek-v4-pro", Name: "DeepSeek V4 Pro (Subscription)", ContextWindow: 1000000, InputPrice: 0.435, OutputPrice: 0.87, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 				},
 				AttemptTimeoutMs: 1000,
 			},
 			"deepseek": {
 				Enabled: true,
 				Key:     os.Getenv("DEEPSEEK_API_KEY"),
-				BaseURL: "https://api.deepseek.com/v1",
+				BaseURL: "https://api.deepseek.com",
 				Models: []ModelConfig{
-					{ID: "deepseek-chat", Name: "DeepSeek V3.2", ContextWindow: 128000, InputPrice: 0.27, OutputPrice: 1.10, SupportsTools: true},
-					{ID: "deepseek-reasoner", Name: "DeepSeek R1", ContextWindow: 64000, InputPrice: 0.55, OutputPrice: 2.19, SupportsTools: false},
+					{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextWindow: 1000000, InputPrice: 0.14, OutputPrice: 0.28, SupportsTools: true, Recommended: true},
+					{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextWindow: 1000000, InputPrice: 0.435, OutputPrice: 0.87, SupportsTools: true},
+					{ID: "deepseek-chat", Name: "DeepSeek Chat (Deprecated 2026-07-24)", ContextWindow: 1000000, InputPrice: 0.14, OutputPrice: 0.28, SupportsTools: true, Deprecated: true},
+					{ID: "deepseek-reasoner", Name: "DeepSeek Reasoner (Deprecated 2026-07-24)", ContextWindow: 1000000, InputPrice: 0.14, OutputPrice: 0.28, SupportsTools: true, Deprecated: true},
 				},
 				AttemptTimeoutMs: 1000,
 			},
@@ -327,9 +535,11 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				Enabled: true,
 				Key:     os.Getenv("ANTHROPIC_API_KEY"),
 				Models: []ModelConfig{
-					{ID: "claude-sonnet-4-20250514", Name: "Claude Sonnet 4", ContextWindow: 200000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true},
-					{ID: "claude-3-5-sonnet-20241022", Name: "Claude 3.5 Sonnet", ContextWindow: 200000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true},
-					{ID: "claude-3-5-haiku-20241022", Name: "Claude 3.5 Haiku", ContextWindow: 200000, InputPrice: 0.80, OutputPrice: 4.0, SupportsTools: true},
+					{ID: "claude-fable-5", Name: "Claude Fable 5", ContextWindow: 1000000, InputPrice: 10.0, OutputPrice: 50.0, SupportsTools: true, Recommended: true},
+					{ID: "claude-opus-4-8", Name: "Claude Opus 4.8", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 25.0, SupportsTools: true, Recommended: true},
+					{ID: "claude-sonnet-4-6", Name: "Claude Sonnet 4.6", ContextWindow: 1000000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true, Recommended: true},
+					{ID: "claude-haiku-4-5-20251001", Name: "Claude Haiku 4.5", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 5.0, SupportsTools: true},
+					{ID: "claude-mythos-5", Name: "Claude Mythos 5 (Limited)", ContextWindow: 1000000, InputPrice: 10.0, OutputPrice: 50.0, SupportsTools: true, Limited: true},
 				},
 				AttemptTimeoutMs: 1000,
 			},
@@ -337,10 +547,9 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				Enabled: true,
 				Key:     os.Getenv("OPENAI_API_KEY"),
 				Models: []ModelConfig{
-					{ID: "gpt-4.1", Name: "GPT-4.1", ContextWindow: 1000000, InputPrice: 2.0, OutputPrice: 8.0, SupportsTools: true},
-					{ID: "gpt-4.1-mini", Name: "GPT-4.1 Mini", ContextWindow: 1000000, InputPrice: 0.40, OutputPrice: 1.60, SupportsTools: true},
-					{ID: "gpt-4o", Name: "GPT-4o", ContextWindow: 128000, InputPrice: 2.5, OutputPrice: 10.0, SupportsTools: true},
-					{ID: "o3-mini", Name: "o3-mini (Reasoning)", ContextWindow: 200000, InputPrice: 1.10, OutputPrice: 4.40, SupportsTools: true},
+					{ID: "gpt-5.5", Name: "GPT-5.5", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 30.0, SupportsTools: true, Recommended: true, APIType: "responses"},
+					{ID: "gpt-5.4", Name: "GPT-5.4", ContextWindow: 1000000, InputPrice: 2.5, OutputPrice: 15.0, SupportsTools: true, APIType: "responses"},
+					{ID: "gpt-5.4-mini", Name: "GPT-5.4 Mini", ContextWindow: 400000, InputPrice: 0.75, OutputPrice: 4.5, SupportsTools: true, APIType: "responses"},
 				},
 				AttemptTimeoutMs: 1000,
 			},
@@ -348,9 +557,9 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				Enabled: true,
 				Key:     os.Getenv("XAI_API_KEY"),
 				Models: []ModelConfig{
-					{ID: "grok-4", Name: "Grok 4", ContextWindow: 2000000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true},
-					{ID: "grok-code-fast-1", Name: "Grok Code Fast", ContextWindow: 256000, InputPrice: 0.20, OutputPrice: 1.50, SupportsTools: true},
-					{ID: "grok-3-mini", Name: "Grok 3 Mini", ContextWindow: 131000, InputPrice: 0.30, OutputPrice: 0.50, SupportsTools: true},
+					{ID: "grok-4.3", Name: "Grok 4.3", ContextWindow: 1000000, InputPrice: 1.25, OutputPrice: 2.50, SupportsTools: true, Recommended: true},
+					{ID: "grok-build-0.1", Name: "Grok Build 0.1", ContextWindow: 256000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true},
+					{ID: "grok-latest", Name: "Grok Latest Alias", ContextWindow: 1000000, InputPrice: 1.25, OutputPrice: 2.50, SupportsTools: true},
 				},
 				AttemptTimeoutMs: 1000,
 			},
@@ -364,11 +573,35 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				},
 				AttemptTimeoutMs: 1000,
 			},
+			"zhipu": {
+				Enabled: true,
+				Key:     os.Getenv("ZHIPU_API_KEY"),
+				BaseURL: "https://api.z.ai/api/paas/v4",
+				Models: []ModelConfig{
+					{ID: "glm-5.1", Name: "GLM-5.1 (Flagship)", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, Recommended: true},
+					{ID: "glm-5-turbo", Name: "GLM-5 Turbo", ContextWindow: 128000, InputPrice: 0.3, OutputPrice: 0.6, SupportsTools: true},
+					{ID: "glm-4.7", Name: "GLM-4.7", ContextWindow: 128000, InputPrice: 1.0, OutputPrice: 1.0, SupportsTools: true},
+					{ID: "glm-4.7-flash", Name: "GLM-4.7 Flash (Free)", ContextWindow: 128000, IsFree: true, SupportsTools: true, AccessMode: "free"},
+					{ID: "glm-4.5-flash", Name: "GLM-4.5 Flash (Free)", ContextWindow: 128000, IsFree: true, SupportsTools: true, AccessMode: "free"},
+				},
+				AttemptTimeoutMs: 1000,
+			},
+			"zhipu-coding": {
+				Enabled: true,
+				Key:     os.Getenv("ZHIPU_API_KEY"),
+				BaseURL: "https://api.z.ai/api/coding/paas/v4",
+				Models: []ModelConfig{
+					{ID: "glm-5.1", Name: "GLM-5.1 Coding", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, Recommended: true},
+					{ID: "glm-4.7", Name: "GLM-4.7 Coding", ContextWindow: 128000, InputPrice: 1.0, OutputPrice: 1.0, SupportsTools: true},
+				},
+				AttemptTimeoutMs: 1000,
+			},
 			"minimax": {
 				Enabled: true,
 				Key:     os.Getenv("MINIMAX_API_KEY"),
 				Models: []ModelConfig{
-					{ID: "MiniMax-M2.1", Name: "MiniMax M2.1", ContextWindow: 200000, InputPrice: 0.10, OutputPrice: 0.30, SupportsTools: true},
+					{ID: "MiniMax-M3", Name: "MiniMax M3", ContextWindow: 1000000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, Source: "openrouter-verified"},
+					{ID: "MiniMax-M2.5", Name: "MiniMax M2.5", ContextWindow: 196608, InputPrice: 0.5, OutputPrice: 1.0, SupportsTools: true},
 				},
 				AttemptTimeoutMs: 1000,
 			},
@@ -377,15 +610,25 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				Key:     os.Getenv("OPENROUTER_API_KEY"),
 				BaseURL: "https://openrouter.ai/api/v1",
 				Models: []ModelConfig{
-					{ID: "anthropic/claude-sonnet-4", Name: "Claude Sonnet 4 (OR)", ContextWindow: 200000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true},
-					{ID: "google/gemini-3-flash", Name: "Gemini 3 Flash (OR)", ContextWindow: 1000000, IsFree: true, SupportsTools: true},
-					{ID: "deepseek/deepseek-chat-v3-0324", Name: "DeepSeek V3 (OR)", ContextWindow: 128000, InputPrice: 0.27, OutputPrice: 1.10, SupportsTools: true},
+					{ID: "qwen/qwen3-coder:free", Name: "Qwen 3 Coder (Free)", ContextWindow: 262000, IsFree: true, SupportsTools: true, AccessMode: "free", Recommended: true},
+					{ID: "openrouter/free", Name: "OpenRouter Free Router", ContextWindow: 200000, IsFree: true, SupportsTools: true, AccessMode: "free"},
+					{ID: "nex-agi/nex-n2-pro:free", Name: "Nex AGI N2 Pro (Free)", ContextWindow: 32768, IsFree: true, SupportsTools: true, AccessMode: "free"},
+					{ID: "nvidia/nemotron-3-ultra:free", Name: "Nemotron 3 Ultra (Free)", ContextWindow: 262144, IsFree: true, SupportsTools: true, AccessMode: "free"},
+					{ID: "minimax/minimax-m3", Name: "MiniMax M3 (OpenRouter)", ContextWindow: 1000000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true},
+					{ID: "google/gemma-4-26b-a4b-it:free", Name: "Gemma 4 26B (Free)", ContextWindow: 262144, IsFree: true, SupportsTools: true, AccessMode: "free"},
+					{ID: "google/gemma-4-31b-it:free", Name: "Gemma 4 31B (Free)", ContextWindow: 262144, IsFree: true, SupportsTools: true, AccessMode: "free"},
+					{ID: "meta-llama/llama-3.3-70b-instruct:free", Name: "Llama 3.3 70B (Free)", ContextWindow: 128000, IsFree: true, SupportsTools: true, AccessMode: "free"},
+					{ID: "nvidia/nemotron-3-super-120b-a12b:free", Name: "Nemotron 3 Super (Free)", ContextWindow: 262144, IsFree: true, SupportsTools: true, AccessMode: "free"},
+					{ID: "minimax/minimax-m2.5:free", Name: "MiniMax M2.5 (Free)", ContextWindow: 196608, IsFree: true, SupportsTools: true, AccessMode: "free"},
+					{ID: "arcee-ai/trinity-large-preview:free", Name: "Trinity Large (Free)", ContextWindow: 131000, IsFree: true, SupportsTools: true, AccessMode: "free"},
+					{ID: "liquid/lfm-2.5-1.2b-thinking:free", Name: "LFM 2.5 Thinking (Free)", ContextWindow: 32768, IsFree: true, SupportsTools: true, AccessMode: "free"},
+					{ID: "qwen/qwen3-next-80b-a3b-instruct:free", Name: "Qwen 3 Next (Free)", ContextWindow: 262144, IsFree: true, SupportsTools: true, AccessMode: "free"},
 				},
 				AttemptTimeoutMs: 1000,
 			},
 		},
-		DefaultProvider: "deepseek",
-		DefaultModel:    "deepseek-chat",
+		DefaultProvider: "openrouter",
+		DefaultModel:    "qwen/qwen3-coder:free",
 		BYOK: BYOKConfig{
 			Enabled:             true,
 			ShowServerProviders: true,
@@ -396,8 +639,15 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 // FindConfigFile looks for providers.yaml in standard locations
 func FindConfigFile() string {
 	// Look in local project during dev
+	execPath, _ := os.Executable()
+	execDir := filepath.Dir(execPath)
+	cwd, _ := os.Getwd()
 	projectPaths := []string{
-		"/Users/igoryan_dao/GRIKAI/Ricochet/core/config/providers.yaml",
+		filepath.Join(cwd, "config", "providers.yaml"),
+		filepath.Join(cwd, "core", "config", "providers.yaml"),
+		filepath.Join(execDir, "config", "providers.yaml"),
+		filepath.Join(execDir, "..", "config", "providers.yaml"),
+		filepath.Join(execDir, "..", "..", "core", "config", "providers.yaml"),
 		"config/providers.yaml",
 		"core/config/providers.yaml",
 	}

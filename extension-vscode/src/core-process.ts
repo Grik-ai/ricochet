@@ -3,7 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as readline from 'readline';
 import * as fs from 'fs';
-import { CoreNotificationPayloads, CoreRequestPayloads } from './protocol/coreMessages';
+import { CoreNotificationPayloads, CoreRequestPayloads, ReadyPayload } from './protocol/coreMessages';
 
 export interface CoreMessage {
     type: string;
@@ -20,22 +20,42 @@ type Unsubscribe = () => void;
  */
 export class CoreProcess {
     private process: ChildProcess | null = null;
+    private starting: Promise<void> | null = null;
     private messageHandlers: Map<string, Set<MessageHandler>> = new Map();
     private requestHandlers: Map<string, RequestHandler> = new Map();
     private pendingRequests: Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }> = new Map();
     private requestId = 0;
     private rl: readline.Interface | null = null;
     private ready = false;
+    private readyPayload: ReadyPayload | null = null;
 
     constructor(private rootPath: string, private extensionPath: string) { }
 
-    async start(): Promise<void> {
+    async ensureStarted(reason = 'request'): Promise<void> {
+        if (this.process && this.ready) {
+            return;
+        }
+        if (this.starting) {
+            return this.starting;
+        }
+        this.starting = this.start(reason).finally(() => {
+            this.starting = null;
+        });
+        return this.starting;
+    }
+
+    async start(reason = 'manual'): Promise<void> {
+        if (this.process) {
+            await this.waitForReady();
+            return;
+        }
+
         const binaryPath = this.getBinaryPath();
 
         // Load default API keys from .env.keys file
         const envKeys = this.loadEnvKeys();
 
-        console.log(`[Extension] Starting core process: ${binaryPath} in ${this.rootPath}`);
+        console.log(`[Extension] Starting core process (${reason}): ${binaryPath} in ${this.rootPath}`);
 
         this.process = spawn(binaryPath, ['--stdio'], {
             cwd: this.rootPath,
@@ -82,6 +102,8 @@ export class CoreProcess {
         this.process.on('exit', (code) => {
             console.log(`ricochet-core exited with code ${code}`);
             this.process = null;
+            this.ready = false;
+            this.readyPayload = null;
             this.rejectPendingRequests(new Error(`Core process exited with code ${code}`));
         });
 
@@ -96,6 +118,8 @@ export class CoreProcess {
             this.process.kill('SIGTERM');
             this.process = null;
         }
+        this.ready = false;
+        this.readyPayload = null;
         if (this.rl) {
             this.rl.close();
             this.rl = null;
@@ -119,6 +143,8 @@ export class CoreProcess {
     }
 
     async send(type: string, payload: unknown, timeoutMs?: number): Promise<unknown> {
+        await this.ensureStarted(`request:${type}`);
+
         if (!this.process?.stdin) {
             throw new Error('Core process not running');
         }
@@ -181,6 +207,10 @@ export class CoreProcess {
         }
         if (message.type === 'ready') {
             this.ready = true;
+            this.readyPayload = message.payload ?? {};
+            console.log(
+                `[CoreProcess] Ready core=${this.readyPayload.version ?? 'unknown'} commit=${this.readyPayload.commit ?? 'unknown'} binary=${this.readyPayload.executable_path ?? 'unknown'} cwd=${this.readyPayload.cwd ?? this.rootPath}`
+            );
         }
         // Handle response to pending request (Extension -> Core -> Extension)
         if (message.type === 'response' || ('id' in message && this.pendingRequests.has(message.id))) {

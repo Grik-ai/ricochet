@@ -38,8 +38,15 @@ fi
 echo "  Building for Native ($PLATFORM_OS/$PLATFORM_ARCH) -> $OUTPUT_DIR..."
 mkdir -p "$OUTPUT_DIR"
 
+VERSION="${RICOCHET_VERSION:-0.2.0-dev}"
+COMMIT="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo dev)"
+BUILD_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+LDFLAGS="-s -w -X github.com/igoryan-dao/ricochet/internal/version.Version=$VERSION -X github.com/igoryan-dao/ricochet/internal/version.Commit=$COMMIT -X github.com/igoryan-dao/ricochet/internal/version.BuildTime=$BUILD_TIME"
+
 # CGO_ENABLED=1 is required for go-tree-sitter
-CGO_ENABLED=1 go build -ldflags="-s -w" -o "$OUTPUT_DIR/$OUTPUT_NAME" ./cmd/ricochet
+CGO_ENABLED=1 go build -ldflags="$LDFLAGS" -o "$OUTPUT_DIR/$OUTPUT_NAME" ./cmd/ricochet
+
+"$OUTPUT_DIR/$OUTPUT_NAME" version || true
 
 echo "✅ Core builds complete!"
 echo ""

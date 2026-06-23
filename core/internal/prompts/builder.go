@@ -10,6 +10,8 @@ func BuildSystemPrompt(cwd string) string {
 	sb.WriteString("\n\n")
 	sb.WriteString(GetCapabilities())
 	sb.WriteString("\n\n")
+	sb.WriteString(GetExecutionContract())
+	sb.WriteString("\n\n")
 	sb.WriteString(GetToolGuidelines())
 	sb.WriteString("\n\n")
 	sb.WriteString(GetRules())

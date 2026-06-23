@@ -9,11 +9,13 @@ interface MissionWidgetProps {
     onOpenDashboard: () => void;
     currentToolName?: string;
     inline?: boolean;
+    pendingEditCount?: number;
+    alwaysVisible?: boolean;
 }
 
-export const missionWidgetButtonClass = 'group inline-flex h-6 items-center gap-1.5 rounded px-1.5 text-[10px] font-medium text-vscode-fg/50 transition-colors hover:bg-vscode-toolbar-hover hover:text-vscode-fg/80';
+export const missionWidgetButtonClass = 'group inline-flex h-6 max-w-[180px] items-center gap-1.5 rounded px-1.5 text-[10px] font-medium text-vscode-fg/50 transition-colors hover:bg-vscode-toolbar-hover hover:text-vscode-fg/80';
 
-export function MissionWidget({ agentState, onOpenDashboard, currentToolName, inline = false }: MissionWidgetProps) {
+export function MissionWidget({ agentState, onOpenDashboard, currentToolName, inline = false, pendingEditCount = 0, alwaysVisible = false }: MissionWidgetProps) {
     const { postMessage } = useVSCodeApi();
     const { state, context, uiState } = agentState;
     const [pendingAnswer, setPendingAnswer] = useState<string | null>(null);
@@ -25,22 +27,23 @@ export function MissionWidget({ agentState, onOpenDashboard, currentToolName, in
     }, [state]);
 
     const runtime = deriveMissionRuntime(context, state, uiState);
-    if (!runtime.shouldShowPill) return null;
+    const hasPendingEdits = pendingEditCount > 0;
+    if (!alwaysVisible && !runtime.shouldShowPill && !hasPendingEdits) return null;
 
-    // Determine dot color
-    const dotColor = runtime.tone === 'active' ? 'bg-blue-400'
-        : runtime.tone === 'waiting' ? 'bg-amber-300'
-        : runtime.tone === 'success' ? 'bg-green-400'
-        : runtime.tone === 'error' ? 'bg-red-400'
-        : 'bg-[#e0e0e0]/30';
-
-    const isPinging = runtime.tone === 'active' && runtime.hasActiveWork;
+    const toneClass = hasPendingEdits ? 'text-amber-200/85'
+        : runtime.tone === 'active' ? 'text-blue-300/75'
+        : runtime.tone === 'waiting' ? 'text-amber-200/85'
+        : runtime.tone === 'success' ? 'text-emerald-300/75'
+        : runtime.tone === 'error' ? 'text-rose-300/80'
+        : 'text-vscode-fg/45';
     const hasApproval = (context.pendingChoice && state === SessionState.waiting_input) ||
                        (context.pendingTool && state === SessionState.waiting_approval);
     const choices = context.pendingChoice?.choices || ['Allow', 'Decline'];
     const pendingId = context.pendingChoice?.id || context.pendingTool?.id;
-    const statusLabel = runtime.pillLabel;
-    const title = currentToolName && runtime.hasActiveWork
+    const statusLabel = hasPendingEdits ? 'Review' : runtime.pillLabel;
+    const title = hasPendingEdits
+        ? `Open Mission Dashboard · ${pendingEditCount} pending ${pendingEditCount === 1 ? 'edit' : 'edits'}`
+        : currentToolName && runtime.hasActiveWork
         ? `Open Mission Dashboard · running ${currentToolName}`
         : runtime.title;
 
@@ -97,12 +100,8 @@ export function MissionWidget({ agentState, onOpenDashboard, currentToolName, in
                     className={missionWidgetButtonClass}
                     title={title}
                 >
-                    <span className="relative h-2.5 w-2.5 shrink-0">
-                        <span className={`absolute inset-0 rounded-full ${dotColor} transition-colors`} />
-                        {isPinging && <span className={`absolute inset-0 rounded-full ${dotColor} animate-ping opacity-40`} />}
-                    </span>
-                    <span className="hidden sm:inline">{statusLabel}</span>
-                    <span className="codicon codicon-layout-sidebar-right text-[11px] text-vscode-fg/30 group-hover:text-vscode-fg/60 transition-colors" />
+                    <span className={`codicon codicon-layout-sidebar-right text-[11px] transition-colors ${toneClass}`} />
+                    <span className="inline min-w-0 truncate">{statusLabel}</span>
                 </button>
             </div>
         </div>

@@ -433,9 +433,24 @@ export interface BatchEventPayload {
 
 export interface QueuedMessagePayload {
     session_id?: string;
+    sessionId?: string;
+    run_id?: string;
+    runId?: string;
     message_id?: string;
     queue_length?: number;
     status?: string;
+    text?: string;
+    error?: string;
+    message?: {
+        id?: string;
+        session_id?: string;
+        run_id?: string;
+        text?: string;
+        via?: string;
+        delivery?: string;
+        timestamp?: number;
+        updated_at?: number;
+    };
 }
 
 export interface CommandEventPayload {
@@ -509,8 +524,16 @@ export interface ProviderNetworkEventPayload {
     timestamp?: number;
 }
 
+export interface ReadyPayload {
+    version?: string;
+    commit?: string;
+    build_time?: string;
+    executable_path?: string;
+    cwd?: string;
+}
+
 export interface CoreNotificationPayloads {
-    ready: Record<string, never>;
+    ready: ReadyPayload;
     chat_update: ChatUpdatePayload;
     task_progress: TaskProgressPayload;
     command_event: CommandEventPayload;
@@ -519,6 +542,7 @@ export interface CoreNotificationPayloads {
     checkpoint_event: CheckpointEventPayload;
     batch_event: BatchEventPayload;
     message_queued: QueuedMessagePayload;
+    queued_message_error: QueuedMessagePayload;
     usage_update: UsageSnapshot;
     context_status: unknown;
     live_mode_status: unknown;

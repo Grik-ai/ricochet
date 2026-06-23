@@ -32,3 +32,30 @@ func TestGetScopedInstructionsOrdersBroadToNearest(t *testing.T) {
 		t.Fatalf("instructions out of order:\n%s", got)
 	}
 }
+
+func TestGetRulesForFilesFiltersByPath(t *testing.T) {
+	root := t.TempDir()
+	rulesDir := filepath.Join(root, ".ricochet", "rules")
+	if err := os.MkdirAll(rulesDir, 0755); err != nil {
+		t.Fatalf("mkdir rules: %v", err)
+	}
+	rule := `---
+name: go rules
+paths:
+  - "*.go"
+enabled: true
+---
+Use Go-specific checks.
+`
+	if err := os.WriteFile(filepath.Join(rulesDir, "go.md"), []byte(rule), 0644); err != nil {
+		t.Fatalf("write rule: %v", err)
+	}
+
+	manager := NewManager(root)
+	if got := manager.GetRulesForFiles([]string{filepath.Join(root, "main.go")}); !strings.Contains(got, "Go-specific checks") {
+		t.Fatalf("expected Go rule to apply:\n%s", got)
+	}
+	if got := manager.GetRulesForFiles([]string{filepath.Join(root, "README.md")}); strings.Contains(got, "Go-specific checks") {
+		t.Fatalf("Go rule should not apply to markdown:\n%s", got)
+	}
+}

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Activity, BellRing, Boxes, Brain, CheckCircle2, ChevronDown, ChevronLeft, CircleDot, Cpu, FileText, LayoutGrid, MessageSquare, RefreshCw, StopCircle, Terminal, Users } from 'lucide-react';
 import { useAgentStateMachine } from '../../hooks/useAgentStateMachine';
@@ -17,16 +17,21 @@ export interface AgentViewProps {
     onModeChange: (mode: 'plan' | 'act' | 'mission') => void;
     model: { id: string; name: string; provider: string };
     onModelChange: (model: { id: string; name: string; provider: string }) => void;
+    pendingEdits?: any[];
+    initialTab?: MissionDashboardTab;
     onBack: () => void;
 }
 
 export type MissionDashboardTab = 'tasks' | 'events' | 'hub' | 'batch';
 export const DEFAULT_MISSION_DASHBOARD_TAB: MissionDashboardTab = 'tasks';
+const DASHBOARD_ACTIVE_TOOL_STALE_MS = 5 * 60 * 1000;
 
 export function AgentView({
     agentState,
     model,
     onModelChange,
+    pendingEdits = [],
+    initialTab,
     onBack
 }: AgentViewProps) {
     const { state, uiState, context, send, reset } = agentState;
@@ -37,13 +42,19 @@ export function AgentView({
     const { usageSnapshot, contextStatus } = useUsage(context.sessionId || null);
     const runtime = deriveMissionRuntime(context, state, uiState);
 
+    useEffect(() => {
+        if (initialTab) {
+            setActiveTab(initialTab);
+        }
+    }, [initialTab]);
+
     const workers = Object.values(context.workers);
     const missionTitle = prompt || context.missionTitle || context.logs.find(log => log.type === 'assistant_text')?.content || 'Active mission';
     const contextTokens = usageSnapshot?.contextTokens || contextStatus?.tokens_used || 0;
     const contextWindow = usageSnapshot?.contextWindow || contextStatus?.tokens_max || 0;
     const contextPercent = contextWindow > 0 ? Math.round((contextTokens / contextWindow) * 100) : Math.round(contextStatus?.percentage || 0);
     const hasUsageTotals = Boolean(usageSnapshot && (usageSnapshot.requestCount > 0 || usageSnapshot.inputTokens > 0 || usageSnapshot.outputTokens > 0 || usageSnapshot.estimatedCostUsd > 0));
-    const hubSections = buildMissionHubSections(context);
+    const hubSections = buildMissionHubSections(context, pendingEdits);
 
     const handleStart = () => {
         if (!prompt.trim()) return;
@@ -105,7 +116,7 @@ export function AgentView({
                             ? `${formatAgentUsageTokens(usageSnapshot?.inputTokens)} in · ${formatAgentUsageTokens(usageSnapshot?.outputTokens)} out · ${formatAgentUsageCost(usageSnapshot?.estimatedCostUsd)} ${usageSnapshot?.source === 'actual' ? 'actual' : 'est'}`
                             : runtime.hasActiveWork ? 'Usage pending' : 'No model usage yet'}
                         />
-                        {runtime.hasWorkers && <MetricPill icon={<Users className="h-3 w-3" />} text={`${runtime.activeWorkerCount} running · ${runtime.queuedWorkerCount} queued · ${runtime.completedWorkerCount} done`} />}
+                        {runtime.hasWorkers && <MetricPill icon={<Users className="h-3 w-3" />} text={`${runtime.activeWorkerCount} agents running · ${runtime.queuedWorkerCount} queued · ${runtime.completedWorkerCount} done`} />}
                     </div>
                 )}
             </header>
@@ -114,19 +125,24 @@ export function AgentView({
                 {state === SessionState.idle ? (
                     <motion.div key="setup" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex-1 flex flex-col items-center justify-center p-6 max-w-lg mx-auto w-full gap-6">
                         <div className="w-full space-y-4">
+                            <div className="space-y-1 text-center">
+                                <h2 className="text-sm font-semibold text-foreground/80">Mission Dashboard</h2>
+                                <p className="text-[11px] text-foreground/45">Start an autonomous mission or inspect tasks, events, and agents once a mission is running.</p>
+                            </div>
+
                             <div className="space-y-1">
                                 <h2 className="text-sm font-semibold text-foreground/80">Autonomous Goal</h2>
                                 <p className="text-[11px] text-foreground/45">Define what the agent should accomplish autonomously.</p>
                             </div>
 
-                            <div className="relative bg-input-background border border-input-border rounded p-3">
+                            <div className="relative rounded bg-input-background p-3">
                                 <textarea
                                     className="w-full bg-transparent p-0 text-[13px] text-input-foreground focus:outline-none min-h-[120px] resize-none placeholder:text-input-placeholder"
                                     placeholder="e.g., Analyze the project and run specialized agents..."
                                     value={prompt}
                                     onChange={(e) => setPrompt(e.target.value)}
                                 />
-                                <div className="flex items-center justify-between mt-3 pt-3 border-t border-vscode-border/30">
+                                <div className="mt-3 flex items-center justify-between pt-2">
                                     <div className="flex items-center gap-1.5 px-2 py-0.5 bg-vscode-border/5 rounded">
                                         <Cpu className="w-3 h-3 text-foreground/25" />
                                         <span className="text-[9px] font-medium text-foreground/40">Autonomous mission</span>
@@ -163,7 +179,7 @@ export function AgentView({
                                 className={`relative flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11px] font-medium transition-colors ${activeTab === 'tasks' ? 'text-button-background bg-button-background/10' : 'text-foreground/45 hover:bg-list-background-hover/45 hover:text-foreground/70'}`}
                             >
                                 <FileText className="w-3 h-3" />
-                                Tasks
+                                Hub Tasks
                             </button>
                             <button
                                 onClick={() => setActiveTab('events')}
@@ -210,10 +226,10 @@ export function AgentView({
 
                                 {workers.length > 0 && (
                                     <div className="flex-[1] min-w-[220px] overflow-y-auto px-2 pb-2">
-                                        <div className="sticky top-0 bg-sidebar-background/95 px-1 py-2 text-[11px] font-medium text-foreground/55">Workers</div>
+                                        <div className="sticky top-0 bg-sidebar-background/95 px-1 py-2 text-[11px] font-medium text-foreground/55">Agents</div>
                                         <div className="space-y-1">
                                             {workers.map(worker => (
-                                                <div key={worker.id} className="rounded-md border border-vscode-border/25 bg-input-background/25 px-2.5 py-2">
+                                                <div key={worker.id} className="rounded-md bg-input-background/25 px-2.5 py-2">
                                                     <div className="mb-1 flex items-center justify-between gap-2">
                                                         <span className="truncate text-[11px] font-medium text-foreground/80">{worker.name}</span>
                                                         <WorkerStatus status={worker.status} active={worker.isActive} />
@@ -241,14 +257,14 @@ export function AgentView({
                         )}
 
                         {(runtime.canAbort || runtime.isParentOnlyComplete || state === SessionState.completed || state === SessionState.stopped || state === SessionState.error) && (
-                            <div className="flex shrink-0 items-center justify-between border-t border-vscode-border/35 bg-sidebar-background px-4 py-3">
+                            <div className="flex shrink-0 items-center justify-between bg-sidebar-background px-4 py-3">
                                 <div className="text-[10px] text-foreground/35">
                                     {runtime.footerText}
                                 </div>
                                 <div className="flex gap-2">
                                     {runtime.canAbort && (
                                         <button
-                                            className="h-7 px-3 bg-error/10 border border-error/20 text-error text-[10px] font-medium rounded hover:bg-error hover:text-white transition-colors flex items-center gap-1.5"
+                                            className="h-7 px-3 bg-error/10 text-error text-[10px] font-medium rounded hover:bg-error hover:text-white transition-colors flex items-center gap-1.5"
                                             onClick={handleCancel}
                                         >
                                             <StopCircle className="w-3 h-3" />
@@ -302,8 +318,21 @@ export interface MissionHubSection {
     items: MissionHubItem[];
 }
 
-export function buildMissionHubSections(context: SessionContext): MissionHubSection[] {
+export function buildMissionHubSections(context: SessionContext, pendingEdits: any[] = []): MissionHubSection[] {
     const pendingItems: MissionHubItem[] = [];
+    for (const edit of pendingEdits) {
+        const displayPath = edit.relativePath || edit.displayName || edit.filePath || 'pending edit';
+        const additions = typeof edit.additions === 'number' ? edit.additions : 0;
+        const deletions = typeof edit.deletions === 'number' ? edit.deletions : 0;
+        pendingItems.push({
+            id: `pending-edit-${edit.proposalId || edit.filePath || displayPath}`,
+            group: 'pending',
+            title: edit.status === 'conflicted' ? 'Edit review blocked' : 'Review workspace edit',
+            subtitle: `${displayPath}  +${additions} -${deletions}`,
+            status: edit.status === 'conflicted' ? 'Conflict' : 'Review',
+            tone: edit.status === 'conflicted' ? 'error' : 'warning',
+        });
+    }
     if (context.pendingChoice) {
         pendingItems.push({
             id: `choice-${context.pendingChoice.id}`,
@@ -327,7 +356,7 @@ export function buildMissionHubSections(context: SessionContext): MissionHubSect
 
     const workerItems = Object.values(context.workers || {}).map(workerToHubItem);
     const toolItems = Object.values(context.activeToolCalls || {})
-        .filter(tool => tool.status === 'running' || tool.status === 'failed')
+        .filter(tool => isDashboardToolVisible(tool, context))
         .map(tool => ({
             id: `active-tool-${tool.id}`,
             group: 'tools' as const,
@@ -344,7 +373,7 @@ export function buildMissionHubSections(context: SessionContext): MissionHubSect
 
     return [
         { id: 'pending', title: 'Pending', items: pendingItems },
-        { id: 'workers', title: 'Workers', items: workerItems },
+        { id: 'workers', title: 'Agents', items: workerItems },
         { id: 'tools', title: 'Active tools', items: toolItems },
         { id: 'activity', title: 'Recent activity', items: recentItems },
     ];
@@ -355,11 +384,11 @@ function MissionHub({ sections }: { sections: MissionHubSection[] }) {
     if (visibleSections.length === 0) {
         return (
             <div className="flex flex-1 items-center justify-center p-6">
-                <div className="max-w-sm rounded-lg border border-vscode-border/25 bg-input-background/20 px-5 py-4 text-center">
+                <div className="max-w-sm rounded-lg bg-input-background/20 px-5 py-4 text-center">
                     <LayoutGrid className="mx-auto mb-2 h-5 w-5 text-foreground/35" />
                     <div className="text-[13px] font-medium text-foreground/75">No hub items yet</div>
                     <div className="mt-1 text-[11px] leading-relaxed text-foreground/40">
-                        Workers, active tools, approvals, and mission resources will appear here as the run produces them.
+                        Agents, active tools, approvals, and recent chat activity will appear here as the run produces them.
                     </div>
                 </div>
             </div>
@@ -385,6 +414,18 @@ function MissionHub({ sections }: { sections: MissionHubSection[] }) {
             </div>
         </div>
     );
+}
+
+function isDashboardToolVisible(tool: SessionContext['activeToolCalls'][string], context: SessionContext) {
+    if (tool.status === 'failed') return true;
+    if (tool.status !== 'running') return false;
+    if (context.missionStatus === 'completed' || context.missionStatus === 'failed' || context.missionStatus === 'stopped') {
+        return false;
+    }
+    const toolSessionId = (tool as any).session_id || (tool as any).sessionId;
+    if (context.sessionId && toolSessionId && toolSessionId !== context.sessionId) return false;
+    if (!tool.updatedAt) return true;
+    return Date.now() - tool.updatedAt < DASHBOARD_ACTIVE_TOOL_STALE_MS;
 }
 
 function MissionHubRow({ item }: { item: MissionHubItem }) {
@@ -473,7 +514,7 @@ function logToHubItem(log: AgentLogEntry): MissionHubItem | null {
             id: `activity-${log.id}`,
             group: 'activity',
             title: firstLine(log.content),
-            status: log.type === 'worker_completed' ? 'Done' : 'Worker',
+            status: log.type === 'worker_completed' ? 'Done' : 'Agent',
             tone: log.type === 'worker_completed' ? 'success' : 'active',
         };
     }
@@ -495,6 +536,15 @@ function logToHubItem(log: AgentLogEntry): MissionHubItem | null {
             tone: 'error',
         };
     }
+    if (log.type === 'assistant_text' || log.type === 'info' || log.type === 'step') {
+        return {
+            id: `activity-${log.id}`,
+            group: 'activity',
+            title: firstLine(log.content),
+            status: log.type === 'assistant_text' ? 'Chat' : 'Status',
+            tone: log.type === 'assistant_text' ? 'neutral' : 'success',
+        };
+    }
     return null;
 }
 
@@ -504,7 +554,7 @@ function formatHubToolName(name: string): string {
     if (name === 'execute_command' || name === 'run_command' || name === 'shell') return 'Run command';
     if (name === 'execute_python') return 'Run Python script';
     if (name === 'write_scratchpad') return 'Save notes';
-    if (name === 'start_swarm' || name === 'subagent') return 'Start worker';
+    if (name === 'start_swarm' || name === 'subagent' || name === 'use_subagents') return 'Start agents';
     return name.replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
 }
 

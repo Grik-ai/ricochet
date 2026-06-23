@@ -548,6 +548,40 @@ func (m *Manager) GetAvailableSkillHeaders(prompt string, activeFiles []string) 
 	return headers
 }
 
+// ListSkillHeaders returns compact metadata for enabled non-root skills without
+// exposing full skill instructions.
+func (m *Manager) ListSkillHeaders() []SkillHeader {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var headers []SkillHeader
+	for _, s := range m.skills {
+		if s == nil || !s.Enabled || s.Type == "root_rule" {
+			continue
+		}
+		if isDiagnosticSkill(s) || s.Visibility == "off" {
+			continue
+		}
+		headers = append(headers, SkillHeader{
+			Name:         s.Name,
+			Description:  s.Description,
+			TriggerHint:  triggerHint(s),
+			WhenToUse:    s.WhenToUse,
+			AllowedTools: append([]string(nil), s.AllowedTools...),
+			Context:      s.ExecutionContext,
+			Source:       s.Source,
+			Enabled:      s.Enabled,
+		})
+	}
+	sort.Slice(headers, func(i, j int) bool {
+		if headers[i].Source != headers[j].Source {
+			return headers[i].Source < headers[j].Source
+		}
+		return strings.ToLower(headers[i].Name) < strings.ToLower(headers[j].Name)
+	})
+	return headers
+}
+
 // ListAllSkills returns all registered skills
 func (m *Manager) ListAllSkills() []*SkillRule {
 	m.mu.RLock()

@@ -1,28 +1,40 @@
 import { useRef, useMemo, useEffect, useState, type ReactNode } from 'react';
-import { buildTaskRunViewModel, useChat } from '../../hooks/useChat';
+import {
+    buildTaskRunViewModel,
+    useChat,
+    type ChatMessage as ChatMessageModel,
+    type QueuedTurnState,
+    type WorkSummary
+} from '../../hooks/useChat';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { useLiveMode } from '../../hooks/useLiveMode';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
 import { useSessions } from '../../hooks/useSessions';
 import { MissionWidget } from './MissionWidget';
+import { AccountBadge } from '../account/AccountBadge';
 import { useAgentStateMachine } from '../../hooks/useAgentStateMachine';
-import { SessionState } from '../../services/state-machine/sessionStateMachine';
 import { useNetworkHealth } from '../../hooks/useNetworkHealth';
-import { Clock3, History, Loader2, MessageSquare, UserCircle } from 'lucide-react';
-import { PermissionRequestPanel } from './PermissionRequestPanel';
+import { Clock3, History, Loader2, MessageSquare } from 'lucide-react';
+import { PendingApprovalSurface } from './PendingApprovalSurface';
+import { PendingPlanDecisionSurface, collectPendingPlanDecisionArtifacts } from './PendingPlanDecisionSurface';
+import { PendingReviewSurface } from './PendingReviewSurface';
 import { cleanAssistantVisibleText, isRenderableChatMessage } from '../../utils/chatVisibility';
 import { findRetryPromptBefore } from '../../utils/chatErrors';
 import { TaskRunHeader } from './TaskRunHeader';
 import { CheckpointPanel } from '../checkpoints/CheckpointPanel';
-import { deriveMissionRuntime } from '../../utils/missionRuntime';
 import type { ContextFilePayload } from '../../types/protocol';
 import type { SessionMetadata } from '../../types/session';
+import type { GrikAccountController } from '../../hooks/useGrikAccount';
+
+const ACTIVE_TOOL_STALE_MS = 5 * 60 * 1000;
 
 export interface ChatViewProps {
     onOpenHistory: () => void;
     onOpenAgent: () => void;
     onOpenAccount: () => void;
+    onOpenSettings: (tab?: string) => void;
+    grikAccount: GrikAccountController;
     agentState: ReturnType<typeof useAgentStateMachine>;
     mode: 'plan' | 'act' | 'mission';
     onModeChange: (mode: 'plan' | 'act' | 'mission') => void;
@@ -30,10 +42,144 @@ export interface ChatViewProps {
     onModelChange: (model: { id: string; name: string; provider: string }) => void;
 }
 
+export interface ChatRow {
+    message: ChatMessageModel;
+    workSummary?: WorkSummary;
+    queuedTurn?: QueuedTurnState;
+}
+
+function summaryHasVisiblePayload(summary: WorkSummary): boolean {
+    return summary.items.length > 0 || Boolean(summary.activityHint && summary.activityHint !== 'none');
+}
+
+function shouldAttachWorkSummary(summary?: WorkSummary): summary is WorkSummary {
+    if (!summary) return false;
+    if (summary.status === 'completed' && !summaryHasVisiblePayload(summary)) return false;
+    return true;
+}
+
+function shouldRenderOrphanWorkSummary(summary: WorkSummary): boolean {
+    if (summary.status === 'running' || summary.status === 'waiting') return true;
+    if (!summaryHasVisiblePayload(summary)) return false;
+    return summary.status === 'completed' || summary.status === 'failed' || summary.status === 'stopped' || summary.status === 'rejected';
+}
+
+function isApprovalOnlySummary(summary: WorkSummary): boolean {
+    return summary.items.length > 0 && summary.items.every(item => item.type === 'approval');
+}
+
+function hasSiblingApprovalSummary(summary: WorkSummary, summaries: Record<string, WorkSummary>): boolean {
+    const targets = new Set(summary.items
+        .filter(item => item.type === 'approval')
+        .map(item => item.target || item.id)
+        .filter(Boolean));
+    if (targets.size === 0) return false;
+
+    return Object.values(summaries).some(other => {
+        if (other.turnId === summary.turnId || isApprovalOnlySummary(other)) return false;
+        if (other.status !== 'running' && other.status !== 'waiting') return false;
+        return other.items.some(item => item.type === 'approval' && targets.has(item.target || item.id));
+    });
+}
+
+function messageSummaryKeys(message: ChatMessageModel): string[] {
+    return [message.run_id, message.turn_id, message.id].filter(Boolean) as string[];
+}
+
+function queuedTurnForMessage(message: ChatMessageModel, queuedTurnsByRunId: Record<string, QueuedTurnState>): QueuedTurnState | undefined {
+    if (message.role !== 'user') return undefined;
+    return messageSummaryKeys(message).map(key => queuedTurnsByRunId[key]).find(Boolean);
+}
+
+function nearestUserRowWithoutSummary(rows: ChatRow[], summary: WorkSummary): number {
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+        const row = rows[index];
+        if (row.message.role !== 'user' || row.workSummary) continue;
+        if (!summary.startedAt || !row.message.timestamp || row.message.timestamp <= summary.startedAt) {
+            return index;
+        }
+    }
+
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+        const row = rows[index];
+        if (row.message.role === 'user' && !row.workSummary) return index;
+    }
+
+    return -1;
+}
+
+export function buildChatRows(
+    visibleMessages: ChatMessageModel[],
+    workSummariesByTurn: Record<string, WorkSummary>,
+    queuedTurnsByRunId: Record<string, QueuedTurnState> = {}
+): ChatRow[] {
+    const renderedSummaryKeys = new Set<string>();
+    const rows: ChatRow[] = [];
+
+    for (const message of visibleMessages) {
+        let workSummary: WorkSummary | undefined;
+        for (const summaryKey of messageSummaryKeys(message)) {
+            const candidate = workSummariesByTurn[summaryKey];
+            if (candidate && !renderedSummaryKeys.has(candidate.turnId) && shouldAttachWorkSummary(candidate)) {
+                workSummary = candidate;
+                renderedSummaryKeys.add(candidate.turnId);
+                break;
+            }
+        }
+
+        if (message.role === 'assistant') {
+            const hasVisibleAssistantContent = Boolean(
+                cleanAssistantVisibleText(message.content || '') ||
+                message.errorInfo ||
+                message.checkpointHash ||
+                (Array.isArray((message as any).artifacts) && (message as any).artifacts.length > 0)
+            );
+
+            if (!hasVisibleAssistantContent && !workSummary) {
+                continue;
+            }
+        }
+
+        rows.push({
+            message,
+            workSummary,
+            queuedTurn: queuedTurnForMessage(message, queuedTurnsByRunId),
+        });
+    }
+
+    Object.values(workSummariesByTurn)
+        .filter(summary => !renderedSummaryKeys.has(summary.turnId) && shouldRenderOrphanWorkSummary(summary))
+        .filter(summary => !(isApprovalOnlySummary(summary) && hasSiblingApprovalSummary(summary, workSummariesByTurn)))
+        .sort((a, b) => a.startedAt - b.startedAt)
+        .forEach(summary => {
+            renderedSummaryKeys.add(summary.turnId);
+            const attachToUserIndex = nearestUserRowWithoutSummary(rows, summary);
+            if (attachToUserIndex !== -1) {
+                rows[attachToUserIndex] = { ...rows[attachToUserIndex], workSummary: summary };
+                return;
+            }
+            rows.push({
+                message: {
+                    id: `work-summary-${summary.turnId}`,
+                    role: 'assistant',
+                    content: '',
+                    timestamp: summary.startedAt,
+                    run_id: summary.turnId,
+                    turn_id: summary.turnId,
+                },
+                workSummary: summary,
+            });
+        });
+
+    return rows;
+}
+
 export function ChatView({
     onOpenHistory,
     onOpenAgent,
     onOpenAccount,
+    onOpenSettings,
+    grikAccount,
     agentState,
     mode,
     onModeChange,
@@ -55,6 +201,7 @@ export function ChatView({
         taskProgress,
         hubTasks,
         workSummariesByTurn,
+        queuedTurnsByRunId,
         fileResults,
         searchFiles,
         pendingPermissions,
@@ -64,74 +211,60 @@ export function ChatView({
     } = useChat(currentSessionId);
 
     const { status: liveStatus, toggleLiveMode } = useLiveMode();
+    const scrollViewportRef = useRef<HTMLDivElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
     const { onMessage, postMessage } = useVSCodeApi();
     const [workspaceName, setWorkspaceName] = useState('Project');
     const visibleMessages = useMemo(() => messages.filter(isRenderableChatMessage), [messages]);
-    const messageRows = useMemo(() => {
-        const renderedSummaryKeys = new Set<string>();
-
-        const rows = visibleMessages.flatMap((message) => {
-            let workSummary: (typeof workSummariesByTurn)[string] | undefined;
-
-            if (message.role === 'assistant') {
-                const summaryKey = message.run_id || message.turn_id || message.id;
-                const candidate = workSummariesByTurn[summaryKey];
-                if (candidate && !renderedSummaryKeys.has(summaryKey)) {
-                    workSummary = candidate;
-                    renderedSummaryKeys.add(summaryKey);
-                }
-
-                const hasVisibleAssistantContent = Boolean(
-                    cleanAssistantVisibleText(message.content || '') ||
-                    message.errorInfo ||
-                    message.checkpointHash ||
-                    (Array.isArray((message as any).artifacts) && (message as any).artifacts.length > 0)
-                );
-
-                if (!hasVisibleAssistantContent && !workSummary) {
-                    return [];
-                }
-            }
-
-            return [{ message, workSummary }];
-        });
-
-        Object.values(workSummariesByTurn)
-            .filter(summary => !renderedSummaryKeys.has(summary.turnId))
-            .sort((a, b) => a.startedAt - b.startedAt)
-            .forEach(summary => {
-                renderedSummaryKeys.add(summary.turnId);
-                rows.push({
-                    message: {
-                        id: `work-summary-${summary.turnId}`,
-                        role: 'assistant' as const,
-                        content: '',
-                        timestamp: summary.startedAt,
-                        run_id: summary.turnId,
-                        turn_id: summary.turnId,
-                    },
-                    workSummary: summary,
-                });
-            });
-
-        return rows;
-    }, [visibleMessages, workSummariesByTurn]);
+    const messageRows = useMemo(
+        () => buildChatRows(visibleMessages, workSummariesByTurn, queuedTurnsByRunId),
+        [visibleMessages, workSummariesByTurn, queuedTurnsByRunId]
+    );
+    const hasVisibleWorkSummary = useMemo(
+        () => messageRows.some(row => Boolean(row.workSummary)),
+        [messageRows]
+    );
+    const hasVisibleMessages = visibleMessages.length > 0;
+    const [emptyStateExiting, setEmptyStateExiting] = useState(false);
+    const previousHadMessagesRef = useRef(hasVisibleMessages);
 
     const pendingInteractionList = useMemo(() => Object.values(pendingPermissions), [pendingPermissions]);
     const hasInlineEditApproval = pendingEdits.length > 0;
-    const pendingPermissionList = useMemo(
-        () => pendingInteractionList.filter((request: any) => request.kind !== 'choice' && !(hasInlineEditApproval && /edit|file|write|save|apply|diff/i.test(request.question || ''))),
+    const pendingApprovalList = useMemo(
+        () => pendingInteractionList.filter((request: any) => !(hasInlineEditApproval && /edit|file|write|save|apply|diff/i.test(request.question || ''))),
         [hasInlineEditApproval, pendingInteractionList]
     );
-    const pendingChoice = useMemo(
-        () => pendingInteractionList.find((request: any) => request.kind === 'choice') || null,
-        [pendingInteractionList]
+    const pendingPlanArtifacts = useMemo(
+        () => collectPendingPlanDecisionArtifacts(visibleMessages),
+        [visibleMessages]
     );
     const activeWorkSummary = useMemo(() => {
         return Object.values(workSummariesByTurn).find(summary => summary.status === 'running' || summary.status === 'waiting') || null;
     }, [workSummariesByTurn]);
+    const agentRuntimeIsScopedToView = useMemo(() => {
+        const agentSessionId = agentState.context.sessionId;
+        return !agentSessionId || !currentSessionId || agentSessionId === currentSessionId;
+    }, [agentState.context.sessionId, currentSessionId]);
+    const explicitAgentRuntimeActive = useMemo(() => {
+        if (!agentRuntimeIsScopedToView || !agentState.uiState.isActive) return false;
+        const hasWorkers = Object.keys(agentState.context.workers || {}).length > 0;
+        const hasRuntimeResources = hasWorkers
+            || Boolean(agentState.context.pendingChoice || agentState.context.pendingTool)
+            || Object.values(agentState.context.activeToolCalls || {}).some((tool: any) => tool.status === 'running');
+        if (!agentState.context.missionTitle && !hasRuntimeResources) return false;
+        return !/^(completed|failed|stopped|idle)$/i.test(agentState.context.missionStatus || '');
+    }, [
+        agentRuntimeIsScopedToView,
+        agentState.context.activeToolCalls,
+        agentState.context.missionStatus,
+        agentState.context.missionTitle,
+        agentState.context.pendingChoice,
+        agentState.context.pendingTool,
+        agentState.context.workers,
+        agentState.uiState.isActive
+    ]);
     const taskRunWorkers = useMemo(() => {
+        if (!explicitAgentRuntimeActive) return [];
         return Object.values(agentState.context.workers || {}).map((worker: any, index) => {
             const status = String(worker.status || (worker.isActive ? 'running' : 'unknown'));
             return {
@@ -146,7 +279,7 @@ export function ChatView({
                         : undefined,
             };
         });
-    }, [agentState.context.workers]);
+    }, [agentState.context.workers, explicitAgentRuntimeActive]);
 
     useEffect(() => {
         const unsubscribe = onMessage((message: any) => {
@@ -161,16 +294,36 @@ export function ChatView({
         return () => { unsubscribe(); };
     }, [onMessage, postMessage]);
 
+    useEffect(() => {
+        if (!previousHadMessagesRef.current && hasVisibleMessages) {
+            setEmptyStateExiting(true);
+            const timeout = window.setTimeout(() => setEmptyStateExiting(false), 280);
+            previousHadMessagesRef.current = hasVisibleMessages;
+            return () => window.clearTimeout(timeout);
+        }
+        previousHadMessagesRef.current = hasVisibleMessages;
+    }, [hasVisibleMessages]);
+
+    useEffect(() => {
+        if (!hasVisibleMessages) return;
+        const frame = window.requestAnimationFrame(() => {
+            const viewport = scrollViewportRef.current;
+            if (!viewport) return;
+            viewport.scrollTop = viewport.scrollHeight;
+        });
+        return () => window.cancelAnimationFrame(frame);
+    }, [hasVisibleMessages, messageRows.length, isLoading, activeWorkSummary?.turnId]);
+
     const handleSend = (text?: string, contextFiles?: ContextFilePayload[]) => {
         const msg = typeof text === 'string' ? text : inputValue;
-        if (!msg.trim()) return;
+        if (!msg.trim() && !(contextFiles?.length)) return;
 
         sendMessage(msg, contextFiles, mode === 'plan');
     };
 
     const handleStartAgent = (text?: string, contextFiles?: ContextFilePayload[]) => {
         const msg = typeof text === 'string' ? text : inputValue;
-        if (!msg.trim()) return;
+        if (!msg.trim() && !(contextFiles?.length)) return;
 
         agentState.send({ type: 'start_session', content: msg });
         postMessage({
@@ -195,19 +348,28 @@ export function ChatView({
 
     const runtimeActive = useMemo(() => {
         const activeWorker = taskRunWorkers.some((worker: any) => worker.isActive || worker.status === 'queued' || worker.status === 'running' || worker.status === 'In Progress');
-        const runningTool = Object.values(agentState.context.activeToolCalls || {}).some((tool: any) => tool.status === 'running');
+        const now = Date.now();
+        const runningTool = Object.values(agentState.context.activeToolCalls || {}).some((tool: any) => (
+            tool.status === 'running' &&
+            (!tool.updatedAt || now - tool.updatedAt < ACTIVE_TOOL_STALE_MS)
+        ));
         const waitingForInput = Boolean(agentState.context.pendingChoice || agentState.context.pendingTool);
         const explicitMissionActive = Boolean(agentState.context.missionTitle) && agentState.uiState.isActive && agentState.context.missionStatus !== 'completed' && agentState.context.missionStatus !== 'failed' && agentState.context.missionStatus !== 'stopped';
+        const workSummaryCanBlockInput = Boolean(activeWorkSummary) && (
+            isLoading ||
+            Boolean(taskProgress?.is_active) ||
+            pendingInteractionList.length > 0 ||
+            pendingEdits.length > 0
+        );
+        const scopedAgentRuntimeActive = explicitAgentRuntimeActive && (activeWorker || runningTool || waitingForInput || explicitMissionActive);
 
         return isLoading ||
             isStopping ||
             pendingInteractionList.length > 0 ||
+            pendingEdits.length > 0 ||
             Boolean(taskProgress?.is_active) ||
-            Boolean(activeWorkSummary) ||
-            activeWorker ||
-            runningTool ||
-            waitingForInput ||
-            explicitMissionActive;
+            workSummaryCanBlockInput ||
+            scopedAgentRuntimeActive;
     }, [
         agentState.context.activeToolCalls,
         agentState.context.missionStatus,
@@ -215,9 +377,11 @@ export function ChatView({
         agentState.context.pendingChoice,
         agentState.context.pendingTool,
         agentState.uiState.isActive,
+        explicitAgentRuntimeActive,
         isLoading,
         isStopping,
         pendingInteractionList.length,
+        pendingEdits.length,
         activeWorkSummary,
         taskProgress?.is_active,
         taskRunWorkers
@@ -245,11 +409,6 @@ export function ChatView({
         usageSnapshot,
         workSummariesByTurn
     ]);
-    const missionRuntime = useMemo(
-        () => deriveMissionRuntime(agentState.context, agentState.state, agentState.uiState),
-        [agentState.context, agentState.state, agentState.uiState]
-    );
-
     const latestNetworkActivityAt = useMemo(() => {
         const timestamps: number[] = [];
         for (const message of visibleMessages) {
@@ -283,78 +442,84 @@ export function ChatView({
             searchFiles={searchFiles}
             liveStatus={liveStatus}
             onToggleLiveMode={toggleLiveMode}
+            onOpenSettings={onOpenSettings}
+            onOpenAccount={onOpenAccount}
             currentMode={mode}
             onModeChange={onModeChange}
             currentModel={model}
             onModelChange={onModelChange}
             sessionId={currentSessionId || undefined}
-            pendingEdits={activeWorkSummary ? [] : pendingEdits}
-            pendingChoice={pendingChoice}
+            pendingEdits={pendingEdits}
+            pendingChoice={null}
             onChoiceResponse={respondToPermission}
-            contextStatus={taskRun ? null : contextStatus}
-            usageSnapshot={taskRun ? null : usageSnapshot}
+            contextStatus={contextStatus}
+            usageSnapshot={usageSnapshot}
             networkStatus={networkStatus}
-            missionStatus={missionRuntime.shouldShowPill && agentState.state !== SessionState.idle ? (
-                <MissionWidget agentState={agentState} onOpenDashboard={onOpenAgent} inline />
-            ) : null}
+            grikAccount={grikAccount}
+            missionStatus={(
+                <MissionWidget
+                    agentState={agentState}
+                    onOpenDashboard={onOpenAgent}
+                    inline
+                    pendingEditCount={pendingEdits.length}
+                    alwaysVisible
+                />
+            )}
+            accountStatus={(
+                <AccountBadge
+                    account={grikAccount}
+                    onOpenAccount={onOpenAccount}
+                    compact
+                />
+            )}
         />
     );
 
     return (
-            <div className="flex flex-col h-full bg-vscode-editor-background text-vscode-fg overflow-hidden selection:bg-vscode-editor-selectionBackground">
+        <div className="flex flex-col h-full bg-vscode-editor-background text-vscode-fg overflow-hidden selection:bg-vscode-editor-selectionBackground">
             <div className="flex-1 min-h-0 flex flex-col relative z-0">
                 <CheckpointPanel onRestore={restoreCheckpoint} />
                 <TaskRunHeader taskRun={taskRun} onOpenAgent={onOpenAgent} />
                 {!taskRun && !taskProgress && !agentState.context.sessionId && <TodoTracker todos={todos} />}
-                {pendingPermissionList.length > 0 && (
-                    <div className="shrink-0" data-ricochet-permission-list>
-                        {pendingPermissionList.map((request: any) => (
-                            <PermissionRequestPanel
-                                key={request.id}
-                                request={request}
-                                onResponse={respondToPermission}
-                                inline
-                            />
-                        ))}
-                    </div>
-                )}
 
-                <div className="flex-1 min-h-0 custom-scrollbar overflow-y-auto">
-                    {visibleMessages.length === 0 ? (
-                        <EmptyChatLauncher
-                            workspaceName={workspaceName}
-                            sessions={sessions}
-                            onLoadSession={loadSession}
-                            onOpenHistory={onOpenHistory}
-                            onOpenAccount={onOpenAccount}
-                            composer={composer}
-                        />
-                    ) : (
-                        <div ref={scrollRef} className="max-w-4xl mx-auto w-full px-4 space-y-2 py-8">
-                            {messageRows.map(({ message, workSummary }) => {
+                <div ref={scrollViewportRef} className="flex-1 min-h-0 custom-scrollbar overflow-y-auto">
+                    {(!hasVisibleMessages || emptyStateExiting) && (
+                        <div className={hasVisibleMessages ? 'ricochet-empty-exit' : 'ricochet-empty-enter'}>
+                            <EmptyChatLauncher
+                                workspaceName={workspaceName}
+                                sessions={sessions}
+                                onLoadSession={loadSession}
+                                onOpenHistory={onOpenHistory}
+                                onOpenAccount={onOpenAccount}
+                                grikAccount={grikAccount}
+                                composer={!hasVisibleMessages ? composer : null}
+                            />
+                        </div>
+                    )}
+                    {hasVisibleMessages && (
+                        <div ref={scrollRef} className={`max-w-4xl mx-auto w-full px-4 space-y-2 py-8 ${emptyStateExiting ? 'ricochet-chat-start' : ''}`}>
+                            {messageRows.map(({ message, workSummary, queuedTurn }) => {
                                 const retryPrompt = message.errorInfo?.retryable
                                     ? findRetryPromptBefore(visibleMessages, message)
                                     : null;
                                 return (
-                                    <div key={message.id} className="animate-in fade-in duration-500 slide-in-from-bottom-2">
+                                    <div key={message.id} className="ricochet-message-enter">
                                         <ChatMessage
                                             message={message}
                                             workSummary={workSummary}
-                                            pendingPermissions={pendingPermissions}
-                                            pendingEdits={pendingEdits}
-                                            onRespondToPermission={respondToPermission}
+                                            queuedTurn={queuedTurn}
+                                            pendingEdits={[]}
                                             onRestore={restoreCheckpoint}
                                             onRetryMessage={retryPrompt ? () => sendMessage(retryPrompt) : undefined}
                                             onExecuteCommand={(cmd) => postMessage({ type: 'execute_command', payload: { command: cmd } })}
-                                            onSendMessage={(content) => sendMessage(content)}
                                         />
                                     </div>
                                 );
                             })}
 
                             {/* Thinking State */}
-                            {isLoading && !activeWorkSummary && (!visibleMessages[visibleMessages.length - 1]?.isStreaming) && (
-                                <div className="px-5 py-4 animate-pulse flex flex-col gap-3 group">
+                            {isLoading && !hasVisibleWorkSummary && (!visibleMessages[visibleMessages.length - 1]?.isStreaming) && (
+                                <div className="px-5 py-4 animate-pulse flex flex-col gap-3 group ricochet-message-enter">
                                     <div className="flex items-center gap-4">
                                         <div className="w-8 h-8 rounded-md bg-vscode-input-bg border border-vscode-border flex items-center justify-center shrink-0">
                                             <Loader2 className="w-4 h-4 text-vscode-fg/45 animate-spin" />
@@ -370,7 +535,6 @@ export function ChatView({
                                             )}
                                         </div>
                                     </div>
-                                    <div className="ml-12 h-[1px] w-32 bg-vscode-border" />
                                 </div>
                             )}
                         </div>
@@ -378,12 +542,18 @@ export function ChatView({
                 </div>
             </div>
 
-            {visibleMessages.length > 0 && (
-            <div className="p-3 bg-vscode-editor-background border-t border-vscode-border">
-                <div className="max-w-4xl mx-auto">
-                    {composer}
+            {hasVisibleMessages && (
+                <div className={`p-3 bg-vscode-editor-background border-t border-vscode-border ${emptyStateExiting ? 'ricochet-composer-dock-enter' : ''}`}>
+                    <div className="max-w-4xl mx-auto">
+                        <PendingPlanDecisionSurface artifacts={pendingPlanArtifacts} />
+                        <PendingApprovalSurface
+                            requests={pendingApprovalList}
+                            onResponse={respondToPermission}
+                        />
+                        <PendingReviewSurface edits={pendingEdits} />
+                        {composer}
+                    </div>
                 </div>
-            </div>
             )}
         </div>
     );
@@ -395,6 +565,7 @@ function EmptyChatLauncher({
     onLoadSession,
     onOpenHistory,
     onOpenAccount,
+    grikAccount,
     composer
 }: {
     workspaceName: string;
@@ -402,6 +573,7 @@ function EmptyChatLauncher({
     onLoadSession: (id: string) => void;
     onOpenHistory: () => void;
     onOpenAccount: () => void;
+    grikAccount: GrikAccountController;
     composer: ReactNode;
 }) {
     const recentSessions = useMemo(
@@ -424,21 +596,18 @@ function EmptyChatLauncher({
                 <div className="w-full max-w-4xl mx-auto">
                     <div className="mb-2 flex items-end justify-between gap-3">
                         <div className="min-w-0">
-                            <h1 className="text-[21px] leading-tight font-semibold text-vscode-fg/88 tracking-normal truncate">
-                                {workspaceName || 'Project'}
-                            </h1>
-                            <div className="mt-1 text-[10.5px] leading-none text-vscode-fg/38">
-                                Ricochet
+                            <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                <h1 className="min-w-0 text-[21px] leading-tight font-semibold text-vscode-fg/88 tracking-normal truncate">
+                                    {workspaceName || 'Project'}
+                                </h1>
+                                <AccountBadge account={grikAccount} onOpenAccount={onOpenAccount} />
+                            </div>
+                            <div className="mt-1 flex items-center gap-2 text-[10.5px] leading-none text-vscode-fg/38">
+                                <span>Ricochet</span>
+                                <span className="text-vscode-fg/22">/</span>
+                                <span className="truncate">{grikAccount.summary.detail}</span>
                             </div>
                         </div>
-                        <button
-                            onClick={onOpenAccount}
-                            className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-vscode-border bg-vscode-input-bg hover:bg-vscode-list-hoverBackground text-vscode-fg/65 transition-colors"
-                            title="Open Grik account"
-                            aria-label="Open Grik account"
-                        >
-                            <UserCircle className="w-3.5 h-3.5" />
-                        </button>
                     </div>
 
                     {composer}

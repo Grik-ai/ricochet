@@ -738,10 +738,14 @@ func (b *Bot) SendMessage(ctx context.Context, chatID int64, text string) error 
 
 	if b.bridgeClient != nil {
 		return b.bridgeClient.Send(&proto.BridgeEvent{
-			Payload: &proto.BridgeEvent_OutgoingMessage{
-				OutgoingMessage: &proto.OutgoingMessage{
-					ChatId: chatID,
-					Body:   text,
+			Payload: &proto.BridgeEvent_OutboundMessage{
+				OutboundMessage: &proto.OutboundMessage{
+					Envelope: &proto.Envelope{
+						Platform: "telegram",
+						ChatId:   chatID,
+					},
+					Text:      text,
+					ParseMode: string(models.ParseModeHTML),
 				},
 			},
 		})
@@ -777,21 +781,30 @@ func (b *Bot) SendMessageWithButtons(ctx context.Context, chatID int64, text str
 	}
 
 	if b.bridgeClient != nil {
-		// Buttons are currently not supported over bridge proto (IncomingMessage only has Body)
-		// We fallback to plain text list
-		var sb strings.Builder
-		sb.WriteString(text + "\n\n")
+		buttonRows := make([]*proto.ButtonRow, 0, len(buttons))
 		for _, row := range buttons {
+			buttonRow := &proto.ButtonRow{}
 			for _, btn := range row {
-				sb.WriteString(fmt.Sprintf("🔹 %s\n", btn.Text))
+				buttonRow.Buttons = append(buttonRow.Buttons, &proto.Button{
+					Text: btn.Text,
+					Data: btn.Data,
+				})
+			}
+			if len(buttonRow.Buttons) > 0 {
+				buttonRows = append(buttonRows, buttonRow)
 			}
 		}
 
 		return b.bridgeClient.Send(&proto.BridgeEvent{
-			Payload: &proto.BridgeEvent_OutgoingMessage{
-				OutgoingMessage: &proto.OutgoingMessage{
-					ChatId: chatID,
-					Body:   sb.String(),
+			Payload: &proto.BridgeEvent_OutboundMessage{
+				OutboundMessage: &proto.OutboundMessage{
+					Envelope: &proto.Envelope{
+						Platform: "telegram",
+						ChatId:   chatID,
+					},
+					Text:       text,
+					ParseMode:  string(models.ParseModeHTML),
+					ButtonRows: buttonRows,
 				},
 			},
 		})

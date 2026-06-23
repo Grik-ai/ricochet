@@ -214,6 +214,9 @@ func NewProvider(cfg ProviderConfig) (Provider, error) {
 	case "anthropic":
 		return NewAnthropicProvider(cfg.APIKey, cfg.Model), nil
 	case "openai":
+		if shouldUseOpenAIResponsesAPI(cfg.Model, cfg.BaseURL) {
+			return NewOpenAIResponsesProvider(cfg.APIKey, cfg.Model, cfg.Organization, cfg.Project, cfg.AttemptTimeoutMs), nil
+		}
 		return NewOpenAIProvider(cfg.APIKey, cfg.Model, cfg.BaseURL, cfg.Organization, cfg.Project, cfg.AttemptTimeoutMs), nil
 	case "openrouter":
 		baseURL := "https://openrouter.ai/api/v1"
@@ -228,7 +231,11 @@ func NewProvider(cfg ProviderConfig) (Provider, error) {
 	case "minimax":
 		return NewMinimaxProvider(cfg.APIKey, cfg.Model, cfg.AttemptTimeoutMs), nil
 	case "deepseek":
-		return NewOpenAIProvider(cfg.APIKey, cfg.Model, "https://api.deepseek.com/v1", "", "", cfg.AttemptTimeoutMs), nil
+		baseURL := "https://api.deepseek.com"
+		if cfg.BaseURL != "" {
+			baseURL = cfg.BaseURL
+		}
+		return NewOpenAIProvider(cfg.APIKey, cfg.Model, baseURL, "", "", cfg.AttemptTimeoutMs), nil
 	case "mistral":
 		baseURL := "https://api.mistral.ai/v1"
 		if cfg.BaseURL != "" {
@@ -238,7 +245,7 @@ func NewProvider(cfg ProviderConfig) (Provider, error) {
 	case "grik":
 		baseURL := os.Getenv("GRIKAI_CODE_GATEWAY_URL")
 		if baseURL == "" {
-			baseURL = "https://grik.ai/api/v1/ricochet/openai/v1"
+			baseURL = "https://grik.io/api/v1/ricochet/openai/v1"
 		}
 		if cfg.BaseURL != "" {
 			baseURL = cfg.BaseURL

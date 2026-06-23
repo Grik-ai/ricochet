@@ -3,6 +3,7 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -366,5 +367,158 @@ func TestProjectSkillCreateDeleteAndRestrictions(t *testing.T) {
 	}
 	if err := mgr.DeleteProjectSkill("RICOCHET.md", filepath.Join(tmpDir, "RICOCHET.md")); err == nil {
 		t.Fatalf("root rule deletion should be rejected")
+	}
+}
+
+func TestRootRulesAndProjectSkillsApplicability(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "skills_reliability_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "AGENTS.md"), []byte("Shared agent rules"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "RICOCHET.md"), []byte("Ricochet-specific rules"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	skillDir := filepath.Join(tmpDir, ".ricochet", "skills", "agent-reliability")
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	skillBody := `---
+name: agent-reliability
+description: Keep agent execution reliable.
+when_to_use: Use when improving reliability, verification, or completion behavior.
+enabled: true
+triggers:
+  keywords:
+    - reliability
+---
+# Agent Reliability
+
+Verify touched files and report blockers truthfully.
+`
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillBody), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(tmpDir)
+	if err := mgr.LoadSkills(); err != nil {
+		t.Fatalf("LoadSkills failed: %v", err)
+	}
+
+	unrelated := mgr.FindApplicableSkills("hello world", nil)
+	var rootRuleCount int
+	for _, skill := range unrelated {
+		if skill.Type != "root_rule" {
+			continue
+		}
+		rootRuleCount++
+		if skill.Enforcement != "force" {
+			t.Fatalf("root rule should be force-enforced: %#v", skill)
+		}
+		if skill.Source != "project" {
+			t.Fatalf("root rule should keep project source: %#v", skill)
+		}
+		if !strings.Contains(skill.WhenToUse, "Always apply") {
+			t.Fatalf("root rule should describe always-on applicability: %#v", skill)
+		}
+	}
+	if rootRuleCount < 2 {
+		t.Fatalf("expected AGENTS.md and RICOCHET.md root rules, got %d from %#v", rootRuleCount, unrelated)
+	}
+
+	applicable := mgr.FindApplicableSkills("improve reliability verification", nil)
+	var foundProjectSkill bool
+	var foundRootRule bool
+	for _, skill := range applicable {
+		if skill.Name == "agent-reliability" {
+			foundProjectSkill = true
+			if skill.Type != "dynamic" || skill.Source != "project" {
+				t.Fatalf("project skill should be dynamic project metadata: %#v", skill)
+			}
+		}
+		if skill.Type == "root_rule" {
+			foundRootRule = true
+		}
+	}
+	if !foundProjectSkill {
+		t.Fatalf("expected reliability project skill in applicable skills: %#v", applicable)
+	}
+	if !foundRootRule {
+		t.Fatalf("expected root rules to remain applicable with project skill: %#v", applicable)
+	}
+}
+
+func TestListSkillHeadersOmitsFullContentAndRootRules(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "skills_headers_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "AGENTS.md"), []byte("Root rule body should not be a skill header"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	skillsDir := filepath.Join(tmpDir, ".agent", "skills")
+	if err := os.MkdirAll(skillsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rulesJSON := `{
+		"repo-reliability": {
+			"type": "domain",
+			"enforcement": "suggest",
+			"description": "Reliability header",
+			"when_to_use": "Use for reliability work.",
+			"promptTriggers": {
+				"keywords": ["reliability"]
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(skillsDir, "skill-rules.json"), []byte(rulesJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, "repo-reliability.md"), []byte("FULL RELIABILITY INSTRUCTIONS"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(tmpDir)
+	if err := mgr.LoadSkills(); err != nil {
+		t.Fatalf("LoadSkills failed: %v", err)
+	}
+
+	headers := mgr.ListSkillHeaders()
+	var found bool
+	for _, header := range headers {
+		if header.Name == "AGENTS.md" || strings.Contains(header.Description, "Root rule body") {
+			t.Fatalf("root rules should not appear in compact skill headers: %#v", headers)
+		}
+		if header.Name == "repo-reliability" {
+			found = true
+			if strings.Contains(header.Description, "FULL RELIABILITY INSTRUCTIONS") {
+				t.Fatalf("compact header leaked full content: %#v", header)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected repo-reliability compact header: %#v", headers)
+	}
+
+	if got := mgr.FindApplicableSkills("hello", nil); len(got) != 1 || got[0].Type != "root_rule" {
+		t.Fatalf("unmatched skill content should not be injected, got %#v", got)
+	}
+	matched := mgr.FindApplicableSkills("improve reliability", nil)
+	var full bool
+	for _, skill := range matched {
+		if skill.Name == "repo-reliability" && strings.Contains(skill.Content, "FULL RELIABILITY INSTRUCTIONS") {
+			full = true
+		}
+	}
+	if !full {
+		t.Fatalf("matched skill should include full instructions: %#v", matched)
 	}
 }

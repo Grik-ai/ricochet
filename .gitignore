@@ -9,9 +9,19 @@ webview-dist/
 out/
 *.exe
 ricochet-core
+ricochet-cli
+mcp_test
+/ricochet
+/ricochet-core
+/core/ricochet
+/core/ricochet-core
+/core/ricochet-cli
+/core/cli
+/core/mcp_test
 
 # IDE
 .idea/
+.vscode/settings.json
 *.swp
 .DS_Store
 
@@ -28,7 +38,10 @@ core/config/.env.local
 
 # Local config
 .ricochet/
+.agent/
+.kilocode/
+scratch/
+test-analis/
 
 # OS
 Thumbs.db
-ricochet

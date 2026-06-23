@@ -91,7 +91,7 @@ func (r *Runner) Run(ctx context.Context, tc *TestCase) (*Result, error) {
 	chatErr := ctrl.Chat(ctx, req, func(update interface{}) {
 		// Only check ChatUpdate for tool calls
 		if chatUpdate, ok := update.(agent.ChatUpdate); ok {
-			if chatUpdate.Message.Role == "assistant" && len(chatUpdate.Message.ToolCalls) > 0 {
+			if chatUpdate.Message != nil && chatUpdate.Message.Role == "assistant" && len(chatUpdate.Message.ToolCalls) > 0 {
 				for _, tc := range chatUpdate.Message.ToolCalls {
 					result.Logs = append(result.Logs, fmt.Sprintf("Tool called: %s", tc.Name))
 				}

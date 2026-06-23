@@ -1,27 +1,48 @@
 ---
-description: Auto-triage GitHub issues using MCP
-command: /triage
+name: issue-triage
+description: Triage issues with evidence before labels or comments.
+version: "1"
+command: /issue-triage
+risk: medium
+inputs:
+  - name: input
+    description: Issue id, query, or bounded issue list.
+    required: true
+steps:
+  - id: collect
+    description: Collect issue context.
+    type: agent
+    action: |-
+      Triage request:
+      {{input}}
+
+      Read the target issue or bounded issue list. Capture title, body, labels, linked PRs, recent comments, and affected area.
+  - id: reproduce
+    description: Search for supporting evidence.
+    type: agent
+    action: |-
+      Search the repository for the named behavior, errors, modules, and recent related changes. Prefer read-only investigation first.
+  - id: classify
+    description: Classify confidence and next action.
+    type: agent
+    action: |-
+      Classify each issue as bug, feature, question, duplicate candidate, invalid, blocked, or needs-reproduction. Include confidence and the evidence behind the label.
+  - id: act
+    description: Apply safe triage actions or report.
+    type: agent
+    action: |-
+      If mutation is allowed and the evidence is strong, apply labels or comments narrowly. Otherwise report recommended actions and ask only for the specific permission that is missing.
+verification:
+  - Read the target issue or bounded issue list.
+  - Search repository or issue history for supporting evidence.
+forbidden_actions:
+  - Do not label, close, or comment without strong evidence and permission.
+  - Do not classify issues from title alone.
+completion_criteria:
+  - Each issue has classification, confidence, evidence, and next action.
+  - Mutations are applied only when explicitly allowed; otherwise recommendations are reported.
 ---
 
-## Objective
-Identify critical blocking issues in the repository and label them as `oncall`.
+# Issue Triage
 
-### Tools Required
-- **GitHub MCP**: Ensure the GitHub MCP server is connected.
-
-### Steps
-
-1. **Fetch Issues**
-   - Action: "Fetch the 5 most recently updated open issues using `mcp__github__list_issues` (state='open', orderBy='UPDATED_AT', direction='DESC')."
-
-2. **Analyze Issues (Parallel)**
-   - Type: parallel
-   - Parallel:
-     - Action: "Analyze Issue 1: Read details with `mcp__github__get_issue`. If it's a blocking bug with high engagement (reactions/comments), return 'CRITICAL'. Otherwise 'NORMAL'."
-     - Action: "Analyze Issue 2: Read details with `mcp__github__get_issue`. If it's a blocking bug with high engagement (reactions/comments), return 'CRITICAL'. Otherwise 'NORMAL'."
-     - Action: "Analyze Issue 3: Read details with `mcp__github__get_issue`. If it's a blocking bug with high engagement (reactions/comments), return 'CRITICAL'. Otherwise 'NORMAL'."
-     - Action: "Analyze Issue 4: Read details with `mcp__github__get_issue`. If it's a blocking bug with high engagement (reactions/comments), return 'CRITICAL'. Otherwise 'NORMAL'."
-     - Action: "Analyze Issue 5: Read details with `mcp__github__get_issue`. If it's a blocking bug with high engagement (reactions/comments), return 'CRITICAL'. Otherwise 'NORMAL'."
-
-3. **Label Critical Issues**
-   - Action: "Review the parallel analysis results. For any issue identified as 'CRITICAL', apply the 'oncall' label using `mcp__github__update_issue`. Provide a summary of actions taken."
+Use this workflow for bounded issue triage. Prefer evidence over volume.

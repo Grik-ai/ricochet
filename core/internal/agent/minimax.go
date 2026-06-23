@@ -5,14 +5,13 @@ package agent
 // China: https://api.minimaxi.com/v1
 
 // NewMinimaxProvider creates a new MiniMax provider
-// MiniMax M2.1 supports OpenAI-compatible API
 func NewMinimaxProvider(apiKey, model string, timeoutMs int) Provider {
 	if model == "" {
-		model = "MiniMax-M2.1" // Default model
+		model = "MiniMax-M3"
 	}
 	return NewOpenAIProvider(apiKey, model, "https://api.minimax.io/v1", "", "", timeoutMs)
 }
 
 // MiniMax model definitions for reference:
-// MiniMax-M2.1: 200K context, very affordable, good for coding
-// MiniMax-Text-02: 1M context, latest flagship model
+// MiniMax-M3: 1M context, current verified catalog route via OpenRouter.
+// MiniMax-M2.5: 196K context, also available as an OpenRouter free model.

@@ -5,8 +5,62 @@
 :root {
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
   font-size: var(--vscode-font-size, 13px);
-  color: var(--vscode-foreground);
+  color: var(--vscode-foreground, #d4d4d4);
   background-color: var(--vscode-editor-background, #1e1e1e);
+}
+
+.ricochet-browser-dev {
+  color-scheme: dark;
+  --vscode-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --vscode-font-size: 13px;
+  --vscode-foreground: #d4d4d4;
+  --vscode-editor-foreground: #d4d4d4;
+  --vscode-descriptionForeground: #9a9a9a;
+  --vscode-editor-background: #1e1e1e;
+  --vscode-sideBar-background: #181818;
+  --vscode-sideBar-foreground: #d4d4d4;
+  --vscode-input-background: #252526;
+  --vscode-input-foreground: #d4d4d4;
+  --vscode-input-placeholderForeground: #858585;
+  --vscode-input-border: #3c3c3c;
+  --vscode-panel-border: #333333;
+  --vscode-focusBorder: #007fd4;
+  --vscode-editor-border: #333333;
+  --vscode-editor-selectionBackground: #264f78;
+  --vscode-editor-foldBackground: rgba(255, 255, 255, 0.04);
+  --vscode-editor-foldPlaceholderForeground: #a0a0a0;
+  --vscode-list-hoverBackground: #2a2d2e;
+  --vscode-list-activeSelectionBackground: #04395e;
+  --vscode-list-activeSelectionForeground: #ffffff;
+  --vscode-button-background: #0e639c;
+  --vscode-button-hoverBackground: #1177bb;
+  --vscode-button-foreground: #ffffff;
+  --vscode-button-secondaryBackground: #3a3d41;
+  --vscode-button-secondaryHoverBackground: #45494e;
+  --vscode-button-secondaryForeground: #ffffff;
+  --vscode-button-separator: rgba(255, 255, 255, 0.4);
+  --vscode-dropdown-background: #252526;
+  --vscode-dropdown-foreground: #d4d4d4;
+  --vscode-menu-background: #252526;
+  --vscode-menu-foreground: #d4d4d4;
+  --vscode-menu-border: #454545;
+  --vscode-menu-shadow: rgba(0, 0, 0, 0.36);
+  --vscode-toolbar-background: transparent;
+  --vscode-toolbar-hoverBackground: #2a2d2e;
+  --vscode-textLink-foreground: #4daafc;
+  --vscode-textLink-activeForeground: #8fc8ff;
+  --vscode-badge-background: #4d4d4d;
+  --vscode-badge-foreground: #ffffff;
+  --vscode-banner-background: #252526;
+  --vscode-banner-foreground: #d4d4d4;
+  --vscode-banner-iconForeground: #3794ff;
+  --vscode-widget-shadow: rgba(0, 0, 0, 0.36);
+  --vscode-errorForeground: #f48771;
+  --vscode-warningForeground: #cca700;
+  --vscode-charts-green: #89d185;
+  --vscode-charts-yellow: #cca700;
+  --vscode-scrollbarSlider-background: rgba(121, 121, 121, 0.4);
+  --vscode-scrollbarSlider-hoverBackground: rgba(100, 100, 100, 0.7);
 }
 
 body,
@@ -35,6 +89,73 @@ body.vscode-high-contrast {
   background-color: transparent !important;
 }
 
+.ricochet-timeline-card,
+.ricochet-result-card,
+.ricochet-command-card {
+  --ricochet-card-accent: rgba(125, 155, 190, 0.42);
+  background:
+    linear-gradient(90deg, var(--ricochet-card-accent) 0, var(--ricochet-card-accent) 2px, transparent 2px),
+    color-mix(in srgb, var(--vscode-input-background, #252526) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-panel-border, #333333) 68%, transparent);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.018),
+    0 10px 28px rgba(0, 0, 0, 0.08);
+}
+
+.ricochet-result-card {
+  --ricochet-card-accent: rgba(88, 166, 255, 0.45);
+}
+
+.ricochet-result-card--completed {
+  --ricochet-card-accent: rgba(72, 187, 120, 0.48);
+}
+
+.ricochet-result-card--draft {
+  --ricochet-card-accent: rgba(93, 148, 218, 0.42);
+}
+
+.ricochet-result-card__header {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.032), rgba(255, 255, 255, 0));
+}
+
+.ricochet-result-card__body {
+  background: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 26%, transparent);
+}
+
+.ricochet-command-card {
+  --ricochet-card-accent: rgba(125, 155, 190, 0.36);
+}
+
+.ricochet-command-card--running {
+  --ricochet-card-accent: rgba(96, 165, 250, 0.52);
+}
+
+.ricochet-command-card--waiting {
+  --ricochet-card-accent: rgba(129, 140, 248, 0.52);
+}
+
+.ricochet-command-card--failed {
+  --ricochet-card-accent: rgba(248, 113, 113, 0.58);
+  background:
+    linear-gradient(90deg, var(--ricochet-card-accent) 0, var(--ricochet-card-accent) 2px, transparent 2px),
+    linear-gradient(180deg, rgba(248, 113, 113, 0.055), transparent 62%),
+    color-mix(in srgb, var(--vscode-input-background, #252526) 74%, transparent);
+}
+
+.ricochet-command-card__panel,
+.ricochet-timeline-note {
+  background: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 58%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-panel-border, #333333) 52%, transparent);
+}
+
+.ricochet-timeline-section {
+  border-radius: 7px;
+}
+
+.ricochet-timeline-section[data-open='true'] {
+  background: color-mix(in srgb, var(--vscode-input-background, #252526) 30%, transparent);
+}
+
 .timeline-disclosure {
   display: grid;
   grid-template-rows: 0fr;
@@ -57,10 +178,151 @@ body.vscode-high-contrast {
   overflow: hidden;
 }
 
+.ricochet-empty-enter {
+  animation: ricochet-empty-enter 180ms ease-out both;
+}
+
+.ricochet-empty-exit {
+  animation: ricochet-empty-exit 260ms ease-out both;
+  overflow: hidden;
+}
+
+.ricochet-chat-start {
+  animation: ricochet-chat-start 240ms ease-out both;
+}
+
+.ricochet-message-enter {
+  animation: ricochet-message-enter 220ms ease-out both;
+}
+
+.ricochet-composer-dock-enter {
+  animation: ricochet-composer-dock-enter 220ms ease-out both;
+}
+
+.ricochet-activity-timeline {
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+
+.ricochet-activity-timeline::-webkit-scrollbar {
+  display: none;
+}
+
+.ricochet-activity-bar {
+  animation: ricochet-activity-bar-enter 160ms ease-out both;
+  transform-origin: bottom center;
+}
+
+.ricochet-activity-bar-active {
+  animation: ricochet-activity-bar-pulse 1200ms ease-in-out infinite;
+}
+
+@keyframes ricochet-empty-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ricochet-empty-exit {
+  from {
+    max-height: 100vh;
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  to {
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes ricochet-chat-start {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ricochet-message-enter {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ricochet-composer-dock-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ricochet-activity-bar-enter {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scaleY(0.55);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+@keyframes ricochet-activity-bar-pulse {
+  0%,
+  100% {
+    opacity: 0.66;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .timeline-disclosure {
     transition: none;
     transform: none;
+  }
+
+  .ricochet-empty-enter,
+  .ricochet-empty-exit,
+  .ricochet-chat-start,
+  .ricochet-message-enter,
+  .ricochet-composer-dock-enter,
+  .ricochet-activity-bar,
+  .ricochet-activity-bar-active {
+    animation: none;
+    transform: none;
+  }
+
+  .ricochet-empty-exit {
+    max-height: 0;
+    opacity: 0;
+    overflow: hidden;
   }
 }
 

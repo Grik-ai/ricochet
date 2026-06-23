@@ -13,6 +13,9 @@ export interface LiveModeStatus {
     stage?: EtherStage;
     lastMessage?: string;
     isVoiceReady?: boolean;
+    channels?: Record<string, { configured: boolean; active: boolean; label: string; owner?: string; error?: string }>;
+    lastSource?: 'telegram' | 'discord' | string | null;
+    allowRemoteSessionStart?: boolean;
 }
 
 export interface EtherActivity {
@@ -48,6 +51,7 @@ export function useLiveMode() {
                 setStatus(prev => ({
                     ...prev,
                     stage: act.stage as EtherStage,
+                    lastSource: act.source,
                     lastMessage: act.preview || prev.lastMessage
                 }));
                 // Clear activity after responding (cycle complete)

@@ -124,6 +124,8 @@ var BridgeService_ServiceDesc = grpc.ServiceDesc{
 
 const (
 	ChatService_SendMessage_FullMethodName  = "/bridge.ChatService/SendMessage"
+	ChatService_SendOutbound_FullMethodName = "/bridge.ChatService/SendOutbound"
+	ChatService_AckEvent_FullMethodName     = "/bridge.ChatService/AckEvent"
 	ChatService_StreamEvents_FullMethodName = "/bridge.ChatService/StreamEvents"
 )
 
@@ -133,6 +135,10 @@ const (
 type ChatServiceClient interface {
 	// SendMessage sends a message to a specific chat
 	SendMessage(ctx context.Context, in *OutgoingMessage, opts ...grpc.CallOption) (*MessageResponse, error)
+	// SendOutbound sends a v2 messenger-normalized message.
+	SendOutbound(ctx context.Context, in *OutboundMessage, opts ...grpc.CallOption) (*MessageResponse, error)
+	// AckEvent acknowledges a cloud-delivered event so it is not replayed after reconnect.
+	AckEvent(ctx context.Context, in *DeliveryAck, opts ...grpc.CallOption) (*MessageResponse, error)
 	// StreamEvents receives all bridge events (messages, tool calls, etc.)
 	StreamEvents(ctx context.Context, in *Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BridgeEvent], error)
 }
@@ -149,6 +155,26 @@ func (c *chatServiceClient) SendMessage(ctx context.Context, in *OutgoingMessage
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(MessageResponse)
 	err := c.cc.Invoke(ctx, ChatService_SendMessage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *chatServiceClient) SendOutbound(ctx context.Context, in *OutboundMessage, opts ...grpc.CallOption) (*MessageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MessageResponse)
+	err := c.cc.Invoke(ctx, ChatService_SendOutbound_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *chatServiceClient) AckEvent(ctx context.Context, in *DeliveryAck, opts ...grpc.CallOption) (*MessageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MessageResponse)
+	err := c.cc.Invoke(ctx, ChatService_AckEvent_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +206,10 @@ type ChatService_StreamEventsClient = grpc.ServerStreamingClient[BridgeEvent]
 type ChatServiceServer interface {
 	// SendMessage sends a message to a specific chat
 	SendMessage(context.Context, *OutgoingMessage) (*MessageResponse, error)
+	// SendOutbound sends a v2 messenger-normalized message.
+	SendOutbound(context.Context, *OutboundMessage) (*MessageResponse, error)
+	// AckEvent acknowledges a cloud-delivered event so it is not replayed after reconnect.
+	AckEvent(context.Context, *DeliveryAck) (*MessageResponse, error)
 	// StreamEvents receives all bridge events (messages, tool calls, etc.)
 	StreamEvents(*Empty, grpc.ServerStreamingServer[BridgeEvent]) error
 	mustEmbedUnimplementedChatServiceServer()
@@ -194,6 +224,12 @@ type UnimplementedChatServiceServer struct{}
 
 func (UnimplementedChatServiceServer) SendMessage(context.Context, *OutgoingMessage) (*MessageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SendMessage not implemented")
+}
+func (UnimplementedChatServiceServer) SendOutbound(context.Context, *OutboundMessage) (*MessageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SendOutbound not implemented")
+}
+func (UnimplementedChatServiceServer) AckEvent(context.Context, *DeliveryAck) (*MessageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AckEvent not implemented")
 }
 func (UnimplementedChatServiceServer) StreamEvents(*Empty, grpc.ServerStreamingServer[BridgeEvent]) error {
 	return status.Error(codes.Unimplemented, "method StreamEvents not implemented")
@@ -237,6 +273,42 @@ func _ChatService_SendMessage_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ChatService_SendOutbound_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(OutboundMessage)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ChatServiceServer).SendOutbound(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ChatService_SendOutbound_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ChatServiceServer).SendOutbound(ctx, req.(*OutboundMessage))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ChatService_AckEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeliveryAck)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ChatServiceServer).AckEvent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ChatService_AckEvent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ChatServiceServer).AckEvent(ctx, req.(*DeliveryAck))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ChatService_StreamEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(Empty)
 	if err := stream.RecvMsg(m); err != nil {
@@ -258,6 +330,14 @@ var ChatService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SendMessage",
 			Handler:    _ChatService_SendMessage_Handler,
+		},
+		{
+			MethodName: "SendOutbound",
+			Handler:    _ChatService_SendOutbound_Handler,
+		},
+		{
+			MethodName: "AckEvent",
+			Handler:    _ChatService_AckEvent_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

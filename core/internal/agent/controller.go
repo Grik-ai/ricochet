@@ -40,10 +40,107 @@ import (
 var reasoningBlockPattern = regexp.MustCompile(`(?is)<(?:thinking|think)>.*?(?:</(?:thinking|think)>|$)`)
 var danglingReasoningTagPattern = regexp.MustCompile(`(?is)</?(?:thinking|think)>`)
 
+const repeatedReadNudgeThreshold = 4
+const defaultRunSoftToolBatches = 12
+const defaultRunHardToolBatches = 24
+const runSoftElapsedLimit = 4 * time.Minute
+const runHardElapsedLimit = 8 * time.Minute
+
 func visibleAssistantContent(content string) string {
 	withoutBlocks := reasoningBlockPattern.ReplaceAllString(content, "")
 	withoutTags := danglingReasoningTagPattern.ReplaceAllString(withoutBlocks, "")
 	return strings.TrimSpace(withoutTags)
+}
+
+func silentFinalFallbackMessage() string {
+	return "The run ended without a visible final response from the model. No additional tool work is pending, and the session has been completed."
+}
+
+func runSoftToolBatchLimit(predictedTaskSize int) int {
+	if predictedTaskSize > 0 {
+		return predictedTaskSize + 4
+	}
+	return defaultRunSoftToolBatches
+}
+
+func runHardToolBatchLimit(predictedTaskSize int) int {
+	if predictedTaskSize > 0 {
+		doubleSize := predictedTaskSize * 2
+		withBuffer := predictedTaskSize + 8
+		if doubleSize > withBuffer {
+			return doubleSize
+		}
+		return withBuffer
+	}
+	return defaultRunHardToolBatches
+}
+
+func substantialVisibleDraft(content string) bool {
+	visible := visibleAssistantContent(content)
+	if len(visible) >= 320 {
+		return true
+	}
+	lines := strings.Split(visible, "\n")
+	nonEmpty := 0
+	headings := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		nonEmpty++
+		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "##") {
+			headings++
+		}
+	}
+	if len(visible) >= 180 && nonEmpty >= 6 {
+		return true
+	}
+	return len(visible) >= 140 && headings >= 2
+}
+
+type repeatedReadGuard struct {
+	counts map[string]int
+	nudged map[string]bool
+}
+
+func newRepeatedReadGuard() *repeatedReadGuard {
+	return &repeatedReadGuard{
+		counts: make(map[string]int),
+		nudged: make(map[string]bool),
+	}
+}
+
+func readFileTargetFromArgs(raw string) string {
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return ""
+	}
+	for _, key := range []string{"path", "file", "TargetFile", "AbsolutePath"} {
+		if value, ok := args[key].(string); ok {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				return filepath.Clean(value)
+			}
+		}
+	}
+	return ""
+}
+
+func (g *repeatedReadGuard) Observe(tc ToolCallInfo) string {
+	if g == nil || tc.Name != "read_file" {
+		return ""
+	}
+	target := readFileTargetFromArgs(tc.Arguments)
+	if target == "" {
+		return ""
+	}
+	g.counts[target]++
+	if g.counts[target] < repeatedReadNudgeThreshold || g.nudged[target] {
+		return ""
+	}
+	g.nudged[target] = true
+	return fmt.Sprintf("[SYSTEM NUDGE] You have read `%s` %d times in this run. Stop rereading the same file unless you need a specific missing line range. Synthesize findings from the information already gathered and provide the user a concise visible update or final report.", target, g.counts[target])
 }
 
 func taskProgressDebugFileEnabled() bool {
@@ -170,8 +267,10 @@ type Controller struct {
 	lastCompaction       map[string]*protocol.ContextCompactionEvent
 
 	// Abort support
-	abortMu     sync.Mutex
-	abortCancel context.CancelFunc
+	abortMu       sync.Mutex
+	abortCancel   context.CancelFunc
+	abortSessions map[string]context.CancelFunc
+	abortRuns     map[string]context.CancelFunc
 
 	// UI Callbacks
 	onTaskProgress func(protocol.TaskProgress)
@@ -305,6 +404,55 @@ func isPlanArtifactRequest(content string) bool {
 		"имплементационный план",
 	}
 	for _, term := range planTerms {
+		if strings.Contains(text, term) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHubTaskCreationRequest(content string) bool {
+	text := strings.ToLower(strings.TrimSpace(content))
+	if text == "" {
+		return false
+	}
+	negativeTerms := []string{
+		"do not create tasks",
+		"don't create tasks",
+		"не создавай задачи",
+		"не создавать задачи",
+		"не создавай таски",
+		"не создавать таски",
+	}
+	for _, term := range negativeTerms {
+		if strings.Contains(text, term) {
+			return false
+		}
+	}
+	explicitTerms := []string{
+		"create tasks in hub",
+		"create hub tasks",
+		"hub tasks",
+		"task hub",
+		"create tasks",
+		"convert to tasks",
+		"turn this into tasks",
+		"создай задачи",
+		"создать задачи",
+		"создай таски",
+		"создать таски",
+		"переведи в задачи",
+		"перевести в задачи",
+		"переведи туда задачу",
+		"перенеси туда задачу",
+		"задачи в hub",
+		"задачи в хаб",
+		"таски в hub",
+		"таски в хаб",
+		"хаб задач",
+		"канбан",
+	}
+	for _, term := range explicitTerms {
 		if strings.Contains(text, term) {
 			return true
 		}
@@ -1086,16 +1234,119 @@ func (c *Controller) SetLiveMode(lm tools.LiveModeProvider) {
 // AbortCurrentSession cancels any running chat session
 func (c *Controller) AbortCurrentSession() {
 	c.abortMu.Lock()
-	defer c.abortMu.Unlock()
+	var cancels []context.CancelFunc
 	if c.abortCancel != nil {
-		log.Printf("[Controller] Aborting current session...")
-		c.abortCancel()
+		cancels = append(cancels, c.abortCancel)
 		c.abortCancel = nil
+	}
+	for key, cancel := range c.abortSessions {
+		cancels = append(cancels, cancel)
+		delete(c.abortSessions, key)
+	}
+	for key := range c.abortRuns {
+		delete(c.abortRuns, key)
+	}
+	c.abortMu.Unlock()
+
+	if len(cancels) > 0 {
+		log.Printf("[Controller] Aborting %d active run(s)...", len(cancels))
+		for _, cancel := range cancels {
+			cancel()
+		}
 	}
 
 	if c.swarm != nil {
 		c.swarm.AbortAll()
 	}
+}
+
+// AbortSession cancels the active chat run for a specific session.
+func (c *Controller) AbortSession(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	c.abortMu.Lock()
+	cancel := c.abortSessions[sessionID]
+	if cancel != nil {
+		delete(c.abortSessions, sessionID)
+		for key := range c.abortRuns {
+			if strings.HasPrefix(key, sessionID+"|") {
+				delete(c.abortRuns, key)
+			}
+		}
+		c.abortCancel = nil
+	}
+	c.abortMu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	log.Printf("[Controller] Aborting session %s...", sessionID)
+	cancel()
+	if c.swarm != nil {
+		c.swarm.AbortAll()
+	}
+	return true
+}
+
+// AbortRun cancels a specific run when runID is known, falling back to session abort.
+func (c *Controller) AbortRun(sessionID, runID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	runID = strings.TrimSpace(runID)
+	if sessionID == "" {
+		return false
+	}
+	if runID == "" {
+		return c.AbortSession(sessionID)
+	}
+	key := abortRunKey(sessionID, runID)
+	c.abortMu.Lock()
+	cancel := c.abortRuns[key]
+	if cancel != nil {
+		delete(c.abortRuns, key)
+		delete(c.abortSessions, sessionID)
+		c.abortCancel = nil
+	}
+	c.abortMu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	log.Printf("[Controller] Aborting run %s for session %s...", runID, sessionID)
+	cancel()
+	if c.swarm != nil {
+		c.swarm.AbortAll()
+	}
+	return true
+}
+
+func (c *Controller) registerAbortCancel(sessionID, runID string, cancel context.CancelFunc) {
+	c.abortMu.Lock()
+	defer c.abortMu.Unlock()
+	if c.abortSessions == nil {
+		c.abortSessions = make(map[string]context.CancelFunc)
+	}
+	if c.abortRuns == nil {
+		c.abortRuns = make(map[string]context.CancelFunc)
+	}
+	c.abortCancel = cancel
+	if strings.TrimSpace(sessionID) != "" {
+		c.abortSessions[sessionID] = cancel
+	}
+	if strings.TrimSpace(sessionID) != "" && strings.TrimSpace(runID) != "" {
+		c.abortRuns[abortRunKey(sessionID, runID)] = cancel
+	}
+}
+
+func (c *Controller) unregisterAbortCancel(sessionID, runID string, cancel context.CancelFunc) {
+	c.abortMu.Lock()
+	defer c.abortMu.Unlock()
+	c.abortCancel = nil
+	delete(c.abortSessions, sessionID)
+	delete(c.abortRuns, abortRunKey(sessionID, runID))
+}
+
+func abortRunKey(sessionID, runID string) string {
+	return strings.TrimSpace(sessionID) + "|" + strings.TrimSpace(runID)
 }
 
 // CreateSession creates a new session
@@ -1292,25 +1543,26 @@ type ChatUpdate struct {
 
 // ChatMessage represents a message for the frontend
 type ChatMessage struct {
-	ID             string              `json:"id"`
-	Role           string              `json:"role"`
-	Content        string              `json:"content"`
-	Reasoning      string              `json:"reasoning,omitempty"`
-	Timestamp      int64               `json:"timestamp"`
-	IsStreaming    bool                `json:"isStreaming,omitempty"`
-	RunID          string              `json:"run_id,omitempty"`
-	TurnID         string              `json:"turn_id,omitempty"`
-	Sequence       int64               `json:"sequence,omitempty"`
-	SegmentID      string              `json:"segment_id,omitempty"`
-	ToolCalls      []ToolCallInfo      `json:"toolCalls,omitempty"`
-	Activities     []ActivityItem      `json:"activities,omitempty"` // Files analyzed, edited, searched
-	Steps          []ProgressStep      `json:"steps,omitempty"`      // Real-time progress updates
-	Metadata       *TaskMetadata       `json:"metadata,omitempty"`
-	Via            string              `json:"via,omitempty"`            // Message source: telegram, discord, ide
-	SessionID      string              `json:"sessionId,omitempty"`      // Session context for this message
-	Username       string              `json:"username,omitempty"`       // Remote username for Ether messages
-	Artifacts      []protocol.Artifact `json:"artifacts,omitempty"`      // Interactive artifacts (plans, etc)
-	CheckpointHash string              `json:"checkpointHash,omitempty"` // Workspace snapshot hash for restore
+	ID             string                           `json:"id"`
+	Role           string                           `json:"role"`
+	Content        string                           `json:"content"`
+	Reasoning      string                           `json:"reasoning,omitempty"`
+	Timestamp      int64                            `json:"timestamp"`
+	IsStreaming    bool                             `json:"isStreaming,omitempty"`
+	RunID          string                           `json:"run_id,omitempty"`
+	TurnID         string                           `json:"turn_id,omitempty"`
+	Sequence       int64                            `json:"sequence,omitempty"`
+	SegmentID      string                           `json:"segment_id,omitempty"`
+	ToolCalls      []ToolCallInfo                   `json:"toolCalls,omitempty"`
+	Activities     []ActivityItem                   `json:"activities,omitempty"` // Files analyzed, edited, searched
+	Steps          []ProgressStep                   `json:"steps,omitempty"`      // Real-time progress updates
+	Metadata       *TaskMetadata                    `json:"metadata,omitempty"`
+	Via            string                           `json:"via,omitempty"`            // Message source: telegram, discord, ide
+	SessionID      string                           `json:"sessionId,omitempty"`      // Session context for this message
+	Username       string                           `json:"username,omitempty"`       // Remote username for Ether messages
+	Artifacts      []protocol.Artifact              `json:"artifacts,omitempty"`      // Interactive artifacts (plans, etc)
+	CheckpointHash string                           `json:"checkpointHash,omitempty"` // Workspace snapshot hash for restore
+	ContextFiles   []protocol.ContextFileAttachment `json:"contextFiles,omitempty"`
 }
 
 // ActivityItem represents a file operation (analyze, edit, search)
@@ -1357,6 +1609,7 @@ type TaskMetadata struct {
 	TokensOut    int     `json:"tokensOut"`
 	TotalCost    float64 `json:"totalCost"`
 	ContextLimit int     `json:"contextLimit"`
+	RunPhase     string  `json:"runPhase,omitempty"` // intermediate or final
 }
 
 // ProgressStep represents a granular action taken by the agent
@@ -1396,14 +1649,8 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 
 	// Create cancellable context for abort support
 	ctx, cancel := context.WithCancel(ctx)
-	c.abortMu.Lock()
-	c.abortCancel = cancel
-	c.abortMu.Unlock()
-	defer func() {
-		c.abortMu.Lock()
-		c.abortCancel = nil
-		c.abortMu.Unlock()
-	}()
+	c.registerAbortCancel(input.SessionID, input.RunID, cancel)
+	defer c.unregisterAbortCancel(input.SessionID, input.RunID, cancel)
 
 	ctx = WithProviderNetworkMetadata(ctx, ProviderNetworkMetadata{
 		Provider:  activeProviderConfig.Provider,
@@ -1431,6 +1678,15 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 	var checklistSource string
 	stepCounter := 0
 	progressCounter := 0
+	runStartedAt := time.Now()
+	predictedTaskSize := 0
+	toolBatchCount := 0
+	softBudgetNudgeSent := false
+	completionBoundaryObserved := false
+	var lastSubstantialVisibleDraft string
+	terminalProgressEmitted := false
+	hubTaskCreationRequested := isHubTaskCreationRequest(input.Content)
+	createdHubTaskCount := 0
 
 	// Extract initial task name from user input
 	dynamicTaskName := "Agent activity"
@@ -1528,6 +1784,7 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 		completedAt := int64(0)
 		if result == "COMPLETED" || result == "ERROR" || event == "completed" || event == "error" {
 			completedAt = time.Now().UnixMilli()
+			terminalProgressEmitted = true
 		}
 		progressTodos := []protocol.Todo(nil)
 		if progressSession := c.GetSession(input.SessionID); progressSession != nil && len(progressSession.Todos) > 0 {
@@ -1622,6 +1879,50 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 	session := c.GetSession(input.SessionID)
 	if session == nil {
 		return fmt.Errorf("session '%s' not found. Type /new to start.", input.SessionID)
+	}
+
+	emitSyntheticFinal := func(reason string) {
+		finalContent := strings.TrimSpace(lastSubstantialVisibleDraft)
+		if finalContent == "" {
+			finalContent = silentFinalFallbackMessage()
+		}
+		log.Printf("⚠️ Completing run %s with synthetic final response: %s", input.RunID, reason)
+		msgID := uuid.New().String()
+		assistantFinal := ChatMessage{
+			ID:          msgID,
+			Role:        "assistant",
+			Content:     finalContent,
+			Timestamp:   time.Now().UnixMilli(),
+			IsStreaming: false,
+			RunID:       input.RunID,
+			TurnID:      input.RunID,
+			SegmentID:   input.RunID + "-synthetic-final",
+			Metadata: &TaskMetadata{
+				TotalCost:    0,
+				ContextLimit: c.config.MaxTokens,
+				RunPhase:     "final",
+			},
+		}
+		session.StateHandler.AddMessage(protocol.Message{
+			ID:      msgID,
+			Role:    "assistant",
+			Content: finalContent,
+		})
+		emitUpdate(assistantFinal)
+		if err := appendSessionMemory(c.cwd, session.ID, input.RunID, "assistant_final", finalContent); err != nil {
+			log.Printf("[Memory] failed to append synthetic session memory: %v", err)
+		}
+		if hubTaskCreationRequested && createdHubTaskCount == 0 {
+			emitTaskProgressEvent("error", "Task creation was requested, but no Hub Tasks were created.", nil, 0, 0, "ERROR")
+		}
+		status := "Run stopped before a final response"
+		result := "STOPPED"
+		if strings.Contains(strings.ToLower(reason), "budget") {
+			status = "Run stopped after budget limit"
+			result = "BUDGET_EXCEEDED"
+		}
+		emitTaskProgressEvent("stopped", status, nil, 0, 0, result)
+		terminalProgressEmitted = true
 	}
 
 	// TRIGGER: TaskCreated hook (Phase 0: Request Validation)
@@ -1873,7 +2174,9 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 		}
 
 		// ─── SMART INJECTIONS (Phase 17) ───
-		expandedContent, infoMsgs := c.injectionProcessor.Process(input.Content)
+		ignoredInjectionPaths := contextFileAttachmentPaths(input.ContextFiles)
+		ignoredInjectionPaths = append(ignoredInjectionPaths, contextFileAttachmentPaths(parseLegacyContextFileMentions(input.Content))...)
+		expandedContent, infoMsgs := c.injectionProcessor.ProcessIgnoringPaths(input.Content, ignoredInjectionPaths)
 		if attachedContext := c.buildContextFileAttachmentContext(input.Content, input.ContextFiles); attachedContext != "" {
 			expandedContent += attachedContext
 		}
@@ -1901,12 +2204,13 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 		session.StateHandler.AddMessage(userMsg)
 		// Confirmation to UI (prevents optimistic message disappearance)
 		emitUpdate(ChatMessage{
-			ID:        userMsg.ID,
-			Role:      "user",
-			Content:   userMsg.Content,
-			Timestamp: time.Now().UnixMilli(),
-			Via:       userMsg.Via,
-			RunID:     input.RunID,
+			ID:           userMsg.ID,
+			Role:         "user",
+			Content:      input.Content,
+			Timestamp:    time.Now().UnixMilli(),
+			Via:          userMsg.Via,
+			RunID:        input.RunID,
+			ContextFiles: input.ContextFiles,
 		})
 
 		if isComplexTaskRequest(input.Content) {
@@ -1931,6 +2235,7 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 	// Usage tracking
 	var totalTokensIn int
 	var totalTokensOut int
+	readGuard := newRepeatedReadGuard()
 
 	for currentTurn < maxTurns {
 		// Check for context cancellation (abortion)
@@ -1982,6 +2287,9 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 		systemPrompt += "\n\n" + activeMode.RoleDefinition + "\n" + activeMode.CustomInstructions
 		if simpleFastPath {
 			systemPrompt += "\n\n[SIMPLE WORK RUNTIME MODE]\nThis user request is classified as a simple bounded edit or direct action. Planning tools are unavailable. Do the smallest concrete action now: read the target file if needed, use replace_file_content for existing files or write_file for new files, then stop with a brief result. Do not ask for plan approval."
+		}
+		if hubTaskCreationRequested {
+			systemPrompt += "\n\n[HUB TASK CREATION REQUIRED]\nThe user explicitly requested persistent Hub/Kanban tasks. After gathering the minimum necessary context, you MUST call create_task for each concrete Hub Task you intend to create. A written promise or markdown list is not enough. If you submit an implementation plan first, continue by creating the requested Hub Tasks unless the user explicitly asked for a plan-only response. Do not mark the request complete until at least one create_task call has succeeded or you clearly report why no Hub Task can be created."
 		}
 
 		// Inject Global Custom Instructions (User Preferences)
@@ -2156,13 +2464,37 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 		// Skill Injection (Hardcore Workflow)
 		var skillContext string
 		if c.skills != nil && input.Content != "" {
+			headers := c.skills.ListSkillHeaders()
+			if len(headers) > 0 {
+				var sb strings.Builder
+				sb.WriteString("\n\n### Available Skills (metadata only)\n")
+				sb.WriteString("Use these headers to decide whether a skill applies. Full skill instructions are injected only for matched skills.\n")
+				for _, header := range headers {
+					sb.WriteString(fmt.Sprintf("- %s", header.Name))
+					if header.Description != "" {
+						sb.WriteString(fmt.Sprintf(": %s", header.Description))
+					}
+					if header.WhenToUse != "" {
+						sb.WriteString(fmt.Sprintf(" Use when: %s", header.WhenToUse))
+					}
+					if len(header.TriggerHint) > 0 {
+						sb.WriteString(fmt.Sprintf(" Triggers: %s", strings.Join(header.TriggerHint, ", ")))
+					}
+					sb.WriteString("\n")
+				}
+				skillContext = sb.String()
+			}
+
 			// Gather active files from trackers
 			activeFiles := session.FileTracker.GetFiles()
 
 			matchedSkills := c.skills.FindApplicableSkills(input.Content, activeFiles)
 			if len(matchedSkills) > 0 {
 				var sb strings.Builder
-				sb.WriteString("\n\n### 🧠 Active Skills (Auto-Activated)\n")
+				if skillContext != "" {
+					sb.WriteString(skillContext)
+				}
+				sb.WriteString("\n\n### Active Skills (Auto-Activated Full Instructions)\n")
 				for _, skill := range matchedSkills {
 					sb.WriteString(fmt.Sprintf("#### Skill: %s (%s)\n%s\n\n", skill.Name, skill.Enforcement, skill.Content))
 				}
@@ -2254,21 +2586,14 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 
 		ephemeralMsg := prompts.BuildEphemeralMessage(ephemeralCtx)
 		if ephemeralMsg != "" {
-			// Inject into final user message if it's already a user message, otherwise append
-			numMsgs := len(prunedMessages)
-			if numMsgs > 0 && prunedMessages[numMsgs-1].Role == "user" {
-				// To preserve original content, we wrap it in a readable format
-				originalContent := prunedMessages[numMsgs-1].Content
-				prunedMessages[numMsgs-1].Content = originalContent + "\n\n" + ephemeralMsg
-				log.Printf("📨 Ephemeral message merged into last user message (mode=%s)", normalizedMode)
-			} else {
-				// Fallback to append if history is empty or ends with assistant message
-				prunedMessages = append(prunedMessages, protocol.Message{
-					Role:    "user",
-					Content: ephemeralMsg,
-				})
-				log.Printf("📨 Ephemeral message appended (mode=%s)", normalizedMode)
-			}
+			// Keep reminders out of the user's visible turn. Merging them into the
+			// final user message made new ChatInput sends look like a continuation of
+			// stale plan/cancel/completion state.
+			prunedMessages = append(prunedMessages, protocol.Message{
+				Role:    "user",
+				Content: ephemeralMsg,
+			})
+			log.Printf("📨 Ephemeral message appended (mode=%s)", normalizedMode)
 		}
 
 		req := &ChatRequest{
@@ -2305,6 +2630,28 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 			RunID:         input.RunID,
 			ContextStatus: contextStatus,
 		})
+
+		var ricochetReservationID string
+		if c.usageTracker != nil {
+			keySource := c.usageTracker.KeySource(activeProviderConfig.Provider)
+			reservationID, err := preflightGrikHostedUsage(ctx, UsageEvent{
+				SessionID:    input.SessionID,
+				RunID:        input.RunID,
+				TurnID:       turnID,
+				Provider:     activeProviderConfig.Provider,
+				Model:        activeProviderConfig.Model,
+				KeySource:    keySource,
+				InputTokens:  promptTokens,
+				OutputTokens: maxInt(1, activeProviderConfig.MaxTokens),
+				Operation:    UsageOperationChat,
+			})
+			if err != nil {
+				log.Printf("⚠️ Ricochet hosted usage preflight rejected: %v", err)
+				emitTaskProgress(err.Error(), nil, 0, 0, "ERROR")
+				return err
+			}
+			ricochetReservationID = reservationID
+		}
 
 		var currentTurnContent string
 		var currentTurnReasoning string // Track reasoning separately for DeepSeek R1
@@ -2417,6 +2764,9 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 					}
 					currentTurnToolCalls = append(currentTurnToolCalls, tc)
 					assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, tc)
+					if assistantMsg.Metadata != nil {
+						assistantMsg.Metadata.RunPhase = "intermediate"
+					}
 					emitUpdate(assistantMsg)
 				}
 
@@ -2508,6 +2858,7 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 				operation = UsageOperationWorker
 			}
 			usageEvent := UsageEvent{
+				ReservationID:         ricochetReservationID,
 				SessionID:             input.SessionID,
 				RunID:                 input.RunID,
 				TurnID:                turnID,
@@ -2539,9 +2890,23 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 				RunID:     input.RunID,
 				Usage:     &usageSnapshot,
 			})
+			if err := reportGrikHostedUsage(ctx, usageEvent); err != nil {
+				log.Printf("⚠️ Ricochet hosted usage rejected: %v", err)
+				emitTaskProgress(err.Error(), nil, 0, 0, "ERROR")
+				return err
+			}
 		}
 
 		visibleTurnContent := visibleAssistantContent(currentTurnContent)
+		if len(currentTurnToolCalls) > 0 {
+			if assistantMsg.Metadata != nil {
+				assistantMsg.Metadata.RunPhase = "intermediate"
+			}
+			if substantialVisibleDraft(visibleTurnContent) {
+				lastSubstantialVisibleDraft = visibleTurnContent
+			}
+			emitUpdate(assistantMsg)
+		}
 
 		// LOOP DETECTION: Track only public assistant text, not hidden reasoning.
 		if c.loopDetector != nil && visibleTurnContent != "" {
@@ -2550,6 +2915,8 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 				emitTaskProgress("Loop warning: repeated narration; changing strategy.", nil, 0, 0, "")
 			}
 		}
+
+		messagesBeforeAssistant := session.StateHandler.GetMessages()
 
 		// Store assistant message for this turn in protocol history
 		var storedToolUse []protocol.ToolUseBlock
@@ -2571,41 +2938,56 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 
 		// If no tools used, we trigger TaskCompleted hooks (The Veto Loop)
 		if len(currentTurnToolCalls) == 0 {
+			if assistantMsg.Metadata != nil {
+				assistantMsg.Metadata.RunPhase = "final"
+			}
 			// FALLBACK: If the agent finished with empty content and no tools, nudge it for a summary.
 			// This prevents models from finishing 'silently' with only reasoning.
-			if visibleTurnContent == "" && currentTurn < maxTurns {
+			if visibleTurnContent == "" {
 				// Check if the VERY last message in history was already a nudge
-				lastMsgs := session.StateHandler.GetMessages()
 				wasLastMessageNudge := false
-				if len(lastMsgs) > 0 {
-					lastMsg := lastMsgs[len(lastMsgs)-1]
+				if len(messagesBeforeAssistant) > 0 {
+					lastMsg := messagesBeforeAssistant[len(messagesBeforeAssistant)-1]
 					if lastMsg.Role == "user" && strings.Contains(lastMsg.Content, "Please provide a clear report") {
 						wasLastMessageNudge = true
 					}
 				}
 
+				if currentTurn < maxTurns && !wasLastMessageNudge {
+					nudgeMsg := "You have not provided a final summary or result. Please provide a clear report of your findings and complete the task as requested."
+					if reasoningChunkCount > 300 {
+						log.Printf("⚠️ Agent over-analyzed (%d chunks) with no output. Injecting urgent nudge.", reasoningChunkCount)
+						nudgeMsg = "You have spent a significant amount of time 'thinking' without producing any visible output or tool calls. Please stop over-analyzing and immediately provide a concise report of your progress or take the next concrete action to resolve the user's request."
+					} else {
+						log.Printf("⚠️ Agent finished turn with no content and no tools. Requesting final report...")
+					}
+
+					session.StateHandler.AddMessage(protocol.Message{
+						ID:      uuid.New().String(),
+						Role:    "user",
+						Content: nudgeMsg,
+					})
+					// Signal progress UI
+					emitTaskProgress("Requesting final summary...", nil, 0, 0, "")
+					continue
+				}
+
 				if wasLastMessageNudge {
-					log.Printf("⚠️ Agent already nudged once but still returned empty content. Stopping turn.")
-					break
-				}
-
-				nudgeMsg := "You have not provided a final summary or result. Please provide a clear report of your findings and complete the task as requested."
-				if reasoningChunkCount > 300 {
-					log.Printf("⚠️ Agent over-analyzed (%d chunks) with no output. Injecting urgent nudge.", reasoningChunkCount)
-					nudgeMsg = "You have spent a significant amount of time 'thinking' without producing any visible output or tool calls. Please stop over-analyzing and immediately provide a concise report of your progress or take the next concrete action to resolve the user's request."
+					log.Printf("⚠️ Agent already nudged once but still returned empty content. Emitting fallback completion.")
 				} else {
-					log.Printf("⚠️ Agent finished turn with no content and no tools. Requesting final report...")
+					log.Printf("⚠️ Agent hit max turns with no visible final content. Emitting fallback completion.")
 				}
-
-				session.StateHandler.AddMessage(protocol.Message{
-					ID:      uuid.New().String(),
-					Role:    "user",
-					Content: nudgeMsg,
-				})
-				// Signal progress UI
-				emitTaskProgress("Requesting final summary...", nil, 0, 0, "")
-				continue
+				visibleTurnContent = silentFinalFallbackMessage()
+				assistantMsg.Content = visibleTurnContent
+				assistantMsg.IsStreaming = false
+				msgs := session.StateHandler.GetMessages()
+				if len(msgs) > 0 && msgs[len(msgs)-1].ID == assistantMsgID {
+					msgs[len(msgs)-1].Content = visibleTurnContent
+					session.StateHandler.SetMessages(msgs)
+				}
 			}
+			assistantMsg.IsStreaming = false
+			assistantMsg.Content = visibleTurnContent
 
 			if c.dynamicHooks != nil {
 				log.Printf("🧐 Triggering TaskCompleted (Veto Check)...")
@@ -2654,18 +3036,18 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 					log.Printf("⚠️ TaskCompleted Warning: %s", warnMsg)
 				}
 			}
+			emitUpdate(assistantMsg)
 			if err := appendSessionMemory(c.cwd, session.ID, input.RunID, "assistant_final", visibleTurnContent); err != nil {
 				log.Printf("[Memory] failed to append session memory: %v", err)
 			}
+			if hubTaskCreationRequested && createdHubTaskCount == 0 {
+				emitTaskProgressEvent("error", "Task creation was requested, but no Hub Tasks were created.", nil, 0, 0, "ERROR")
+			} else if hubTaskCreationRequested {
+				emitTaskProgress("Created Hub Tasks", nil, 0, 0, "COMPLETED")
+			} else {
+				emitTaskProgress("Mission Accomplished", nil, 0, 0, "COMPLETED")
+			}
 			break
-		}
-
-		// TASK COMPLETE SIGNAL (The Handshake)
-		// Only mark the mission complete when the assistant has no tool calls to execute.
-		// Tool calls are still part of the same turn, so reporting completion here would
-		// make the UI show "Mission Accomplished" before approval and execution.
-		if len(currentTurnToolCalls) == 0 {
-			emitTaskProgress("Mission Accomplished", nil, 0, 0, "COMPLETED")
 		}
 
 		// Initialize QC flag
@@ -2777,8 +3159,10 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 		}
 
 		// EXECUTE TOOLS
+		toolBatchCount++
 		log.Printf("Executing %d tools...", len(currentTurnToolCalls))
 		var toolResults []protocol.ToolResultBlock
+		var repeatedReadNudges []string
 		for i, tc := range currentTurnToolCalls {
 			toolStartedAt := time.Now()
 			// Prettify tool name for progress
@@ -2866,6 +3250,9 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 						PredictedTaskSize int    `json:"PredictedTaskSize"`
 					}
 					if err = json.Unmarshal([]byte(tc.Arguments), &payload); err == nil {
+						if payload.PredictedTaskSize > 0 {
+							predictedTaskSize = payload.PredictedTaskSize
+						}
 						// 1. Update dynamic task name
 						if payload.TaskName != "" && payload.TaskName != "%SAME%" {
 							dynamicTaskName = payload.TaskName
@@ -2888,6 +3275,12 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 						// 3. Update summary if changed
 						if payload.TaskSummary != "" && payload.TaskSummary != "%SAME%" {
 							taskSummary = payload.TaskSummary
+						}
+						lowerMode := strings.ToLower(strings.TrimSpace(payload.Mode))
+						lowerStatus := strings.ToLower(strings.TrimSpace(payload.TaskStatus))
+						if (lowerMode == "verification" || lowerMode == "completed" || strings.Contains(lowerStatus, "completed")) &&
+							(strings.Contains(lowerStatus, "completed") || strings.Contains(lowerStatus, "documented") || strings.Contains(lowerStatus, "done")) {
+							completionBoundaryObserved = true
 						}
 						// 4. Emit progress update with the new status
 						status := payload.TaskStatus
@@ -3030,12 +3423,16 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 
 						// HARD STOP: Force-break after 5 consecutive stuck errors
 						if stuckCounter >= 5 {
-							log.Printf("🛑 HARD STOP: Agent stuck in infinite loop (%d consecutive errors). Aborting.", stuckCounter)
-							assistantMsg.Content = "🛑 Agent was stuck in an infinite loop and has been stopped. Please try a different approach or restart the conversation."
-							assistantMsg.IsStreaming = false
-							emitUpdate(assistantMsg)
-							c.emitToolLifecycle(input, tc, "tool_failed", toolStartedAt, result, loopErr, callback)
-							return fmt.Errorf("agent stuck: loop detected %d times consecutively", stuckCounter)
+							budgetDue := toolBatchCount >= runHardToolBatchLimit(predictedTaskSize) || time.Since(runStartedAt) >= runHardElapsedLimit
+							if !budgetDue {
+								log.Printf("🛑 HARD STOP: Agent stuck in infinite loop (%d consecutive errors). Aborting.", stuckCounter)
+								assistantMsg.Content = "🛑 Agent was stuck in an infinite loop and has been stopped. Please try a different approach or restart the conversation."
+								assistantMsg.IsStreaming = false
+								emitUpdate(assistantMsg)
+								c.emitToolLifecycle(input, tc, "tool_failed", toolStartedAt, result, loopErr, callback)
+								return fmt.Errorf("agent stuck: loop detected %d times consecutively", stuckCounter)
+							}
+							log.Printf("⚠️ Stuck detector reached hard-stop threshold, but run budget is also due; allowing budget finalizer to close the run.")
 						}
 						err = loopErr
 					}
@@ -3097,6 +3494,21 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 			// Emitting result for TUI high-fidelity output
 			// Re-emit with the same friendly name so it updates the same node (or appends, tree logic handles it)
 			emitTaskProgress(friendlyTool, nil, 1, 0, result)
+			if tc.Name == "create_task" {
+				var argsMap map[string]interface{}
+				title := "Hub Task"
+				if json.Unmarshal([]byte(tc.Arguments), &argsMap) == nil {
+					if rawTitle, ok := argsMap["title"].(string); ok && strings.TrimSpace(rawTitle) != "" {
+						title = strings.TrimSpace(rawTitle)
+					}
+				}
+				if isError {
+					emitTaskProgressEvent("error", fmt.Sprintf("Failed to create Hub Task: %s", title), nil, 0, 0, "ERROR")
+				} else {
+					createdHubTaskCount++
+					emitTaskProgressEvent("hub_task_created", fmt.Sprintf("Created Hub Task: %s", title), nil, 0, 0, result)
+				}
+			}
 			if !isError && visibleAssistantContent(currentTurnContent) == "" {
 				if heartbeat := c.progressHeartbeatForTool(tc.Name, tc.Arguments); heartbeat != "" {
 					emitTaskProgressEvent("phase", heartbeat, nil, 0, 0, "")
@@ -3145,6 +3557,12 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 					} else if path, ok := argsMap["AbsolutePath"].(string); ok {
 						session.FileTracker.AddFile(path)
 					}
+				}
+			}
+			if !isError {
+				if nudge := readGuard.Observe(tc); nudge != "" {
+					log.Printf("⚠️ Repeated read_file guard triggered: %s", nudge)
+					repeatedReadNudges = append(repeatedReadNudges, nudge)
 				}
 			}
 
@@ -3254,6 +3672,25 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 		}
 
 		// Append tool results to session as a User message (standard for Anthropic)
+		elapsed := time.Since(runStartedAt)
+		softToolLimit := runSoftToolBatchLimit(predictedTaskSize)
+		hardToolLimit := runHardToolBatchLimit(predictedTaskSize)
+		hardBudgetExceeded := toolBatchCount >= hardToolLimit || elapsed >= runHardElapsedLimit
+		if !softBudgetNudgeSent && !hardBudgetExceeded &&
+			(toolBatchCount >= softToolLimit || elapsed >= runSoftElapsedLimit || (completionBoundaryObserved && lastSubstantialVisibleDraft != "")) {
+			softBudgetNudgeSent = true
+			if strings.TrimSpace(qcMessage) != "" {
+				qcMessage += "\n\n"
+			}
+			qcMessage += "[SYSTEM NUDGE] You have already produced a substantial visible result or reached the planned exploration budget. Stop opening more files unless a critical fact is missing. Provide the user a final answer now."
+			log.Printf("⚠️ Run budget soft nudge emitted: batches=%d soft=%d elapsed=%s predicted=%d completionBoundary=%v", toolBatchCount, softToolLimit, elapsed.Round(time.Second), predictedTaskSize, completionBoundaryObserved)
+		}
+		if len(repeatedReadNudges) > 0 {
+			if strings.TrimSpace(qcMessage) != "" {
+				qcMessage += "\n\n"
+			}
+			qcMessage += strings.Join(repeatedReadNudges, "\n\n")
+		}
 		session.StateHandler.AddMessage(protocol.Message{
 			ID:          uuid.New().String(),
 			Role:        "user",
@@ -3261,7 +3698,17 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 			Content:     qcMessage, // Append QC failure message if any
 		})
 
+		if hardBudgetExceeded {
+			log.Printf("⚠️ Run budget hard completion: batches=%d hard=%d elapsed=%s predicted=%d", toolBatchCount, hardToolLimit, elapsed.Round(time.Second), predictedTaskSize)
+			emitSyntheticFinal("run budget exceeded")
+			break
+		}
+
 		// Loop continues to get AI's reaction to tool results
+	}
+
+	if !terminalProgressEmitted {
+		emitSyntheticFinal("turn limit reached without terminal assistant response")
 	}
 
 	// TRIGGER: TaskCompleted / Session Conclusion
@@ -4128,7 +4575,7 @@ func (c *Controller) Execute(ctx context.Context, prompt string) (string, error)
 	// Helper to collect response
 	err := c.Chat(ctx, req, func(update interface{}) {
 		if cu, ok := update.(ChatUpdate); ok {
-			if cu.Message.Role == "assistant" && cu.Message.Content != "" {
+			if cu.Message != nil && cu.Message.Role == "assistant" && cu.Message.Content != "" {
 				mu.Lock()
 				responseBuilder.WriteString(cu.Message.Content)
 				mu.Unlock()

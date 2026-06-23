@@ -94,3 +94,25 @@ func TestBuildContextFileAttachmentContextRejectsAttachmentOutsideStagingDir(t *
 		t.Fatalf("expected staging directory warning, got %s", section)
 	}
 }
+
+func TestInjectionProcessorSkipsStructuredContextFilePaths(t *testing.T) {
+	dir := t.TempDir()
+	attachmentDir := filepath.Join(dir, ".ricochet", "attachments", "session-1")
+	if err := os.MkdirAll(attachmentDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	relPath := ".ricochet/attachments/session-1/notes.md"
+	if err := os.WriteFile(filepath.Join(dir, relPath), []byte("attachment content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	processor := NewInjectionProcessor(dir)
+	expanded, info := processor.ProcessIgnoringPaths("Context Files:\n@"+relPath, []string{relPath})
+
+	if strings.Contains(expanded, "Content of @") || strings.Contains(expanded, "attachment content") {
+		t.Fatalf("structured attachment was duplicated by legacy injection: %s", expanded)
+	}
+	if len(info) != 0 {
+		t.Fatalf("expected no visible injected file messages, got %#v", info)
+	}
+}

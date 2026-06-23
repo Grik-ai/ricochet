@@ -6,7 +6,9 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/igoryan-dao/ricochet/internal/tui/keymap"
 	"github.com/igoryan-dao/ricochet/internal/tui/style"
+	"github.com/igoryan-dao/ricochet/internal/version"
 )
 
 func (m Model) View() string {
@@ -29,6 +31,9 @@ func (m Model) View() string {
 
 	// 4. Input
 	input := m.Textarea.View()
+	if m.APIKeyPrompt != nil {
+		input = m.Secret.View()
+	}
 
 	// Wrap Input in a Box
 	input = style.BoxStyle.Width(m.TerminalWidth - 2).Render(input)
@@ -47,7 +52,7 @@ func (m Model) View() string {
 		// Dim Input
 		input = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(input)
 		// Highlight Viewport Border (if we had one) - Viewport is just text usually.
-		viewport = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(style.BurntOrange).Render(viewport)
+		viewport = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(style.Focus).Render(viewport)
 	}
 
 	// COMPOSITION:
@@ -113,21 +118,8 @@ func (m *Model) UpdateViewport() {
 			case BlockAgentText:
 				// Agent text response block
 				hasContent := strings.TrimSpace(block.Content) != ""
-				hasReasoning := strings.TrimSpace(block.Reasoning) != ""
 
-				if hasContent || hasReasoning {
-					// Render reasoning first (if any)
-					if hasReasoning {
-						reasoningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#767676")).Italic(true)
-						reasoningContent, _ := m.Renderer.Render(block.Reasoning)
-						reasoningContent = strings.TrimSpace(reasoningContent)
-						sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
-							style.AgentStyle.Width(2).Align(lipgloss.Center).Render(""),
-							" ",
-							reasoningStyle.Render(reasoningContent),
-						) + "\n")
-					}
-
+				if hasContent {
 					// Render content
 					renderedContent, _ := m.Renderer.Render(block.Content)
 					renderedContent = strings.TrimSpace(renderedContent)
@@ -148,8 +140,8 @@ func (m *Model) UpdateViewport() {
 			if lastBlock.Type == BlockAgentTree && lastBlock.IsActive {
 				// Spinner is already in the tree via RenderTaskTree, we're good
 			} else if lastBlock.Type == BlockAgentText && strings.TrimSpace(lastBlock.Content) == "" {
-				// Empty text block while loading - show thinking
-				status := "Thinking..."
+				// Empty text block while loading - show a concise action label.
+				status := "Working..."
 				if m.CurrentStatusStr != "" {
 					status = m.CurrentStatusStr
 				} else if m.CurrentAction != "" {
@@ -165,6 +157,14 @@ func (m *Model) UpdateViewport() {
 				sb.WriteString(formattedMsg + "\n")
 			}
 		}
+	}
+
+	if timeline := RenderTimeline(m.Timeline, m.TerminalWidth-4); timeline != "" {
+		sb.WriteString(timeline + "\n")
+	}
+
+	if m.ShowShortcuts {
+		sb.WriteString("\n" + style.BoxStyle.BorderForeground(style.Focus).Render(keymap.RenderHelp()) + "\n")
 	}
 
 	// (Legacy activeStream section removed - now handled by BlockAgentText)
@@ -183,8 +183,8 @@ func (m *Model) UpdateViewport() {
 			choices.WriteString(fmt.Sprintf("%s %s\n", cursor, styleOpt.Render(c)))
 		}
 
-		box := style.BoxStyle.BorderForeground(style.BurntOrange).Render(
-			style.UserStyle.Bold(true).Render("❓ "+m.PendingChoice.Question) + "\n\n" +
+		box := style.BoxStyle.BorderForeground(style.Focus).Render(
+			style.UserStyle.Bold(true).Render("? "+m.PendingChoice.Question) + "\n\n" +
 				choices.String() + "\n" +
 				style.SystemStyle.Render("[Up/Down] Select  [Enter] Confirm  [Esc] Deny"),
 		)
@@ -232,10 +232,10 @@ func RenderDashboard(m Model) string {
 	}
 
 	if w < 50 {
-		return style.HeaderStyle.Width(w).Render("Ricochet v0.1.0 • " + m.ModelName)
+		return style.HeaderStyle.Width(w).Render("Ricochet " + version.Display() + " • " + m.ModelName)
 	}
 
-	logo := style.HeaderLabelStyle.Render("Ricochet v0.1.0")
+	logo := style.HeaderLabelStyle.Render("Ricochet " + version.Display())
 	modelInfo := fmt.Sprintf("Model: %s", m.ModelName)
 
 	separator := " • "
@@ -246,8 +246,9 @@ func RenderDashboard(m Model) string {
 
 	left := logo + separator + style.SystemStyle.Render(modelInfo)
 	hints := []string{
-		"⇧⇥ Plan",
-		"^E Ether",
+		keymap.Shortcut(keymap.ContextGlobal, keymap.ActionTogglePlan, "ctrl+p") + " Plan",
+		keymap.Shortcut(keymap.ContextGlobal, keymap.ActionToggleEther, "ctrl+e") + " Ether",
+		keymap.Shortcut(keymap.ContextChat, keymap.ActionModelPicker, "alt+m") + " Model",
 		"/help",
 	}
 	right := style.SystemStyle.Render(strings.Join(hints, " • "))
@@ -280,7 +281,7 @@ func RenderTaskTree(nodes []*TaskNode, prefix string, spin spinner.Model, isLoad
 	for i, node := range nodes {
 		isRealLast := i == len(nodes)-1
 
-		// Determine if we need to append a synthetic "Thinking..." tail AFTER this node
+		// Determine if we need to append a synthetic activity tail AFTER this node
 		wantsTail := isRealLast && isLoading && node.Status != "running" && len(node.Children) == 0
 
 		// 1. Connector
@@ -317,13 +318,13 @@ func RenderTaskTree(nodes []*TaskNode, prefix string, spin spinner.Model, isLoad
 				sb.WriteString(RenderTaskTree(node.Children, prefix+childPrefix, spin, isLoading))
 			}
 		} else if wantsTail {
-			// Render the "Thinking..." tail as a SIBLING (Same prefix)
+			// Render the activity tail as a SIBLING (Same prefix)
 			tailConnector := "└─ "
 			sb.WriteString(fmt.Sprintf("%s%s%s %s\n",
 				style.SystemStyle.Render(prefix),
 				style.SystemStyle.Render(tailConnector),
 				style.TreeActiveStyle.Render(spin.View()),
-				style.ThinkingStyle.Render("Thinking..."),
+				style.ThinkingStyle.Render("Working..."),
 			))
 		}
 	}
@@ -359,7 +360,7 @@ func RenderInlineTool(node *TaskNode, prefix, connector string, spin spinner.Mod
 	if node.AgentName != "" {
 		bg := lipgloss.Color(node.AgentColor)
 		if node.AgentColor == "" {
-			bg = style.BurntOrange // Default fallback
+			bg = style.Focus
 		}
 		badgeStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFFFFF")).
@@ -409,7 +410,7 @@ func RenderBlockTool(node *TaskNode, prefix, connector string, spin spinner.Mode
 	if node.AgentName != "" {
 		bg := lipgloss.Color(node.AgentColor)
 		if node.AgentColor == "" {
-			bg = style.BurntOrange
+			bg = style.Focus
 		}
 		badgeStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFFFFF")).
@@ -445,12 +446,16 @@ func RenderStatusBar(m Model) string {
 
 	statusText := "Ready"
 	if m.IsLoading {
-		statusText = "Thinking..."
+		statusText = "Working"
 		if m.CurrentStatusStr != "" {
 			statusText = m.CurrentStatusStr
 		} else if m.CurrentAction != "" {
 			statusText = m.CurrentAction
 		}
+	} else if m.PendingApproval != nil || m.PendingChoice != nil {
+		statusText = "Waiting approval"
+	} else if m.APIKeyPrompt != nil {
+		statusText = "Waiting API key"
 	}
 
 	// Use ThinkingStyle for loading state to verify visibility
@@ -463,7 +468,11 @@ func RenderStatusBar(m Model) string {
 
 	etherProps := ""
 	if m.IsEtherMode {
-		etherProps = style.ActStyle.Render("[ETH] ") // Can use different color if needed
+		etherStyle := style.MutedStyle
+		if m.IsEtherActive {
+			etherStyle = style.FocusStyle.Bold(true)
+		}
+		etherProps = etherStyle.Render("[LIVE] ")
 	}
 
 	autoBadge := ""
@@ -486,9 +495,9 @@ func (m Model) renderSuggestions() string {
 	s := ""
 	for i, sug := range m.Suggestions {
 		if i == m.SelectedSuggestion {
-			s += style.UserStyle.Render("> "+sug) + "\n"
+			s += style.SelectionStyle.Render("> "+sug) + "\n"
 		} else {
-			s += "  " + sug + "\n"
+			s += style.SystemStyle.Render("  "+sug) + "\n"
 		}
 	}
 	return style.BoxStyle.Render(s)
@@ -502,16 +511,16 @@ func max(a, b int) int {
 }
 
 func RenderWelcomeContent(modelName, cwd string) (string, string) {
-	logoStyle := lipgloss.NewStyle().Foreground(style.BurntOrange).Bold(true)
+	logoStyle := style.HeaderLabelStyle
 
 	textContent := fmt.Sprintf(`
-Welcome to **Ricochet** (v0.1.0)
+Welcome to **Ricochet** (%s)
 Model: *%s*
 CWD: %s
 
 Type **/help** for commands.
 Type **?** for shortcuts.
-`, modelName, cwd)
+`, version.Display(), modelName, cwd)
 
 	return logoStyle.Render("Ricochet"), textContent
 }
@@ -584,6 +593,9 @@ func RenderTaskDashboard(m Model) string {
 	if w < 10 {
 		return ""
 	}
+	if m.Controller == nil {
+		return ""
+	}
 
 	pm := m.Controller.GetPlanManager()
 	if pm == nil || len(pm.GetTasks()) == 0 {
@@ -595,7 +607,7 @@ func RenderTaskDashboard(m Model) string {
 	// Box Style
 	boxStyle := style.BoxStyle.
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(style.BurntOrange).
+		BorderForeground(style.Border).
 		Width(w).
 		Padding(0, 1)
 

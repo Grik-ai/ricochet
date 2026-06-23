@@ -1,23 +1,27 @@
----
-description: How to use the Swarm Agent
----
+# Swarm Coordination
 
-# Swarm Agent Protocol
-
-The Swarm Agent allows for parallel execution of tasks using specialized sub-agents.
+Use swarm only when independent workers can reduce risk or latency. Good cases include broad repository discovery, competitor comparison, independent verification, and parallel investigation of separate modules.
 
 ## Activation
-**DO NOT** attempt to run `./ricochet` or any external binary to start the swarm.
-**USE** the internal tool `start_swarm`.
 
-### Workflow
-1.  **Define a Plan**: Use `start_task` or manual plan creation to populate the PlanManager.
-2.  **Start Swarm**: Call `start_swarm {}`.
-    - The Swarm Orchestrator will analyze the dependency graph.
-    - It will spawn sub-agents for all "runnable" (no pending dependencies) tasks.
-    - Agents will run in parallel (up to 5 workers).
-    - Status updates will appear in the Task Tree.
+When swarm is appropriate, use the native swarm tool:
 
-## Tools
-- `start_swarm`: Activates the orchestrator.
-- `update_plan`: Updates task status (done/failed) and dependencies.
+```json
+{"confirm": true, "goal": "clear objective", "depth": "fast"}
+```
+
+Do not call shell CLIs to simulate swarm behavior.
+
+## Delegation Rules
+
+- Give each worker a bounded, non-overlapping scope.
+- Prefer read-only research or verification tasks unless the workflow explicitly supports parallel edits.
+- Do not assign multiple workers to modify the same files.
+- Include expected evidence: file paths, commands, failing output, or concise conclusions.
+- Spot-check worker findings before making final claims.
+
+## Result Handling
+
+Treat swarm results as supporting evidence, not automatic truth. Reconcile disagreements, verify claims that affect code, and report unresolved uncertainty directly.
+
+If a worker is blocked, do not repeatedly poll without new information. Either change the scope, continue with available evidence, or report the blocker.

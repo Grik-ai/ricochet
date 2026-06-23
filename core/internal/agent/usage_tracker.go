@@ -25,6 +25,7 @@ const (
 
 // UsageEvent is the atomic token/cost record for a model operation.
 type UsageEvent struct {
+	ReservationID         string         `json:"reservationId,omitempty"`
 	SessionID             string         `json:"sessionId"`
 	RunID                 string         `json:"runId,omitempty"`
 	TurnID                string         `json:"turnId,omitempty"`

@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -24,7 +22,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// GLOBAL TOGGLES
 	if kmsg, ok := msg.(tea.KeyMsg); ok {
-		if kmsg.String() == "ctrl+p" {
+		switch kmsg.String() {
+		case "ctrl+c":
+			if m.IsLoading && m.Controller != nil {
+				m.Controller.AbortCurrentSession()
+				m.IsLoading = false
+				m.CurrentAction = ""
+				m.finishActiveBlocks()
+				textBlock := m.getOrCreateTextBlock()
+				textBlock.Content += "\n\nTask cancelled by user."
+				m.UpdateViewport()
+				return m, m.waitForMsg()
+			}
+			return m, tea.Quit
+		case "ctrl+d":
+			return m, tea.Quit
+		case "?":
+			if strings.TrimSpace(m.Textarea.Value()) == "" {
+				m.ShowShortcuts = !m.ShowShortcuts
+				m.UpdateViewport()
+				return m, nil
+			}
+		case "alt+m":
+			res, cmd := m.handleSlashCommand("/model")
+			if strings.TrimSpace(res) != "" {
+				m.getOrCreateTextBlock().Content += "\n" + res
+			}
+			m.UpdateViewport()
+			return m, cmd
+		case "alt+p":
+			res, cmd := m.handleSlashCommand("/provider")
+			if strings.TrimSpace(res) != "" {
+				m.getOrCreateTextBlock().Content += "\n" + res
+			}
+			m.UpdateViewport()
+			return m, cmd
+		case "ctrl+p":
 			m.IsPlanMode = !m.IsPlanMode
 			m.PlanAddingTask = false // Reset state
 			if m.IsPlanMode {
@@ -172,6 +205,110 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.APIKeyPrompt != nil {
+		if kmsg, ok := msg.(tea.KeyMsg); ok {
+			switch kmsg.String() {
+			case "esc":
+				provider := m.APIKeyPrompt.Provider
+				m.APIKeyPrompt = nil
+				m.Secret.Reset()
+				m.Secret.Blur()
+				m.Textarea.Focus()
+				textBlock := m.getOrCreateTextBlock()
+				textBlock.Content += fmt.Sprintf("\nAPI key entry cancelled for `%s`.", provider)
+				m.UpdateViewport()
+				return m, nil
+			case "enter":
+				provider := m.APIKeyPrompt.Provider
+				key := strings.TrimSpace(m.Secret.Value())
+				m.APIKeyPrompt = nil
+				m.Secret.Reset()
+				m.Secret.Blur()
+				m.Textarea.Focus()
+				textBlock := m.getOrCreateTextBlock()
+				if key == "" {
+					textBlock.Content += fmt.Sprintf("\nAPI key entry cancelled for `%s`.", provider)
+				} else if err := m.saveProviderAPIKey(provider, key); err != nil {
+					textBlock.Content += fmt.Sprintf("\nFailed to save API key for `%s`: %v", provider, err)
+				} else {
+					textBlock.Content += fmt.Sprintf("\nAPI key saved for `%s`.", provider)
+				}
+				m.UpdateViewport()
+				return m, nil
+			}
+		}
+		m.Secret.Focus()
+		var cmd tea.Cmd
+		m.Secret, cmd = m.Secret.Update(msg)
+		return m, cmd
+	}
+
+	if kmsg, ok := msg.(tea.KeyMsg); ok && !m.IsShellFocused {
+		switch kmsg.String() {
+		case "alt+enter":
+			return m.insertTextareaNewline()
+		case "enter":
+			input := strings.TrimSpace(m.Textarea.Value())
+			if input == "/" {
+				m.Suggestions = m.enabledSlashCommandSuggestions("/")
+				m.SelectedSuggestion = 0
+				m.ShowSuggestions = len(m.Suggestions) > 0
+				m.UpdateViewport()
+				return m, nil
+			}
+			if m.ShowSuggestions && len(m.Suggestions) > 0 && !isCompleteSlashCommand(input) {
+				shouldExec := m.selectSuggestion()
+				if !shouldExec {
+					m.UpdateViewport()
+					return m, nil
+				}
+			}
+			return m.submitTextareaInput()
+		}
+
+		if m.ShowSuggestions {
+			switch kmsg.String() {
+			case "up":
+				m.SelectedSuggestion--
+				if m.SelectedSuggestion < 0 {
+					m.SelectedSuggestion = len(m.Suggestions) - 1
+				}
+				return m, nil
+			case "down":
+				m.SelectedSuggestion++
+				if m.SelectedSuggestion >= len(m.Suggestions) {
+					m.SelectedSuggestion = 0
+				}
+				return m, nil
+			case "tab":
+				if len(m.Suggestions) > 0 {
+					_ = m.selectSuggestion()
+					m.UpdateViewport()
+					return m, nil
+				}
+			case "esc":
+				m.ShowSuggestions = false
+				m.UpdateViewport()
+				return m, nil
+			}
+		}
+
+		if !m.ShowSuggestions {
+			switch kmsg.String() {
+			case "up":
+				if m.recallSlashHistory(-1) {
+					m.UpdateViewport()
+					return m, nil
+				}
+			case "down":
+				if m.recallSlashHistory(1) {
+					m.UpdateViewport()
+					return m, nil
+				}
+			}
+		}
+	}
+
 	// INTERCEPT KEYBOARD for Tab Toggle Logic
 	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "tab" && !m.ShowSuggestions {
 		m.IsShellFocused = !m.IsShellFocused
@@ -255,16 +392,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.IsLoading {
 		m.Spinner, spCmd = m.Spinner.Update(msg)
-
-		// Whimsical Status Cycler
-		m.StatusTick++
-		if m.StatusTick > 20 { // ~2 seconds @ 100ms tick (roughly)
-			m.StatusTick = 0
-			// Pick random verb
-			rand.Seed(time.Now().UnixNano())
-			verb := WhimsicalVerbs[rand.Intn(len(WhimsicalVerbs))]
-			m.CurrentStatusStr = verb + "..."
-		}
 	}
 
 	switch msg := msg.(type) {
@@ -290,63 +417,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		// Global Mode Switch
-		if msg.String() == "shift+tab" {
-			m.IsPlanMode = !m.IsPlanMode
-			// Notify controller or just change local state?
-			// For now, visual change.
-			return m, nil
-		}
-
 		// Ether Mode Toggle
 		// Changed to Ctrl+E (or Alt+E) for better ergonomics
 		if msg.String() == "ctrl+e" || msg.String() == "alt+e" {
 			m.IsEtherMode = !m.IsEtherMode
 			return m, nil
 		}
-		// ... (rest of KeyMsg handling is fine, just inserting WindowSizeMsg before it or in switch)
-
-		// Suggestion Navigation
-		if m.ShowSuggestions {
-			switch msg.String() {
-			case "up":
-				m.SelectedSuggestion--
-				if m.SelectedSuggestion < 0 {
-					m.SelectedSuggestion = len(m.Suggestions) - 1
-				}
-				return m, nil
-			case "down":
-				m.SelectedSuggestion++
-				if m.SelectedSuggestion >= len(m.Suggestions) {
-					m.SelectedSuggestion = 0
-				}
-				return m, nil
-			case "tab", "enter":
-				if len(m.Suggestions) > 0 {
-					shouldExec := m.selectSuggestion()
-					if shouldExec {
-						// Fallthrough to exec
-					} else {
-						return m, nil
-					}
-				} else if msg.String() == "tab" {
-					// Toggle Focus
-					m.IsShellFocused = !m.IsShellFocused
-					return m, nil
-				}
-			case "esc":
-				m.ShowSuggestions = false
-				return m, nil
-			}
-		} else {
-			// Suggestions closed, check for Tab Toggle
-			if msg.String() == "tab" {
-				m.IsShellFocused = !m.IsShellFocused
-				return m, nil
-			}
-		}
 
 		if msg.String() == "ctrl+r" {
+			if m.toggleLastTimelineExpansion() {
+				m.UpdateViewport()
+				return m, nil
+			}
 			// Toggle expansion for the active tree block
 			block := m.ensureActiveTreeBlock()
 			if block != nil && len(block.TaskTree) > 0 {
@@ -382,104 +464,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-		// Alt+Enter for Manual Newline
-		if msg.String() == "alt+enter" {
-			// Simulate Enter key for textarea to insert newline
-			var cmd tea.Cmd
-			m.Textarea, cmd = m.Textarea.Update(tea.KeyMsg{Type: tea.KeyEnter})
-
-			// Manually trigger auto-expand logic immediately for responsiveness
-			lc := m.Textarea.LineCount()
-			if lc < 1 {
-				lc = 1
-			}
-			if lc > 5 {
-				lc = 5
-			}
-			if m.Textarea.Height() != lc {
-				m.Textarea.SetHeight(lc)
-				m.recalculateViewportHeight()
-				m.UpdateViewport()
-			}
-			return m, cmd
+	case SlashCmdResMsg:
+		m.IsLoading = false
+		m.CurrentAction = ""
+		m.finishActiveBlocks()
+		textBlock := m.getOrCreateTextBlock()
+		if msg.Error != nil {
+			textBlock.Content += "\n" + fmt.Sprintf("`%s` failed: %v", msg.Command, msg.Error)
+		} else if strings.TrimSpace(msg.Response) != "" {
+			textBlock.Content += "\n" + msg.Response
 		}
+		m.UpdateViewport()
+		return m, m.waitForMsg()
 
-		if msg.String() == "enter" {
-			if m.Textarea.Value() == "" {
-				return m, nil
-			}
-			input := m.Textarea.Value()
-			m.Textarea.Reset()
-
-			// Command?
-			if strings.HasPrefix(input, "/") || strings.HasPrefix(input, "?") {
-				if input == "/" {
-					// Just open suggestions if not already open, or do nothing
-					// Ideally we should have selected a suggestion.
-					// If they just hit enter on /, let's treat it as invalid or ignore.
-					return m, nil
-				}
-				res, cmd := m.handleSlashCommand(input)
-				if res != "" {
-					// System message for command result
-					textBlock := m.getOrCreateTextBlock()
-					textBlock.Content += "\n" + res
-				}
-				m.UpdateViewport()
-				return m, cmd
-			}
-
-			if strings.TrimSpace(input) == "" {
-				m.Textarea.Reset()
-				return m, nil
-			}
-
-			// Chat
-			// INTERLEAVED BLOCKS: Create User block + new Tree block
-			// appendUserBlock automatically creates the tree block
-			m.appendUserBlock(input)
-
+	case LogMsg:
+		if strings.TrimSpace(msg.Text) != "" {
+			textBlock := m.getOrCreateTextBlock()
+			textBlock.Content += "\n" + msg.Text
 			m.UpdateViewport()
-			m.IsLoading = true
-
-			return m, tea.Batch(
-				m.Spinner.Tick,
-				m.runAsync(input, func() (string, error) {
-					req := agent.ChatRequestInput{
-						SessionID: m.SessionID,
-						Content:   input,
-						Via:       "cli",
-					}
-
-					// Streaming
-					go func() {
-						fullResponse := ""
-						m.MsgChan <- StreamMsg{Content: "**Ricochet**: ", Done: false}
-
-						// Note: Error handling omitted for brevity in this quick-port
-						_ = m.Controller.Chat(context.Background(), req, func(update interface{}) {
-							if cu, ok := update.(agent.ChatUpdate); ok {
-								if cu.Message.Role == "assistant" {
-									if cu.Message.Reasoning != "" {
-										m.MsgChan <- ThoughtsMsg{Content: cu.Message.Reasoning}
-									}
-									if len(cu.Message.Content) > len(fullResponse) {
-										diff := cu.Message.Content[len(fullResponse):]
-										m.MsgChan <- StreamMsg{Content: diff, Done: false}
-										fullResponse = cu.Message.Content
-									}
-								}
-							} else if tp, ok := update.(protocol.TaskProgress); ok {
-								m.MsgChan <- tp
-							}
-						})
-						m.MsgChan <- StreamMsg{Done: true}
-					}()
-
-					return "", nil
-				}),
-			)
 		}
+		return m, m.waitForMsg()
 
 	case StreamMsg:
 		if msg.Done {
@@ -502,6 +506,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.waitForMsg()
 
 	case protocol.TaskProgress:
+		if shouldHideTaskProgress(msg) {
+			return m, m.waitForMsg()
+		}
 		// INTERLEAVED BLOCKS: Update block-based task tree
 		m.updateBlockTaskTree(msg)
 
@@ -533,6 +540,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.UpdateViewport()
 		// Return both waitForMsg AND Spinner.Tick for animation
 		return m, tea.Batch(m.waitForMsg(), m.Spinner.Tick)
+
+	case CommandEventMsg:
+		m.applyCommandEvent(msg.Event)
+		m.UpdateViewport()
+		if m.IsLoading {
+			return m, tea.Batch(m.waitForMsg(), m.Spinner.Tick)
+		}
+		return m, m.waitForMsg()
+
+	case ToolLifecycleMsg:
+		m.applyToolLifecycleEvent(msg.Event)
+		m.UpdateViewport()
+		if m.IsLoading {
+			return m, tea.Batch(m.waitForMsg(), m.Spinner.Tick)
+		}
+		return m, m.waitForMsg()
+
+	case TimelineNoticeMsg:
+		m.applyTimelineNotice(msg)
+		m.UpdateViewport()
+		if m.IsLoading {
+			return m, tea.Batch(m.waitForMsg(), m.Spinner.Tick)
+		}
+		return m, m.waitForMsg()
 
 	case AskUserMsg:
 		m.IsLoading = false
@@ -570,7 +601,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Message.Role == "assistant" {
 			m.IsLoading = msg.Message.IsStreaming
 			if m.IsLoading {
-				m.CurrentAction = "Reflecting..." // or "Thinking..."
+				m.CurrentAction = "Working..."
 			} else {
 				m.CurrentAction = ""
 				// INTERLEAVED BLOCKS: Mark all active blocks as finished when streaming ends
@@ -648,6 +679,150 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tiCmd, vpCmd, spCmd)
 }
 
+func shouldHideTaskProgress(msg protocol.TaskProgress) bool {
+	return looksRawSystemText(msg.Event) ||
+		looksRawSystemText(msg.TaskName) ||
+		looksRawSystemText(msg.Status) ||
+		looksRawSystemText(msg.Summary) ||
+		strings.EqualFold(strings.TrimSpace(msg.Event), "task_boundary")
+}
+
+func (m Model) submitTextareaInput() (Model, tea.Cmd) {
+	input := strings.TrimSpace(m.Textarea.Value())
+	if input == "" {
+		m.Textarea.Reset()
+		return m, nil
+	}
+
+	m.Textarea.Reset()
+
+	if input == "/" {
+		m.Suggestions = m.enabledSlashCommandSuggestions("/")
+		m.SelectedSuggestion = 0
+		m.ShowSuggestions = len(m.Suggestions) > 0
+		m.UpdateViewport()
+		return m, nil
+	}
+
+	if strings.HasPrefix(input, "/") || strings.HasPrefix(input, "?") {
+		m.recordSlashHistory(input)
+		res, cmd := m.handleSlashCommand(input)
+		if strings.TrimSpace(res) != "" {
+			textBlock := m.getOrCreateTextBlock()
+			textBlock.Content += "\n" + res
+		}
+		m.UpdateViewport()
+		return m, cmd
+	}
+
+	m.appendUserBlock(input)
+	m.UpdateViewport()
+	m.IsLoading = true
+
+	cmds := []tea.Cmd{m.Spinner.Tick, m.runChatCommand(input)}
+	if m.MsgChan != nil {
+		cmds = append(cmds, m.waitForMsg())
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m Model) insertTextareaNewline() (Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.Textarea, cmd = m.Textarea.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	lc := m.Textarea.LineCount()
+	if lc < 1 {
+		lc = 1
+	}
+	if lc > 5 {
+		lc = 5
+	}
+	if m.Textarea.Height() != lc {
+		m.Textarea.SetHeight(lc)
+		m.recalculateViewportHeight()
+		m.UpdateViewport()
+	}
+	return m, cmd
+}
+
+func isCompleteSlashCommand(input string) bool {
+	input = strings.TrimSpace(input)
+	if input == "" || input == "/" {
+		return false
+	}
+	if strings.HasPrefix(input, "?") {
+		return input == "?" || strings.HasPrefix(input, "? ")
+	}
+	if !strings.HasPrefix(input, "/") {
+		return false
+	}
+	parts := strings.Fields(input)
+	if len(parts) == 0 {
+		return false
+	}
+	spec, ok := FindSlashCommand(parts[0])
+	return ok && spec.Implemented
+}
+
+func (m Model) runChatCommand(input string) tea.Cmd {
+	return func() (result tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				result = SlashCmdResMsg{
+					Command: "chat",
+					Error:   fmt.Errorf("chat runtime panic: %v", r),
+				}
+			}
+		}()
+
+		if m.Controller == nil {
+			return SlashCmdResMsg{Command: "chat", Error: fmt.Errorf("agent controller is not initialized")}
+		}
+		if m.MsgChan == nil {
+			return SlashCmdResMsg{Command: "chat", Error: fmt.Errorf("tui message channel is not initialized")}
+		}
+
+		req := agent.ChatRequestInput{
+			SessionID: m.SessionID,
+			Content:   input,
+			Via:       "cli",
+		}
+
+		fullResponse := ""
+		m.MsgChan <- StreamMsg{Content: "**Ricochet**: ", Done: false}
+
+		err := m.Controller.Chat(context.Background(), req, func(update interface{}) {
+			switch update := update.(type) {
+			case agent.ChatUpdate:
+				m.forwardChatUpdate(update, &fullResponse)
+			case protocol.TaskProgress:
+				m.MsgChan <- update
+			case protocol.CommandEvent:
+				m.MsgChan <- CommandEventMsg{Event: update}
+			case protocol.ToolLifecycleEvent:
+				m.MsgChan <- ToolLifecycleMsg{Event: update}
+			}
+		})
+		if err != nil {
+			return SlashCmdResMsg{Command: "chat", Error: err}
+		}
+
+		return StreamMsg{Done: true}
+	}
+}
+
+func (m Model) forwardChatUpdate(update agent.ChatUpdate, fullResponse *string) {
+	if update.Message == nil || fullResponse == nil {
+		return
+	}
+	if update.Message.Role != "assistant" || len(update.Message.Content) <= len(*fullResponse) {
+		return
+	}
+	diff := update.Message.Content[len(*fullResponse):]
+	m.MsgChan <- StreamMsg{Content: diff, Done: false}
+	*fullResponse = update.Message.Content
+}
+
 func (m *Model) updateSuggestions() {
 	val := m.Textarea.Value()
 	if val == "" {
@@ -657,12 +832,7 @@ func (m *Model) updateSuggestions() {
 
 	// 1. Commands
 	if val[0] == '/' && !strings.Contains(val, " ") {
-		m.Suggestions = nil
-		for _, cmd := range m.AllCommands {
-			if strings.HasPrefix(cmd, val) {
-				m.Suggestions = append(m.Suggestions, cmd)
-			}
-		}
+		m.Suggestions = m.enabledSlashCommandSuggestions(val)
 		m.ShowSuggestions = len(m.Suggestions) > 0
 		return
 	}
@@ -695,9 +865,35 @@ func (m *Model) updateSuggestions() {
 		}
 	}
 
+	if strings.HasPrefix(val, "/provider ") {
+		query := strings.TrimPrefix(val, "/provider ")
+		m.Suggestions = nil
+		actions := []string{"set", "models", "test"}
+		for _, action := range actions {
+			prefix := action + " "
+			if strings.HasPrefix(prefix, query) {
+				m.Suggestions = append(m.Suggestions, "/provider "+action)
+			}
+		}
+		if strings.Contains(query, " ") && m.Controller != nil {
+			action, providerQuery, _ := strings.Cut(query, " ")
+			if action == "set" || action == "models" || action == "test" {
+				if pm := m.Controller.GetProvidersManager(); pm != nil {
+					for _, provider := range pm.GetAvailableProviders() {
+						if strings.HasPrefix(provider.ID, providerQuery) {
+							m.Suggestions = append(m.Suggestions, fmt.Sprintf("/provider %s %s", action, provider.ID))
+						}
+					}
+				}
+			}
+		}
+		m.ShowSuggestions = len(m.Suggestions) > 0
+		return
+	}
+
 	// 2. Help (?)
 	if val == "?" {
-		m.Suggestions = m.AllCommands
+		m.Suggestions = m.enabledSlashCommandSuggestions("/")
 		m.ShowSuggestions = true
 		return
 	}
@@ -718,6 +914,63 @@ func (m *Model) updateSuggestions() {
 	}
 
 	m.ShowSuggestions = false
+}
+
+func (m *Model) enabledSlashCommandSuggestions(input string) []string {
+	candidates := SlashCommandSuggestions(input, m.ModelName == "terminal-lab")
+	if len(candidates) == 0 {
+		return nil
+	}
+	enabled := make([]string, 0, len(candidates))
+	for _, name := range candidates {
+		spec, ok := FindSlashCommand(name)
+		if !ok {
+			continue
+		}
+		if m.slashCommandDisabledReason(spec) != "" {
+			continue
+		}
+		enabled = append(enabled, name)
+	}
+	return enabled
+}
+
+func (m *Model) recordSlashHistory(input string) {
+	input = strings.TrimSpace(input)
+	if input == "" || (!strings.HasPrefix(input, "/") && !strings.HasPrefix(input, "?")) {
+		return
+	}
+	if len(m.SlashHistory) == 0 || m.SlashHistory[len(m.SlashHistory)-1] != input {
+		m.SlashHistory = append(m.SlashHistory, input)
+	}
+	m.SlashHistoryIndex = len(m.SlashHistory)
+}
+
+func (m *Model) recallSlashHistory(direction int) bool {
+	if len(m.SlashHistory) == 0 {
+		return false
+	}
+	current := strings.TrimSpace(m.Textarea.Value())
+	if current != "" && !strings.HasPrefix(current, "/") && !strings.HasPrefix(current, "?") {
+		return false
+	}
+	if m.SlashHistoryIndex < 0 || m.SlashHistoryIndex > len(m.SlashHistory) {
+		m.SlashHistoryIndex = len(m.SlashHistory)
+	}
+	m.SlashHistoryIndex += direction
+	if m.SlashHistoryIndex < 0 {
+		m.SlashHistoryIndex = 0
+	}
+	if m.SlashHistoryIndex >= len(m.SlashHistory) {
+		m.SlashHistoryIndex = len(m.SlashHistory)
+		m.Textarea.Reset()
+		m.SelectedSuggestion = 0
+		return true
+	}
+	m.Textarea.SetValue(m.SlashHistory[m.SlashHistoryIndex])
+	m.Textarea.SetCursor(len(m.Textarea.Value()))
+	m.SelectedSuggestion = 0
+	return true
 }
 
 // populateFileSuggestions helper
@@ -761,8 +1014,8 @@ func (m *Model) selectSuggestion() bool {
 	m.ShowSuggestions = false
 	m.SelectedSuggestion = 0
 
-	// Auto-exec check
-	autoExec := map[string]bool{"/init": true, "/status": true, "/clear": true, "/exit": true, "/help": true}
+	// Auto-exec only safe, implemented commands. Legacy placeholders stay hidden.
+	autoExec := map[string]bool{"/status": true, "/clear": true, "/exit": true, "/help": true, "/version": true}
 	if autoExec[sug] {
 		m.Textarea.SetValue(sug)
 		return true
@@ -806,12 +1059,14 @@ func (m *Model) recalculateViewportHeight() {
 	// Must match RenderTaskDashboard logic:
 	// Border(2) + Title/Pad(2) = 4 overhead
 	// Plus 1 line per task
-	pm := m.Controller.GetPlanManager()
-	if pm != nil {
-		taskCount := len(pm.GetTasks())
-		if taskCount > 0 {
-			dashboardHeight := taskCount + 4
-			layoutReserved += dashboardHeight
+	if m.Controller != nil {
+		pm := m.Controller.GetPlanManager()
+		if pm != nil {
+			taskCount := len(pm.GetTasks())
+			if taskCount > 0 {
+				dashboardHeight := taskCount + 4
+				layoutReserved += dashboardHeight
+			}
 		}
 	}
 

@@ -75,17 +75,18 @@ func BuildEphemeralMessage(ctx EphemeralContext) string {
 </artifact_reminder>`)
 	}
 
-	// Session-scoped artifact reminder
-	artifactPath := ".resolved"
+	// Session-scoped artifact reminder for durable user-facing deliverables.
+	artifactPath := ".ricochet/artifacts/filename.resolved"
 	if ctx.SessionID != "" {
-		artifactPath = fmt.Sprintf(".ricochet/brain/%s/filename.resolved", ctx.SessionID)
+		artifactPath = fmt.Sprintf(".ricochet/artifacts/%s/filename.resolved", ctx.SessionID)
 	}
 
 	reminders = append(reminders, fmt.Sprintf(`<communication_reminder>
 📢 LARGE OUTPUT RULE:
-- For requested implementation plans, use submit_plan instead of write_file.
-- For non-plan reports/analysis exceeding 500 words, use write_file.
-- **DIRECTORY**: Save internal reports to: %s
+- For requested implementation plans, use submit_plan.
+- For analysis and reviews, answer in chat by default.
+- Create a durable artifact only when the user asks for a file, the content is too large for chat, or the result must be edited later.
+- When you create a user-facing artifact, prefer: %s
 - Use the '.resolved' extension for final artifacts.
 </communication_reminder>`, artifactPath))
 

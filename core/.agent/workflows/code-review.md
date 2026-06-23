@@ -1,38 +1,50 @@
 ---
-description: Automated code review using multiple specialized agents (Silent Failure Hunter, PR Test Analyzer) with a final consolidated report.
+name: code-review
+description: Review code for actionable defects and regression risk.
+version: "1"
+command: /code-review
+risk: low
+inputs:
+  - name: input
+    description: Diff, branch, file, PR, or feature area to review.
+    required: false
+steps:
+  - id: scope
+    description: Establish review scope.
+    type: agent
+    action: |-
+      Review target:
+      {{input}}
+
+      Determine the diff, files, or feature area under review. Read enough surrounding code to understand behavior and contracts before judging.
+  - id: findings
+    description: Identify actionable issues.
+    type: agent
+    action: |-
+      Look for bugs, regressions, security issues, data-loss risks, concurrency problems, missing error handling, and missing tests for changed behavior. Do not list style nits or speculative preferences.
+  - id: coverage
+    description: Check verification gaps.
+    type: agent
+    action: |-
+      Inspect tests or verification evidence related to the review scope. Identify missing tests only when they correspond to a concrete behavioral risk.
+  - id: report
+    description: Return review findings first.
+    type: agent
+    action: |-
+      Report findings first, ordered by severity. Each finding must include severity, file path, line or tight range when available, why it is a real risk, and a concrete fix direction. If there are no findings, say so clearly and mention residual test gaps.
+verification:
+  - Inspect the relevant diff or files and enough surrounding code to validate each finding.
+  - Check tests only for concrete behavior risks.
+forbidden_actions:
+  - Do not edit code during review.
+  - Do not report style nits or speculative preferences.
+  - Do not bury findings after a summary.
+completion_criteria:
+  - Findings are ordered by severity and include file/line when available.
+  - Each finding explains impact and fix direction.
+  - If no findings exist, final output says so and names residual risk.
 ---
 
-# Unified Code Review Workflow
+# Code Review
 
-This workflow performs a comprehensive audit of recent changes or a specific target.
-
-## Step 1: Silent Failure Analysis
-> **Silent Failure Hunter** is checking for swallowed errors...
-
-Action: ` + "`" + `!mode silent-failure-hunter
-Check the changes in {{input}} (or recent changes if not specified) for swallowed errors, empty catch blocks, or unsafe error handling. Report only HIGH confidence issues.` + "`" + `
-
-## Step 2: Test Coverage Analysis
-> **PR Test Analyzer** is verifying test quality...
-
-Action: ` + "`" + `!mode pr-test-analyzer
-Analyze the test coverage for {{input}}. Are the added tests sufficient? Do they cover edge cases? Report only CRITICAL gaps.` + "`" + `
-
-## Step 3: General Code Audit
-> **Code Auditor** is checking for style and logic...
-
-Action: ` + "`" + `!mode auditor
-Review {{input}} for general code quality, variable naming, and logic simplifications.` + "`" + `
-
-## Step 4: Scorekeeper & Consolidation
-> **Scorekeeper** is filtering and formatting the report...
-
-Action: ` + "`" + `!mode code
-You are the Scorekeeper. Review the findings from the previous 3 steps.
-1. Filter out any trivial or low-confidence issues (score < 80).
-2. Consolidate the remaining issues into a single report.
-3. Format as a GitHub PR comment (Markdown).
-4. Ignore "nitpicks". Focus on bugs, security risks, and maintainability.
-
-Output the final report.
-` + "`" + `
+Use this workflow for review requests. The output should prioritize defects over summary.

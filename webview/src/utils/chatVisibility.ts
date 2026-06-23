@@ -1,7 +1,51 @@
 import type { ActivityItem, ChatMessage, TaskProgress, ToolCall } from '@hooks/useChat';
 
+const RAW_CONTROL_JSON_KEYS = [
+    'script',
+    'command',
+    'path',
+    'query',
+    'TaskName',
+    'TaskStatus',
+    'TaskSummary',
+    'PredictedTaskSize',
+    'mode',
+    'plan_mode',
+    'checklist_source',
+    'content',
+    'summary',
+    'title',
+    'kind',
+    'arguments',
+    'tool',
+    'hash',
+    'start_line',
+    'end_line',
+];
+
+function isRawControlJsonText(text: string) {
+    const trimmed = text.trim();
+    if (/^(?:\{\s*\}|\[\s*\])$/.test(trimmed)) return true;
+    if (!/^\{[\s\S]*\}$/.test(trimmed)) return false;
+    try {
+        const parsed = JSON.parse(trimmed);
+        return Boolean(parsed && typeof parsed === 'object' && RAW_CONTROL_JSON_KEYS.some(key => key in parsed));
+    } catch {
+        return /"?(?:script|command|path|query|TaskName|TaskStatus|TaskSummary|PredictedTaskSize|mode|plan_mode|checklist_source|content|summary|title|kind|arguments|tool|hash|start_line|end_line)"?\s*:/.test(trimmed);
+    }
+}
+
+function isGenericBoundaryText(text: string) {
+    const normalized = text
+        .trim()
+        .replace(/[.。…]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .toLowerCase();
+    return /^(planning task|running task|planning|preparing task plan|task planning|планирование задачи|подготовка плана)$/.test(normalized);
+}
+
 export function cleanAssistantVisibleText(text: string) {
-    return text
+    const cleaned = text
         .replace(/<(?:thinking|think)>[\s\S]*?(?:<\/(?:thinking|think)>|$)/gi, '')
         .replace(/<(?:thinking|think)\b[\s\S]*$/gi, '')
         .replace(/^\s*(?:thinking|think)>?[\s\S]*$/gi, '')
@@ -12,6 +56,13 @@ export function cleanAssistantVisibleText(text: string) {
         .join('\n')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
+    const withoutEmptyJsonResidue = cleaned
+        .split(/\r?\n/)
+        .filter(line => !/^\s*(?:\{\s*\}|\[\s*\])\s*$/.test(line))
+        .join('\n')
+        .trim();
+    if (isRawControlJsonText(cleaned) || isGenericBoundaryText(withoutEmptyJsonResidue)) return '';
+    return cleaned;
 }
 
 export function isMeaningfulTaskProgress(progress?: TaskProgress | null): boolean {
@@ -38,12 +89,13 @@ function parseToolArguments(tool: ToolCall): Record<string, unknown> {
 
 export function isRenderableActivity(activity?: ActivityItem | null): boolean {
     if (!activity) return false;
+    if (String(activity.type) === 'task_boundary') return false;
     return Boolean(activity.file || activity.query || activity.results || activity.type === 'edit');
 }
 
 export function isRenderableToolCall(tool?: ToolCall | null): boolean {
     if (!tool?.name) return false;
-    if (tool.name === 'task_boundary') return false;
+    if (tool.name === 'task_boundary' || tool.name === 'retrieve_context_original') return false;
     const args = parseToolArguments(tool);
     if (tool.name === 'command_status') {
         const id = String(args.id || '');
@@ -74,7 +126,7 @@ export function hasRenderableArtifacts(message?: Partial<ChatMessage> | null): b
 export function isRenderableChatMessage(message?: Partial<ChatMessage> | null): boolean {
     if (!message) return false;
     if (message.role === 'user' || message.role === 'system') {
-        return Boolean((message.content || '').trim());
+        return Boolean((message.content || '').trim() || (message as any).contextFiles?.length || (message as any).context_files?.length);
     }
     if (message.role !== 'assistant') return false;
     return Boolean(

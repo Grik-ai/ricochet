@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -18,18 +19,23 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/gorilla/websocket"
 	"github.com/igoryan-dao/ricochet/internal/agent"
+	bridgepkg "github.com/igoryan-dao/ricochet/internal/bridge"
+	bridgeproto "github.com/igoryan-dao/ricochet/internal/bridge/proto"
 	"github.com/igoryan-dao/ricochet/internal/codegraph"
 	"github.com/igoryan-dao/ricochet/internal/config"
+	"github.com/igoryan-dao/ricochet/internal/format"
 	"github.com/igoryan-dao/ricochet/internal/host"
 	"github.com/igoryan-dao/ricochet/internal/livemode"
 	"github.com/igoryan-dao/ricochet/internal/mcp"
 	"github.com/igoryan-dao/ricochet/internal/modes"
+	"github.com/igoryan-dao/ricochet/internal/paths"
 	"github.com/igoryan-dao/ricochet/internal/prompts"
 	"github.com/igoryan-dao/ricochet/internal/protocol"
+	"github.com/igoryan-dao/ricochet/internal/remote"
 	"github.com/igoryan-dao/ricochet/internal/server"
 	"github.com/igoryan-dao/ricochet/internal/tui"
+	"github.com/igoryan-dao/ricochet/internal/version"
 	"github.com/igoryan-dao/ricochet/internal/workflow"
-	"github.com/mattn/go-isatty"
 	"github.com/muesli/termenv"
 )
 
@@ -43,7 +49,24 @@ var (
 
 	// Server Hub
 	wsHub *WsHub
+
+	remoteSessionBindings sync.Map
 )
+
+func debugLogsEnabled() bool {
+	switch strings.ToLower(os.Getenv("RICOCHET_DEBUG")) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func logLiveModeInitError(err error) {
+	if debugLogsEnabled() {
+		log.Printf("Warning: Failed to create LiveMode controller: %v", err)
+	}
+}
 
 // StdioWriter implements server.ResponseWriter for Stdio
 type StdioWriter struct{}
@@ -73,6 +96,137 @@ type BroadcastWriter struct {
 func (w *BroadcastWriter) Send(msg interface{}) error {
 	w.hub.Broadcast(msg)
 	return nil
+}
+
+type DiscardWriter struct{}
+
+func (w *DiscardWriter) Send(msg interface{}) error { return nil }
+
+type BridgeWriter struct {
+	client    *bridgepkg.Client
+	eventID   string
+	endpoint  BridgeEndpoint
+	sessionID string
+	lastText  string
+	sentFinal bool
+	mu        sync.Mutex
+}
+
+func (w *BridgeWriter) Send(msg interface{}) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	var rpc protocol.RPCMessage
+	if err := json.Unmarshal(data, &rpc); err != nil {
+		return err
+	}
+
+	switch rpc.Type {
+	case "chat_update":
+		var payload struct {
+			Message *agent.ChatMessage `json:"message"`
+		}
+		if err := json.Unmarshal(rpc.Payload, &payload); err != nil || payload.Message == nil {
+			return nil
+		}
+		if payload.Message.Role != "assistant" || strings.TrimSpace(payload.Message.Content) == "" {
+			return nil
+		}
+		w.mu.Lock()
+		w.lastText = payload.Message.Content
+		shouldSend := !payload.Message.IsStreaming && !w.sentFinal
+		if shouldSend {
+			w.sentFinal = true
+		}
+		w.mu.Unlock()
+		if shouldSend {
+			return w.sendText(payload.Message.Content)
+		}
+	case "message_queued":
+		_ = w.sendText("📥 Command queued for the current Ricochet run.")
+		_ = w.client.AckEvent(w.eventID, "completed", "")
+	case "response":
+		if rpc.Error != "" {
+			_ = w.client.AckEvent(w.eventID, "failed", rpc.Error)
+			return w.sendText("❌ " + rpc.Error)
+		}
+		w.mu.Lock()
+		text := w.lastText
+		alreadySent := w.sentFinal
+		if text != "" && !alreadySent {
+			w.sentFinal = true
+		}
+		w.mu.Unlock()
+		if text != "" && !alreadySent {
+			_ = w.sendText(text)
+		}
+		_ = w.client.AckEvent(w.eventID, "completed", "")
+	}
+	return nil
+}
+
+func (w *BridgeWriter) sendText(text string) error {
+	if strings.TrimSpace(text) == "" || w.endpoint.IsZero() {
+		return nil
+	}
+	platform := firstNonEmptyString(w.endpoint.Platform, "telegram")
+	outText := text
+	parseMode := ""
+	if platform == "telegram" {
+		outText = format.ToTelegramHTML(text)
+		parseMode = "HTML"
+	}
+	return w.client.Send(&bridgeproto.BridgeEvent{
+		SessionId: w.sessionID,
+		Payload: &bridgeproto.BridgeEvent_OutboundMessage{
+			OutboundMessage: &bridgeproto.OutboundMessage{
+				Envelope: &bridgeproto.Envelope{
+					SessionId:     w.sessionID,
+					Platform:      platform,
+					ChatId:        w.endpoint.ChatID,
+					ChannelId:     w.endpoint.ChannelID,
+					ThreadId:      w.endpoint.ThreadID,
+					UserId:        w.endpoint.UserID,
+					CorrelationId: w.eventID,
+				},
+				Text:      outText,
+				ParseMode: parseMode,
+			},
+		},
+	})
+}
+
+type BridgeEndpoint struct {
+	Platform  string
+	ChatID    int64
+	ChannelID string
+	ThreadID  string
+	UserID    string
+}
+
+func (e BridgeEndpoint) Key() string {
+	switch e.Platform {
+	case "discord":
+		if e.ThreadID != "" {
+			return "discord:channel:" + e.ChannelID + ":thread:" + e.ThreadID
+		}
+		if e.ChannelID != "" {
+			return "discord:channel:" + e.ChannelID
+		}
+		if e.UserID != "" {
+			return "discord:dm:" + e.UserID
+		}
+	case "telegram", "":
+		if e.ChatID != 0 {
+			return fmt.Sprintf("telegram:chat:%d", e.ChatID)
+		}
+	}
+	return ""
+}
+
+func (e BridgeEndpoint) IsZero() bool {
+	return e.Key() == ""
 }
 
 type WsHub struct {
@@ -125,6 +279,249 @@ func (h *WsHub) Broadcast(msg interface{}) {
 	}
 }
 
+func startCloudBridgeClient(ctx context.Context, cwd string, handler *server.Handler) {
+	cloudURL := strings.TrimSpace(os.Getenv("RICOCHET_CLOUD_URL"))
+	if cloudURL == "" {
+		return
+	}
+	sessionID := strings.TrimSpace(os.Getenv("RICOCHET_SESSION_ID"))
+	if sessionID == "" {
+		sessionID = "session_" + paths.GetWorkspaceHash(cwd)
+	}
+	client := bridgepkg.NewClient(cloudURL, sessionID)
+	log.Printf("Cloud bridge enabled for session %s", sessionID)
+	go client.Run(ctx)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				client.Close()
+				return
+			case event := <-client.Incoming():
+				if event == nil {
+					continue
+				}
+				bridgeSessionID, endpoint, eventID, text := extractBridgeInbound(event, sessionID)
+				if strings.TrimSpace(text) == "" {
+					continue
+				}
+				go handleCloudBridgeText(handler, client, bridgeSessionID, endpoint, eventID, text)
+			}
+		}
+	}()
+}
+
+func extractBridgeInbound(event *bridgeproto.BridgeEvent, fallbackSessionID string) (string, BridgeEndpoint, string, string) {
+	sessionID := firstNonEmptyString(event.GetSessionId(), fallbackSessionID)
+	if msg := event.GetInboundMessage(); msg != nil {
+		env := msg.GetEnvelope()
+		if env != nil {
+			sessionID = firstNonEmptyString(env.GetSessionId(), sessionID)
+		}
+		text := msg.GetText()
+		if text == "" {
+			text = msg.GetCallbackData()
+		}
+		return sessionID, endpointFromEnvelope(env), env.GetEventId(), text
+	}
+	if msg := event.GetIncomingMessage(); msg != nil {
+		return sessionID, BridgeEndpoint{Platform: firstNonEmptyString(msg.GetPlatform(), "telegram"), ChatID: msg.GetChatId()}, "", msg.GetBody()
+	}
+	if control := event.GetSessionControl(); control != nil {
+		env := control.GetEnvelope()
+		if env != nil {
+			sessionID = firstNonEmptyString(control.GetTargetSessionId(), env.GetSessionId(), sessionID)
+			return sessionID, endpointFromEnvelope(env), env.GetEventId(), control.GetBody()
+		}
+	}
+	return sessionID, BridgeEndpoint{}, "", ""
+}
+
+func endpointFromEnvelope(env *bridgeproto.Envelope) BridgeEndpoint {
+	if env == nil {
+		return BridgeEndpoint{}
+	}
+	return BridgeEndpoint{
+		Platform:  firstNonEmptyString(env.GetPlatform(), "telegram"),
+		ChatID:    env.GetChatId(),
+		ChannelID: env.GetChannelId(),
+		ThreadID:  env.GetThreadId(),
+		UserID:    env.GetUserId(),
+	}
+}
+
+func handleCloudBridgeText(handler *server.Handler, client *bridgepkg.Client, sessionID string, endpoint BridgeEndpoint, eventID, text string) {
+	delivery := "queue"
+	content := strings.TrimSpace(text)
+	activeSessionID := remoteActiveSessionID(endpoint, sessionID)
+	if strings.HasPrefix(content, "/steer ") {
+		delivery = "steer"
+		content = strings.TrimSpace(strings.TrimPrefix(content, "/steer "))
+	}
+	if strings.HasPrefix(content, "/help") {
+		writer := &BridgeWriter{client: client, eventID: eventID, endpoint: endpoint, sessionID: activeSessionID}
+		_ = writer.sendText("Safe remote commands:\n\n" + strings.Join(remote.SafeSlashCommands(), "\n"))
+		_ = client.AckEvent(eventID, "completed", "")
+		return
+	}
+	if !remote.IsSafeSlashCommand(content) {
+		writer := &BridgeWriter{client: client, eventID: eventID, endpoint: endpoint, sessionID: activeSessionID}
+		_ = writer.sendText("⚠️ This slash command is local-only and cannot be executed from remote control. Send `/help` for safe remote commands.")
+		_ = client.AckEvent(eventID, "rejected", "unsafe remote command")
+		return
+	}
+	if strings.HasPrefix(content, "/status") {
+		writer := &BridgeWriter{client: client, eventID: eventID, endpoint: endpoint, sessionID: activeSessionID}
+		_ = writer.sendText(fmt.Sprintf("🟢 Ricochet is online.\n\nActive session: `%s`", activeSessionID))
+		_ = client.AckEvent(eventID, "completed", "")
+		return
+	}
+	if strings.HasPrefix(content, "/sessions") {
+		writer := &BridgeWriter{client: client, eventID: eventID, endpoint: endpoint, sessionID: activeSessionID}
+		_ = writer.sendText(remoteSessionsText(handler, activeSessionID))
+		_ = client.AckEvent(eventID, "completed", "")
+		return
+	}
+	if strings.HasPrefix(content, "/queue") {
+		ensureRemoteSession(handler, activeSessionID)
+		writer := &BridgeWriter{client: client, eventID: eventID, endpoint: endpoint, sessionID: activeSessionID}
+		_ = writer.sendText(remoteQueueText(handler, activeSessionID))
+		_ = client.AckEvent(eventID, "completed", "")
+		return
+	}
+	if strings.HasPrefix(content, "/cancel") {
+		canceled := false
+		if handler.Agent != nil {
+			canceled = handler.Agent.AbortSession(activeSessionID)
+		}
+		writer := &BridgeWriter{client: client, eventID: eventID, endpoint: endpoint, sessionID: activeSessionID}
+		if canceled {
+			_ = writer.sendText(fmt.Sprintf("🛑 Cancel requested for session `%s`.", activeSessionID))
+		} else {
+			_ = writer.sendText(fmt.Sprintf("ℹ️ No active run found for session `%s`.", activeSessionID))
+		}
+		_ = client.AckEvent(eventID, "completed", "")
+		return
+	}
+	if strings.HasPrefix(content, "/new") {
+		newSessionID := fmt.Sprintf("s_remote_%d", time.Now().UnixMilli())
+		ensureRemoteSession(handler, newSessionID)
+		remoteSessionBindings.Store(endpoint.Key(), newSessionID)
+		writer := &BridgeWriter{client: client, eventID: eventID, endpoint: endpoint, sessionID: newSessionID}
+		_ = writer.sendText(fmt.Sprintf("🆕 New remote session started: `%s`", newSessionID))
+		_ = client.AckEvent(eventID, "completed", "")
+		return
+	}
+	if strings.HasPrefix(content, "/switch ") {
+		target := strings.TrimSpace(strings.TrimPrefix(content, "/switch "))
+		if target != "" {
+			ensureRemoteSession(handler, target)
+			remoteSessionBindings.Store(endpoint.Key(), target)
+			writer := &BridgeWriter{client: client, eventID: eventID, endpoint: endpoint, sessionID: target}
+			_ = writer.sendText(fmt.Sprintf("✅ Switched to session: `%s`", target))
+			_ = client.AckEvent(eventID, "completed", "")
+			return
+		}
+	}
+	ensureRemoteSession(handler, activeSessionID)
+	payload := map[string]interface{}{
+		"content":    content,
+		"session_id": activeSessionID,
+		"via":        "cloud",
+		"run_id":     fmt.Sprintf("cloud-%d", time.Now().UnixMilli()),
+		"delivery":   delivery,
+	}
+	writer := &BridgeWriter{client: client, eventID: eventID, endpoint: endpoint, sessionID: activeSessionID}
+	handler.HandleMessage(protocol.RPCMessage{
+		ID:      eventID,
+		Type:    "chat_message",
+		Payload: protocol.EncodeRPC(payload),
+	}, writer)
+}
+
+func remoteSessionsText(handler *server.Handler, activeSessionID string) string {
+	if handler.Agent == nil {
+		return "⚠️ Agent is not ready."
+	}
+	sessions := handler.Agent.ListSessions()
+	if len(sessions) == 0 {
+		return "📭 No sessions yet."
+	}
+	var sb strings.Builder
+	sb.WriteString("🧭 Remote sessions:\n\n")
+	for i, session := range sessions {
+		if i >= 8 {
+			sb.WriteString(fmt.Sprintf("…and %d more", len(sessions)-i))
+			break
+		}
+		marker := " "
+		if session.ID == activeSessionID {
+			marker = "•"
+		}
+		sb.WriteString(fmt.Sprintf("%s `%s` — $%.4f\n", marker, session.ID, session.TotalCost))
+	}
+	return sb.String()
+}
+
+func remoteQueueText(handler *server.Handler, sessionID string) string {
+	if handler.Agent == nil {
+		return "⚠️ Agent is not ready."
+	}
+	session := handler.Agent.GetSession(sessionID)
+	if session == nil || len(session.MessageQueue) == 0 {
+		return "📭 Queue is empty."
+	}
+	var sb strings.Builder
+	sb.WriteString("📥 Queued commands:\n\n")
+	for i, queued := range session.MessageQueue {
+		if i >= 5 {
+			sb.WriteString(fmt.Sprintf("…and %d more", len(session.MessageQueue)-i))
+			break
+		}
+		sb.WriteString(fmt.Sprintf("%d. `%s` — %s\n", i+1, queued.Delivery, truncateBridgeText(queued.Text)))
+	}
+	return sb.String()
+}
+
+func truncateBridgeText(text string) string {
+	text = strings.TrimSpace(text)
+	if len(text) <= 120 {
+		return text
+	}
+	return text[:117] + "..."
+}
+
+func remoteActiveSessionID(endpoint BridgeEndpoint, fallback string) string {
+	if value, ok := remoteSessionBindings.Load(endpoint.Key()); ok {
+		if sessionID, ok := value.(string); ok && strings.TrimSpace(sessionID) != "" {
+			return sessionID
+		}
+	}
+	return fallback
+}
+
+func ensureRemoteSession(handler *server.Handler, sessionID string) {
+	if strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	handler.HandleMessage(protocol.RPCMessage{
+		ID:   "bridge-create-" + sessionID,
+		Type: "create_session",
+		Payload: protocol.EncodeRPC(map[string]string{
+			"session_id": sessionID,
+		}),
+	}, &DiscardWriter{})
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -138,10 +535,6 @@ func main() {
 
 	log.SetPrefix("[ricochet-core] ")
 	log.SetOutput(os.Stderr)
-
-	fmt.Println("\n\n********************************************************")
-	fmt.Println("* RICOCHET CORE v2.0 - BUILD UPDATED: 2026-04-15 15:30 *")
-	fmt.Println("********************************************************")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -162,108 +555,9 @@ func main() {
 		cwd = "."
 	}
 
-	// Initialize Settings Store
-	var errStore error
-	settingsStore, errStore = config.NewStore()
-	if errStore != nil {
-		log.Printf("Warning: Failed to initialize settings store: %v", errStore)
-	}
-
-	settings := settingsStore.Get()
-
-	// Initialize ProvidersManager early to allow key resolution from .env.local
-	configPath := config.FindConfigFile()
-	pm, err := config.NewProvidersManager(configPath)
-	if err != nil {
-		log.Printf("Warning: Failed to initialize ProvidersManager: %v", err)
-	}
-
-	// Initialize default config (will be updated via settings)
-	cfg = &agent.Config{
-		Provider: agent.ProviderConfig{
-			Provider:    settings.Provider.Provider,
-			Model:       settings.Provider.Model,
-			APIKey:      settings.Provider.APIKey,
-			Temperature: settings.Provider.Temperature,
-			TopP:        settings.Provider.TopP,
-			MaxTokens:   settings.Provider.MaxTokens,
-		},
-		SystemPrompt:       prompts.BuildSystemPrompt(cwd),
-		MaxTokens:          4096, // Max tokens for response
-		ContextWindow:      128000,
-		EnableCodeIndex:    settings.Context.EnableCodeIndex,
-		Context:            settings.Context,
-		AutoApproval:       &settings.AutoApproval,
-		ModeModels:         settings.ModeModels,
-		Terminal:           settings.Terminal,
-		CustomInstructions: settings.CustomInstructions,
-	}
-
-	// Final API Key Resolution: Priority Settings.APIKey > ProvidersManager (Server Keys / .env.local)
-	if cfg.Provider.APIKey == "" && pm != nil {
-		resolvedKey := pm.GetAPIKey(cfg.Provider.Provider)
-		if resolvedKey != "" {
-			log.Printf("Resolved initial API Key for %s from ProvidersManager", cfg.Provider.Provider)
-			cfg.Provider.APIKey = resolvedKey
-		}
-	}
-
-	// Configure Embedding Provider if one is specified
-	if settings.Provider.EmbeddingProvider != "" {
-		embKey := settings.Provider.APIKeys[settings.Provider.EmbeddingProvider]
-		if embKey == "" && settings.Provider.Provider == settings.Provider.EmbeddingProvider {
-			embKey = settings.Provider.APIKey
-		}
-
-		cfg.EmbeddingProvider = &agent.ProviderConfig{
-			Provider: settings.Provider.EmbeddingProvider,
-			Model:    settings.Provider.EmbeddingModel,
-			APIKey:   embKey,
-		}
-	}
-
-	// Initialize Live Mode config (will be updated via settings)
-	liveModeConfig = &livemode.Config{
-		TelegramToken:  settings.LiveMode.TelegramToken,
-		TelegramChatID: settings.LiveMode.TelegramChatID,
-		AllowedUserIDs: []int64{},
-		WhisperBinary:  settings.LiveMode.WhisperBinary,
-		WhisperModel:   settings.LiveMode.WhisperModel,
-	}
-
-	// Check for flags
-	args := os.Args[1:]
-	isServer := false
-	port := "5555"
-	isStdio := false
-	forceTui := false
-	isDaemon := false
-
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--server" {
-			isServer = true
-		} else if args[i] == "--port" && i+1 < len(args) {
-			port = args[i+1]
-			i++
-		} else if args[i] == "--stdio" {
-			isStdio = true
-		} else if args[i] == "--tui" {
-			forceTui = true
-		} else if args[i] == "--daemon" {
-			isDaemon = true
-		}
-	}
-
-	if isServer || isDaemon {
-		runServerMode(ctx, cwd, port, isDaemon, pm)
-	} else if isStdio {
-		runStdioMode(ctx, cwd, pm)
-	} else if forceTui || (len(args) == 0 && isatty.IsTerminal(os.Stdout.Fd()) && isatty.IsTerminal(os.Stdin.Fd())) {
-		// Default to Interactive Mode if TTY detected OR forced
-		runInteractiveMode(ctx, cwd)
-	} else {
-		// Default to MCP mode if no args and not TTY, or handle as needed
-		runMCPMode(ctx)
+	if err := executeRoot(ctx, cwd); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
@@ -302,11 +596,11 @@ func runStdioMode(ctx context.Context, cwd string, pm *config.ProvidersManager) 
 
 	// Initialize LiveMode Controller
 	var liveCtrl *livemode.Controller
-	if liveModeConfig.TelegramToken != "" {
+	if liveModeConfig.TelegramToken != "" || liveModeConfig.DiscordToken != "" {
 		var err error
 		liveCtrl, err = livemode.New(liveModeConfig, nil)
 		if err != nil {
-			log.Printf("Warning: Failed to create LiveMode controller: %v", err)
+			logLiveModeInitError(err)
 		} else {
 			// Wire callbacks
 			liveCtrl.SetOnStatusUpdate(func(status livemode.Status) {
@@ -366,10 +660,18 @@ func runStdioMode(ctx context.Context, cwd string, pm *config.ProvidersManager) 
 			Payload: protocol.EncodeRPC(e),
 		})
 	}
+	startCloudBridgeClient(ctx, cwd, handler)
 	writer := &StdioWriter{}
 
-	// Send ready message
-	sendMessage(protocol.RPCMessage{Type: "ready", Payload: protocol.EncodeRPC(map[string]string{"version": "0.1.0"})})
+	// Send ready message with enough diagnostics to catch stale extension binaries.
+	ready := version.Get()
+	sendMessage(protocol.RPCMessage{Type: "ready", Payload: protocol.EncodeRPC(map[string]interface{}{
+		"version":         ready.Version,
+		"commit":          ready.Commit,
+		"build_time":      ready.BuildTime,
+		"executable_path": ready.ExecutablePath,
+		"cwd":             cwd,
+	})})
 
 	// Read messages from stdin
 	scanner := bufio.NewScanner(os.Stdin)
@@ -464,11 +766,11 @@ func runServerMode(ctx context.Context, cwd, port string, isDaemon bool, pm *con
 
 	// Initialize LiveMode Controller
 	var liveCtrl *livemode.Controller
-	if liveModeConfig.TelegramToken != "" {
+	if liveModeConfig.TelegramToken != "" || liveModeConfig.DiscordToken != "" {
 		var err error
 		liveCtrl, err = livemode.New(liveModeConfig, nil)
 		if err != nil {
-			log.Printf("Warning: Failed to create LiveMode controller: %v", err)
+			logLiveModeInitError(err)
 		} else {
 			// Set daemon state so UI knows if we are persistent
 			liveCtrl.SetDaemon(isDaemon)
@@ -531,6 +833,7 @@ func runServerMode(ctx context.Context, cwd, port string, isDaemon bool, pm *con
 			Payload: protocol.EncodeRPC(e),
 		})
 	}
+	startCloudBridgeClient(ctx, cwd, handler)
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -595,10 +898,8 @@ func runServerMode(ctx context.Context, cwd, port string, isDaemon bool, pm *con
 }
 
 // runMCPMode runs as MCP server (for Claude Code, Cursor, etc.)
-func runMCPMode(ctx context.Context) {
-	log.Println("Starting in MCP mode...")
-	log.Println("MCP server not yet integrated into unified binary")
-	<-ctx.Done()
+func runMCPMode(_ context.Context) error {
+	return fmt.Errorf("MCP server mode is not wired to the unified agent yet; use `ricochet daemon start` for Ricochet clients or configure MCP servers with `ricochet mcp`")
 }
 
 func sendMessage(msg interface{}) {
@@ -691,18 +992,27 @@ func runInteractiveMode(_ context.Context, cwd string) {
 
 	// Initialize Live Mode if configured
 	var liveCtrl *livemode.Controller
-	if settings.LiveMode.TelegramToken != "" {
+	if settings.LiveMode.TelegramToken != "" || settings.LiveMode.DiscordToken != "" {
 		liveConfig := &livemode.Config{
-			TelegramToken:  settings.LiveMode.TelegramToken,
-			TelegramChatID: settings.LiveMode.TelegramChatID,
-			WhisperBinary:  settings.LiveMode.WhisperBinary,
-			WhisperModel:   settings.LiveMode.WhisperModel,
+			TelegramToken:            settings.LiveMode.TelegramToken,
+			TelegramChatID:           settings.LiveMode.TelegramChatID,
+			AllowedUserIDs:           settings.LiveMode.AllowedUserIDs,
+			WhisperBinary:            settings.LiveMode.WhisperBinary,
+			WhisperModel:             settings.LiveMode.WhisperModel,
+			DiscordToken:             settings.LiveMode.DiscordToken,
+			DiscordApplicationID:     settings.LiveMode.DiscordApplicationID,
+			DiscordGuildID:           settings.LiveMode.DiscordGuildID,
+			DiscordAllowedUserIDs:    settings.LiveMode.DiscordAllowedUserIDs,
+			DiscordAllowedChannelIDs: settings.LiveMode.DiscordAllowedChannelIDs,
+			DiscordRequireMention:    settings.LiveMode.DiscordRequireMention,
+			DiscordTextMode:          settings.LiveMode.DiscordTextMode,
+			AllowRemoteSessionStart:  settings.LiveMode.AllowRemoteSessionStart,
 		}
 
 		// Re-use err
 		liveCtrl, err = livemode.New(liveConfig, nil)
 		if err != nil {
-			fmt.Printf("Warning: Failed to create LiveMode controller: %v\n", err)
+			logLiveModeInitError(err)
 		} else {
 			// Wire Callbacks
 			liveCtrl.SetAgent(controller)

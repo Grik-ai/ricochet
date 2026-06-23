@@ -13,10 +13,17 @@ import (
 
 // Workflow represents a user-defined automation workflow
 type Workflow struct {
-	Command     string         `json:"command"`     // e.g. "/release"
-	Description string         `json:"description"` // e.g. "Prepare release"
-	Content     string         `json:"content"`     // Raw markdown content
-	Steps       []WorkflowStep `json:"steps"`       // Structured steps
+	Command            string          `json:"command"`     // e.g. "/release"
+	Description        string          `json:"description"` // e.g. "Prepare release"
+	Content            string          `json:"content"`     // Raw markdown content
+	Version            string          `json:"version"`
+	Name               string          `json:"name"`
+	Risk               string          `json:"risk"`
+	Inputs             []WorkflowInput `json:"inputs,omitempty"`
+	Steps              []WorkflowStep  `json:"steps"`
+	Verification       []string        `json:"verification"`
+	ForbiddenActions   []string        `json:"forbidden_actions"`
+	CompletionCriteria []string        `json:"completion_criteria"`
 }
 
 // Manager handles loading and retrieving workflows
@@ -90,12 +97,7 @@ func (m *Manager) GetWorkflow(command string) (Workflow, bool) {
 	return wf, ok
 }
 
-// parseWorkflow reads a markdown file and extracts metadata
-// Format expectation:
-// ---
-// description: My Workflow
-// ---
-// Steps...
+// parseWorkflow reads a markdown file and extracts v1 workflow metadata.
 func (m *Manager) parseWorkflow(path string) (Workflow, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -110,6 +112,10 @@ func (m *Manager) parseWorkflow(path string) (Workflow, error) {
 		Command: command,
 		Content: string(content),
 		Steps:   []WorkflowStep{},
+	}
+
+	if strings.Contains(wf.Content, " + \"`\" + ") {
+		return Workflow{}, fmt.Errorf("contains broken template garbage")
 	}
 
 	// Parse Frontmatter
@@ -135,20 +141,102 @@ func (m *Manager) parseWorkflow(path string) (Workflow, error) {
 			frontmatter.WriteString(line + "\n")
 		}
 	}
+	if inFrontmatter {
+		return Workflow{}, fmt.Errorf("unterminated YAML frontmatter")
+	}
+	if strings.TrimSpace(frontmatter.String()) == "" {
+		return Workflow{}, fmt.Errorf("missing YAML frontmatter")
+	}
 
 	// Unmarshal YAML frontmatter
 	var def WorkflowDefinition
 	if err := yaml.Unmarshal([]byte(frontmatter.String()), &def); err != nil {
-		fmt.Printf("Warning: Failed to parse YAML frontmatter for %s: %v\n", filename, err)
+		return Workflow{}, fmt.Errorf("parse YAML frontmatter for %s: %w", filename, err)
+	}
+	if err := validateWorkflowDefinition(basename, &def); err != nil {
+		return Workflow{}, err
 	}
 
+	if def.Command != "" {
+		command = def.Command
+	}
+	wf.Command = command
+	wf.Name = def.Name
 	wf.Description = def.Description
-	wf.Steps = def.Steps // Store structured steps if available
-
-	// Fallback description
-	if wf.Description == "" {
-		wf.Description = fmt.Sprintf("Run %s workflow", basename)
-	}
+	wf.Version = def.Version
+	wf.Risk = def.Risk
+	wf.Inputs = def.Inputs
+	wf.Steps = def.Steps
+	wf.Verification = def.Verification
+	wf.ForbiddenActions = def.ForbiddenActions
+	wf.CompletionCriteria = def.CompletionCriteria
 
 	return wf, nil
+}
+
+func validateWorkflowDefinition(basename string, def *WorkflowDefinition) error {
+	if strings.TrimSpace(def.Name) == "" {
+		return fmt.Errorf("workflow %s missing name", basename)
+	}
+	if strings.TrimSpace(def.Description) == "" {
+		return fmt.Errorf("workflow %s missing description", basename)
+	}
+	if strings.TrimSpace(def.Version) != "1" {
+		return fmt.Errorf("workflow %s must declare version: \"1\"", basename)
+	}
+	if strings.TrimSpace(def.Command) != "" && !strings.HasPrefix(strings.TrimSpace(def.Command), "/") {
+		return fmt.Errorf("workflow %s command must start with /", basename)
+	}
+	if strings.TrimSpace(def.Risk) == "" {
+		return fmt.Errorf("workflow %s missing risk", basename)
+	}
+	if len(def.Steps) == 0 {
+		return fmt.Errorf("workflow %s must define at least one structured step", basename)
+	}
+	if len(def.Verification) == 0 {
+		return fmt.Errorf("workflow %s missing verification criteria", basename)
+	}
+	if len(def.ForbiddenActions) == 0 {
+		return fmt.Errorf("workflow %s missing forbidden_actions", basename)
+	}
+	if len(def.CompletionCriteria) == 0 {
+		return fmt.Errorf("workflow %s missing completion_criteria", basename)
+	}
+	for i := range def.Steps {
+		if err := validateWorkflowStep(basename, &def.Steps[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateWorkflowStep(workflowName string, step *WorkflowStep) error {
+	if strings.TrimSpace(step.ID) == "" {
+		return fmt.Errorf("workflow %s has a step without id", workflowName)
+	}
+	stepType := strings.TrimSpace(step.Type)
+	if stepType == "" {
+		step.Type = "agent"
+		stepType = "agent"
+	}
+	switch stepType {
+	case "agent":
+		if strings.TrimSpace(step.Action) == "" {
+			return fmt.Errorf("workflow %s step %s missing action", workflowName, step.ID)
+		}
+	case "parallel":
+		if len(step.Parallel) == 0 {
+			return fmt.Errorf("workflow %s step %s has no parallel substeps", workflowName, step.ID)
+		}
+		for i := range step.Parallel {
+			if err := validateWorkflowStep(workflowName, &step.Parallel[i]); err != nil {
+				return err
+			}
+		}
+	case "user_input":
+		return fmt.Errorf("workflow %s step %s uses unsupported user_input step type", workflowName, step.ID)
+	default:
+		return fmt.Errorf("workflow %s step %s has unsupported type %q", workflowName, step.ID, step.Type)
+	}
+	return nil
 }

@@ -1,21 +1,34 @@
 import { describe, expect, it } from 'vitest';
 import {
     activityToWorkEvent,
+    aggregateTaskActivityItems,
+    applyPlanDecisionResult,
     buildTaskRunViewModel,
     buildTaskTokenUsage,
     classifyTool,
+    completeActiveWorkSummaries,
+    completeRuntimeWorkSummaries,
+    completeWorkSummaryForTurn,
     closeEditRows,
     commandEventToWorkEvent,
+    hasMatchingPlanArtifact,
     hasPlanArtifact,
+    isIntermediateAssistantDraft,
     markWorkSummaryActivityHint,
     normalizeHubTasksPayload,
     normalizeWorkCommentaryText,
+    promoteCompletedIntermediateDrafts,
+    promoteLatestIntermediateDraft,
+    isWorkCommentaryText,
     parseProgressStatus,
+    rebuildWorkSummariesFromMessages,
     resolveRuntimeTurnIdForEvent,
     shouldCreateWorkCommentary,
     shouldKeepAssistantBubble,
     toolLifecycleEventToWorkEvent,
+    upsertAssistantMessage,
     upsertWorkEvents,
+    withInferredRunPhase,
     type ActivityItem,
     type ChatMessage,
     type TaskProgress,
@@ -45,6 +58,9 @@ describe('chat timeline normalization', () => {
             usageSnapshot: {
                 inputTokens: 40_000,
                 outputTokens: 12_300,
+                cachedInputTokens: 7_000,
+                cacheCreationTokens: 2_000,
+                reasoningOutputTokens: 900,
                 contextTokens: 52_300,
                 contextWindow: 1_000_000,
                 estimatedCostUsd: 0.12,
@@ -58,11 +74,18 @@ describe('chat timeline normalization', () => {
         });
 
         expect(taskRun).toMatchObject({
-            title: 'проанализируй проект',
+            title: 'Project analysis',
             status: 'running',
             completedChecklistCount: 1,
             totalChecklistCount: 2,
-            tokenUsage: { used: 52_300, max: 1_000_000, percent: 5 },
+            tokenUsage: {
+                used: 52_300,
+                max: 1_000_000,
+                percent: 5,
+                cachedInputTokens: 7_000,
+                cacheCreationTokens: 2_000,
+                reasoningOutputTokens: 900,
+            },
         });
         expect(taskRun?.checklist.map(item => item.text)).toEqual(['Analyze architecture', 'Review UI flow']);
     });
@@ -73,6 +96,30 @@ describe('chat timeline normalization', () => {
             tokens_max: 128_000,
             percentage: 50,
         }).percent).toBe(50);
+    });
+
+    it('carries cache read, cache write, and reasoning token usage', () => {
+        expect(buildTaskTokenUsage(null, {
+            inputTokens: 40_000,
+            outputTokens: 12_300,
+            cachedInputTokens: 7_000,
+            cacheCreationTokens: 2_000,
+            reasoningOutputTokens: 900,
+            contextTokens: 52_300,
+            contextWindow: 1_000_000,
+            estimatedCostUsd: 0.12,
+            requestCount: 1,
+            actualCount: 1,
+            estimatedCount: 0,
+            source: 'actual',
+        }, null)).toMatchObject({
+            used: 52_300,
+            max: 1_000_000,
+            percent: 5,
+            cachedInputTokens: 7_000,
+            cacheCreationTokens: 2_000,
+            reasoningOutputTokens: 900,
+        });
     });
 
     it('normalizes tasks_updated payloads from the task hub', () => {
@@ -105,15 +152,15 @@ describe('chat timeline normalization', () => {
         expect(taskRun?.checklist.map(item => item.text)).toEqual(['Run architecture swarm', 'Summarize findings']);
     });
 
-    it('summarizes workers and reports failed worker attention reason', () => {
+    it('summarizes agents and reports failed agent attention reason', () => {
         const taskRun = buildTaskRunViewModel({
             messages: [{ id: 'u1', role: 'user', content: 'запусти рой агентов', timestamp: 100 }],
             todos: [],
             hubTasks: [],
             workers: [
-                { id: 'w1', name: 'Audit worker', status: 'running', isActive: true },
-                { id: 'w2', name: 'Tests worker', status: 'failed', isActive: false },
-                { id: 'w3', name: 'Docs worker', status: 'queued', isActive: false },
+                { id: 'w1', name: 'Audit agent', status: 'running', isActive: true },
+                { id: 'w2', name: 'Tests agent', status: 'failed', isActive: false },
+                { id: 'w3', name: 'Docs agent', status: 'queued', isActive: false },
             ],
             taskProgress: null,
             workSummariesByTurn: {},
@@ -122,9 +169,9 @@ describe('chat timeline normalization', () => {
             isLoading: true,
         });
 
-        expect(taskRun?.workerSummary).toBe('1 worker running · 1 queued · 1 failed');
+        expect(taskRun?.workerSummary).toBe('1 agent running · 1 queued · 1 failed');
         expect(taskRun?.status).toBe('failed');
-        expect(taskRun?.attentionReason).toBe('Worker failed: Tests worker');
+        expect(taskRun?.attentionReason).toBe('Agent failed: Tests agent');
         expect(taskRun?.attentionAction).toEqual({ kind: 'open_agent', label: 'Open Agent' });
     });
 
@@ -245,6 +292,36 @@ describe('chat timeline normalization', () => {
         expect(taskRun?.completedChecklistCount).toBe(0);
         expect(taskRun?.totalChecklistCount).toBe(0);
         expect(taskRun?.statusText).toBe('Task completed');
+    });
+
+    it('normalizes generic check-project prompts into a project analysis task title', () => {
+        const summaries = upsertWorkEvents({}, 'run-check-project', 'session-1', [
+            { id: 'read-readme', type: 'read', label: 'Read', target: 'README.md', status: 'completed', timestamp: 100 },
+        ], 'completed');
+
+        const taskRun = buildTaskRunViewModel({
+            messages: [{ id: 'u1', role: 'user', content: 'hello check project', timestamp: 90, run_id: 'run-check-project' }],
+            todos: [],
+            taskProgress: {
+                task_name: 'HelloCheckProject',
+                status: 'Mission Accomplished',
+                result: 'COMPLETED',
+                mode: 'execution',
+                is_active: false,
+                run_id: 'run-check-project',
+                session_id: 'session-1',
+                timestamp: 200,
+            },
+            workSummariesByTurn: summaries,
+            usageSnapshot: null,
+            contextStatus: null,
+            isLoading: false,
+        });
+
+        expect(taskRun?.title).toBe('Project analysis');
+        expect(taskRun?.status).toBe('completed');
+        expect(taskRun?.isActive).toBe(false);
+        expect(taskRun?.statusText).toBe('Work summary ready');
     });
 
     it('infers generated project-analysis milestones as provisional when the source flag is missing', () => {
@@ -442,6 +519,82 @@ describe('chat timeline normalization', () => {
         });
     });
 
+    it('maps read line ranges from lifecycle metadata and text previews', () => {
+        const structured = toolLifecycleEventToWorkEvent({
+            event: 'tool_finished',
+            status: 'completed',
+            tool_name: 'read_file',
+            tool_use_id: 'read-lines-1',
+            args_summary: '/repo/src/main.rs',
+            affected_files: ['/repo/src/main.rs'],
+            readLineStart: 1,
+            readLineEnd: 150,
+            timestamp: 300,
+        } as any);
+
+        const textPreview = toolLifecycleEventToWorkEvent({
+            event: 'tool_finished',
+            status: 'completed',
+            tool_name: 'read_file',
+            tool_use_id: 'read-lines-2',
+            args_summary: 'src/main.rs lines 151-297',
+            affected_files: ['src/main.rs'],
+            timestamp: 320,
+        } as any);
+
+        const colonPreview = toolLifecycleEventToWorkEvent({
+            event: 'tool_finished',
+            status: 'completed',
+            tool_name: 'read_file',
+            tool_use_id: 'read-lines-3',
+            args_summary: 'src/lib.rs range 1:125',
+            affected_files: ['src/lib.rs'],
+            timestamp: 340,
+        } as any);
+
+        expect(structured).toMatchObject({ lineRange: 'L1-L150' });
+        expect(textPreview).toMatchObject({ lineRange: 'L151-L297' });
+        expect(colonPreview).toMatchObject({ lineRange: 'L1-L125' });
+    });
+
+    it('merges line ranges when repeated read events target the same file', () => {
+        const firstRead = toolLifecycleEventToWorkEvent({
+            run_id: 'run-read-ranges',
+            event: 'tool_finished',
+            status: 'completed',
+            tool_name: 'read_file',
+            tool_use_id: 'read-range-1',
+            args_summary: 'src/main.rs',
+            affected_files: ['src/main.rs'],
+            readLineStart: 1,
+            readLineEnd: 150,
+            timestamp: 100,
+        } as any) as WorkEvent;
+        const secondRead = toolLifecycleEventToWorkEvent({
+            run_id: 'run-read-ranges',
+            event: 'tool_finished',
+            status: 'completed',
+            tool_name: 'read_file',
+            tool_use_id: 'read-range-2',
+            args_summary: 'src/main.rs',
+            affected_files: ['src/main.rs'],
+            readLineStart: 151,
+            readLineEnd: 297,
+            timestamp: 200,
+        } as any) as WorkEvent;
+
+        const summaries = upsertWorkEvents(
+            upsertWorkEvents({}, 'run-read-ranges', 'session-1', [firstRead], 'running'),
+            'run-read-ranges',
+            'session-1',
+            [secondRead],
+            'running',
+        );
+
+        expect(summaries['run-read-ranges'].items).toHaveLength(1);
+        expect(summaries['run-read-ranges'].items[0].lineRange).toBe('L1-L150, L151-L297');
+    });
+
     it('surfaces failed write_file tool calls as edit failures with permission details', () => {
         const event = classifyTool({
             id: 'tool-write-script',
@@ -453,7 +606,7 @@ describe('chat timeline normalization', () => {
         });
 
         expect(event).toMatchObject({
-            type: 'edit',
+            type: 'review',
             label: 'Edit failed',
             target: 'Polybot/test_script.rs',
             path: '/Users/igoryan_dao/Polybot/test_script.rs',
@@ -476,7 +629,7 @@ describe('chat timeline normalization', () => {
 
         expect(event).toMatchObject({
             id: 'tool-write-test-script',
-            type: 'edit',
+            type: 'review',
             label: 'Edit failed',
             target: 'Polybot/test_script.rs',
             path: '/Users/igoryan_dao/Polybot/test_script.rs',
@@ -659,6 +812,10 @@ describe('chat timeline normalization', () => {
             label: 'Created',
             target: 'tests/math_tests.rs',
             path: 'tests/math_tests.rs',
+            additions: 12,
+            deletions: 0,
+            hasDiff: true,
+            reviewable: true,
             status: 'waiting',
             timestamp: 100,
         };
@@ -735,6 +892,27 @@ describe('chat timeline normalization', () => {
         });
         expect(event?.target).not.toContain('{"script"');
         expect(event?.command).not.toContain(script);
+    });
+
+    it('marks pending execute_python as waiting for approval rather than running', () => {
+        const tool: ToolCall = {
+            id: 'tool-python-pending',
+            name: 'execute_python',
+            arguments: { script: 'print("Project analysis")' },
+            status: 'pending',
+            timestamp: 240,
+        };
+
+        const event = classifyTool(tool);
+
+        expect(event).toMatchObject({
+            type: 'command',
+            label: 'Ran Python script',
+            target: 'Python script',
+            command: 'python3 <script>',
+            shell: 'python',
+            status: 'waiting',
+        });
     });
 
     it('does not render background command start acknowledgement as shell output', () => {
@@ -931,6 +1109,203 @@ describe('chat timeline normalization', () => {
         });
     });
 
+    it('keeps sequential tool lifecycle events grouped under one run id', () => {
+        const listEvent = toolLifecycleEventToWorkEvent({
+            run_id: 'run-sequential',
+            tool_name: 'list_dir',
+            status: 'completed',
+            affected_files: ['src'],
+            timestamp: 100,
+        } as any) as WorkEvent;
+        const readEvent = toolLifecycleEventToWorkEvent({
+            run_id: 'run-sequential',
+            tool_name: 'read_file',
+            status: 'completed',
+            affected_files: ['src/main.ts'],
+            timestamp: 200,
+        } as any) as WorkEvent;
+
+        const summaries = upsertWorkEvents(
+            upsertWorkEvents({}, 'run-sequential', 'session-1', [listEvent], 'running'),
+            'run-sequential',
+            'session-1',
+            [readEvent],
+            'running',
+        );
+
+        expect(Object.keys(summaries)).toEqual(['run-sequential']);
+        expect(summaries['run-sequential'].items).toHaveLength(2);
+        expect(summaries['run-sequential'].items.map(item => item.target)).toEqual(['src', 'src/main.ts']);
+    });
+
+    it('aggregates task activity bars from informative summaries when latest summary is empty', () => {
+        const readEvent: WorkEvent = {
+            id: 'read-project',
+            type: 'read',
+            label: 'Read',
+            target: 'project_analysis.md',
+            path: 'project_analysis.md',
+            status: 'completed',
+            timestamp: 100,
+        };
+        const commandEvent: WorkEvent = {
+            id: 'command-python',
+            type: 'command',
+            label: 'Ran',
+            target: 'python3 <script>',
+            command: 'python3 <script>',
+            status: 'completed',
+            timestamp: 200,
+        };
+        const summaries = {
+            'run-informative': {
+                turnId: 'run-informative',
+                status: 'completed' as const,
+                startedAt: 100,
+                completedAt: 300,
+                durationMs: 200,
+                counts: {
+                    filesRead: 1,
+                    filesExplored: 0,
+                    foldersExplored: 0,
+                    searches: 0,
+                    commands: 1,
+                    edits: 0,
+                    workers: 0,
+                    approvals: 0,
+                },
+                items: [readEvent, commandEvent],
+            },
+            'run-empty-latest': {
+                turnId: 'run-empty-latest',
+                status: 'completed' as const,
+                startedAt: 500,
+                completedAt: 510,
+                durationMs: 10,
+                counts: {
+                    filesRead: 0,
+                    filesExplored: 0,
+                    foldersExplored: 0,
+                    searches: 0,
+                    commands: 0,
+                    edits: 0,
+                    workers: 0,
+                    approvals: 0,
+                },
+                items: [],
+            },
+        };
+
+        expect(aggregateTaskActivityItems(summaries).map(item => item.id)).toEqual(['read-project', 'command-python']);
+        const taskRun = buildTaskRunViewModel({
+            messages: [],
+            todos: [],
+            workSummariesByTurn: summaries,
+            taskProgress: null,
+            usageSnapshot: null,
+            contextStatus: null,
+            isLoading: false,
+        });
+
+        expect(taskRun?.workSummary?.turnId).toBe('run-informative');
+        expect(taskRun?.activityItems?.map(item => item.id)).toEqual(['read-project', 'command-python']);
+        expect(taskRun?.activityHistoryCount).toBe(2);
+    });
+
+    it('keeps session activity bars across multiple user turns', () => {
+        const summaries = {
+            'run-first': {
+                turnId: 'run-first',
+                status: 'completed' as const,
+                startedAt: 100,
+                counts: {
+                    filesRead: 1,
+                    filesExplored: 0,
+                    foldersExplored: 0,
+                    searches: 0,
+                    commands: 0,
+                    edits: 0,
+                    workers: 0,
+                    approvals: 0,
+                },
+                items: [{
+                    id: 'read-first',
+                    type: 'read' as const,
+                    label: 'Read',
+                    target: 'README.md',
+                    path: 'README.md',
+                    status: 'completed' as const,
+                    timestamp: 100,
+                }],
+            },
+            'run-second': {
+                turnId: 'run-second',
+                status: 'running' as const,
+                startedAt: 300,
+                counts: {
+                    filesRead: 0,
+                    filesExplored: 0,
+                    foldersExplored: 0,
+                    searches: 0,
+                    commands: 1,
+                    edits: 0,
+                    workers: 0,
+                    approvals: 0,
+                },
+                items: [{
+                    id: 'command-second',
+                    type: 'command' as const,
+                    label: 'Ran',
+                    target: 'cargo test',
+                    command: 'cargo test',
+                    status: 'running' as const,
+                    timestamp: 300,
+                }],
+            },
+        };
+
+        const taskRun = buildTaskRunViewModel({
+            messages: [],
+            todos: [],
+            workSummariesByTurn: summaries,
+            taskProgress: null,
+            usageSnapshot: null,
+            contextStatus: null,
+            isLoading: true,
+        });
+
+        expect(taskRun?.workSummary?.turnId).toBe('run-second');
+        expect(taskRun?.activityItems?.map(item => item.id)).toEqual(['read-first', 'command-second']);
+        expect(taskRun?.activityHistoryCount).toBe(2);
+    });
+
+    it('renders forced-completed provisional steps as terminal instead of spinning', () => {
+        const taskRun = buildTaskRunViewModel({
+            messages: [{ id: 'u1', role: 'user', content: 'проанализируй проект', timestamp: 100 }],
+            todos: [],
+            workSummariesByTurn: {},
+            taskProgress: {
+                task_name: 'Project Analysis',
+                status: 'Provide comprehensive analysis summary',
+                mode: 'verification',
+                is_active: false,
+                steps: [
+                    'Examine project structure',
+                    'Provide comprehensive analysis summary',
+                ],
+                run_id: 'run-completed',
+                timestamp: 300,
+            },
+            usageSnapshot: null,
+            contextStatus: null,
+            isLoading: true,
+        });
+
+        expect(taskRun?.status).toBe('completed');
+        expect(taskRun?.isActive).toBe(false);
+        expect(taskRun?.checklist.map(item => item.status)).toEqual(['completed', 'completed']);
+    });
+
     it('hides completed approvals and does not count them in the summary', () => {
         const waiting: WorkEvent = {
             id: 'approval-request-1',
@@ -980,6 +1355,72 @@ describe('chat timeline normalization', () => {
         expect(summaries['run-terminal-approval'].status).toBe('completed');
         expect(summaries['run-terminal-approval'].items.find(item => item.type === 'approval')).toBeUndefined();
         expect(summaries['run-terminal-approval'].counts.approvals).toBe(0);
+    });
+
+    it('completion fallback closes stale active work summaries by run id', () => {
+        const runningRead: WorkEvent = {
+            id: 'tool-read-stale',
+            type: 'read',
+            label: 'Read',
+            target: 'src/lib.rs',
+            status: 'running',
+            timestamp: 100,
+        };
+
+        const running = upsertWorkEvents({}, 'run-stale', 'session-1', [runningRead], 'running');
+        const completed = completeWorkSummaryForTurn(running, 'run-stale', 'session-1');
+
+        expect(completed['run-stale'].status).toBe('completed');
+        expect(completed['run-stale'].items[0].status).toBe('completed');
+    });
+
+    it('completion fallback without a run id closes active summaries for the current session only', () => {
+        const sessionRunning = upsertWorkEvents({}, 'run-session', 'session-1', [], 'running');
+        const otherRunning = upsertWorkEvents(sessionRunning, 'run-other', 'session-2', [], 'running');
+
+        const completed = completeActiveWorkSummaries(otherRunning, 'session-1');
+
+        expect(completed['run-session'].status).toBe('completed');
+        expect(completed['run-other'].status).toBe('running');
+    });
+
+    it('terminal completion closes active summaries for the same session even when keyed differently', () => {
+        const exact = upsertWorkEvents({}, 'run-main', 'session-1', [], 'running');
+        const orphan = upsertWorkEvents(exact, 'tool-orphan', 'session-1', [
+            { id: 'tool-read-orphan', type: 'read', label: 'Read', target: 'src/main.ts', status: 'running', timestamp: 100 },
+        ], 'running');
+
+        const completed = completeRuntimeWorkSummaries(orphan, 'run-main', 'session-1', true);
+
+        expect(completed['run-main'].status).toBe('completed');
+        expect(completed['tool-orphan'].status).toBe('completed');
+        expect(completed['tool-orphan'].items[0].status).toBe('completed');
+    });
+
+    it('stale completion for an old run does not close a newer active run', () => {
+        const oldRun = upsertWorkEvents({}, 'run-old', 'session-1', [], 'running');
+        const newRun = upsertWorkEvents(oldRun, 'run-new', 'session-1', [
+            { id: 'tool-read-new', type: 'read', label: 'Read', target: 'src/new.ts', status: 'running', timestamp: 100 },
+        ], 'running');
+
+        const completed = completeRuntimeWorkSummaries(newRun, 'run-old', 'session-1', false);
+
+        expect(completed['run-old'].status).toBe('completed');
+        expect(completed['run-new'].status).toBe('running');
+        expect(completed['run-new'].items[0].status).toBe('running');
+    });
+
+    it('lets completed lifecycle events replace stale waiting read events', () => {
+        const waiting = upsertWorkEvents({}, 'run-1', 'session-1', [
+            { id: 'tool-read-1', type: 'read', label: 'Read', path: 'src/main.rs', status: 'waiting', timestamp: 1 },
+        ], 'running');
+        const completed = upsertWorkEvents(waiting, 'run-1', 'session-1', [
+            { id: 'tool-read-1', type: 'read', label: 'Read', path: 'src/main.rs', status: 'completed', timestamp: 2 },
+        ], 'running');
+        const terminal = completeRuntimeWorkSummaries(completed, 'run-1', 'session-1', true);
+
+        expect(terminal['run-1'].items[0].status).toBe('completed');
+        expect(terminal['run-1'].status).toBe('completed');
     });
 
     it('does not force normal streaming markdown into timeline commentary', () => {
@@ -1044,6 +1485,142 @@ describe('chat timeline normalization', () => {
         expect(shouldCreateWorkCommentary(message)).toBe(true);
     });
 
+    it('keeps long structured streaming reports in the chat answer instead of Thought', () => {
+        const report = [
+            'Анализ проекта Polybot',
+            '',
+            '## Архитектура проекта',
+            'Polybot — это Rust-трейдинговый бот для предсказательных рынков.',
+            '',
+            '### Ключевые особенности',
+            '- Получение данных из Polymarket и Binance.',
+            '- ML анализ и исполнение сделок.',
+            '- Мониторинг и Telegram оповещения.',
+            '',
+            '## Рекомендации',
+            'Добавить тестовую инфраструктуру и улучшить документацию.',
+        ].join('\n');
+        const message: ChatMessage = {
+            id: 'assistant-long-report-stream',
+            role: 'assistant',
+            content: report,
+            timestamp: 501,
+            isStreaming: true,
+            toolCalls: [{
+                id: 'tool-read',
+                name: 'read_file',
+                arguments: { path: 'project_analysis.md' },
+                status: 'completed',
+            }],
+        };
+
+        expect(isWorkCommentaryText(normalizeWorkCommentaryText(report))).toBe(false);
+        expect(shouldCreateWorkCommentary(message)).toBe(false);
+        expect(shouldKeepAssistantBubble(message)).toBe(true);
+    });
+
+    it('treats visible assistant reports with tool calls as intermediate drafts', () => {
+        const report = [
+            '# Polybot Project Comprehensive Analysis',
+            '',
+            '## Executive Summary',
+            'Polybot is a Rust trading bot.',
+            '',
+            '## Architecture',
+            'It has ingestion, analysis, and execution layers.',
+        ].join('\n');
+        const message = withInferredRunPhase({
+            id: 'assistant-report-with-tool',
+            role: 'assistant',
+            content: report,
+            timestamp: 520,
+            isStreaming: false,
+            run_id: 'run-polybot',
+            toolCalls: [{
+                id: 'tool-boundary',
+                name: 'task_boundary',
+                arguments: { TaskName: 'Polybot Project Analysis' },
+                status: 'completed',
+            }],
+        });
+
+        expect(isIntermediateAssistantDraft(message)).toBe(true);
+        expect(message.metadata?.runPhase).toBe('intermediate');
+        expect(shouldKeepAssistantBubble(message)).toBe(true);
+        expect(shouldCreateWorkCommentary(message)).toBe(false);
+    });
+
+    it('promotes the latest intermediate draft to final on completion when no final exists', () => {
+        const messages: ChatMessage[] = [
+            { id: 'user-1', role: 'user', content: 'проанализируй проект', timestamp: 1, run_id: 'run-polybot', turn_id: 'run-polybot' },
+            withInferredRunPhase({
+                id: 'assistant-draft',
+                role: 'assistant',
+                content: '# Polybot Project Comprehensive Analysis\n\n## Summary\nDone.',
+                timestamp: 2,
+                run_id: 'run-polybot',
+                turn_id: 'run-polybot',
+                isStreaming: false,
+                toolCalls: [{
+                    id: 'tool-boundary',
+                    name: 'task_boundary',
+                    arguments: { TaskName: 'Polybot Project Analysis' },
+                    status: 'completed',
+                }],
+            }),
+        ];
+
+        const promoted = promoteLatestIntermediateDraft(messages, 'run-polybot');
+        expect(promoted[1].metadata?.runPhase).toBe('final');
+        expect(isIntermediateAssistantDraft(promoted[1])).toBe(false);
+    });
+
+    it('promotes intermediate drafts deterministically when rebuilding completed history', () => {
+        const messages: ChatMessage[] = [
+            { id: 'user-1', role: 'user', content: 'проанализируй проект', timestamp: 1, run_id: 'run-polybot', turn_id: 'run-polybot' },
+            withInferredRunPhase({
+                id: 'assistant-draft',
+                role: 'assistant',
+                content: '# Polybot Project Comprehensive Analysis\n\n## Summary\nDone.',
+                timestamp: 2,
+                run_id: 'run-polybot',
+                turn_id: 'run-polybot',
+                isStreaming: false,
+                toolCalls: [{
+                    id: 'tool-boundary',
+                    name: 'task_boundary',
+                    arguments: { TaskName: 'Polybot Project Analysis' },
+                    status: 'completed',
+                }],
+            }),
+        ];
+
+        const promoted = promoteCompletedIntermediateDrafts(messages);
+        expect(promoted[1].metadata?.runPhase).toBe('final');
+    });
+
+    it('does not create Thought notes from generic Planning task or empty JSON leftovers', () => {
+        expect(normalizeWorkCommentaryText('{}')).toBe('');
+        expect(normalizeWorkCommentaryText('{ }')).toBe('');
+        expect(normalizeWorkCommentaryText('[]')).toBe('');
+        expect(normalizeWorkCommentaryText('Planning task\n\n{}')).toBe('');
+
+        expect(isWorkCommentaryText('Planning task')).toBe(false);
+        expect(shouldCreateWorkCommentary({
+            id: 'assistant-planning-task',
+            role: 'assistant',
+            content: 'Planning task\n\n{}',
+            timestamp: 502,
+            isStreaming: true,
+            toolCalls: [{
+                id: 'tool-boundary',
+                name: 'task_boundary',
+                arguments: { TaskName: 'Project Analysis' },
+                status: 'completed',
+            }],
+        })).toBe(false);
+    });
+
     it('drops raw tool argument JSON from Thought / plan commentary', () => {
         const script = 'print("Project analysis completed")';
         const rawPayload = `{"script":${JSON.stringify(script)}}`;
@@ -1065,6 +1642,7 @@ describe('chat timeline normalization', () => {
         expect(normalizeWorkCommentaryText(message.content)).toBe('Generating comprehensive project analysis report');
         expect(normalizeWorkCommentaryText(rawPayload)).toBe('');
         expect(normalizeWorkCommentaryText('{"mode":"code"}')).toBe('');
+        expect(normalizeWorkCommentaryText('{"hash":"abc","start_line":1,"end_line":100}')).toBe('');
         expect(normalizeWorkCommentaryText('{"content":"# Plan","summary":"Plan summary","title":"Implementation Plan","kind":"implementation_plan"}')).toBe('');
         expect(normalizeWorkCommentaryText('Разработка комплексного плана\n\n{"content":"# Plan","summary":"Plan summary","title":"Implementation Plan","kind":"implementation_plan"}')).toBe('Разработка комплексного плана');
 
@@ -1073,6 +1651,156 @@ describe('chat timeline normalization', () => {
             id: 'assistant-python-raw-only',
             content: rawPayload,
         })).toBe(false);
+    });
+
+    it('normalizes Polybot run noise into structured timeline events', () => {
+        expect(normalizeWorkCommentaryText('{"mode":"code"}')).toBe('');
+        expect(normalizeWorkCommentaryText('Planning task\n\n{}')).toBe('');
+
+        expect(parseProgressStatus({
+            task_name: 'Project analysis',
+            status: 'Planning task',
+            event: 'task_boundary',
+            is_active: true,
+            run_id: 'run-polybot',
+            timestamp: 600,
+        } as TaskProgress)).toBeNull();
+
+        const cargoCheck = commandEventToWorkEvent({
+            run_id: 'run-polybot',
+            command_id: 'cmd-cargo-check',
+            event: 'command_succeeded',
+            command: 'cargo check',
+            status: 'completed',
+            resultPreview: 'Finished `dev` profile',
+            exitCode: 0,
+            durationMs: 1250,
+            timestamp: 610,
+        });
+        const cargoTest = commandEventToWorkEvent({
+            run_id: 'run-polybot',
+            command_id: 'cmd-cargo-test',
+            event: 'command_failed',
+            command: 'cargo test',
+            status: 'failed',
+            resultPreview: 'xgboost-sys build failed',
+            exitCode: 101,
+            durationMs: 4500,
+            timestamp: 620,
+        });
+        const auditReject = parseProgressStatus({
+            task_name: 'Project analysis',
+            status: 'File updated, but VERIFICATION REJECTED: src/error.rs',
+            event: 'phase',
+            is_active: true,
+            run_id: 'run-polybot',
+            timestamp: 630,
+        } as TaskProgress);
+
+        const summaries = upsertWorkEvents(
+            upsertWorkEvents({}, 'run-polybot', 'session-1', [cargoCheck, cargoTest].filter(Boolean) as WorkEvent[], 'running'),
+            'run-polybot',
+            'session-1',
+            [auditReject].filter(Boolean) as WorkEvent[],
+            'failed',
+        );
+
+        expect(summaries['run-polybot'].items.filter(item => item.type === 'command').map(item => item.command)).toEqual(['cargo check', 'cargo test']);
+        expect(summaries['run-polybot'].items.find(item => item.type === 'review')).toMatchObject({
+            label: 'Edit failed',
+            status: 'failed',
+        });
+        expect(summaries['run-polybot'].items.some(item => item.target === '{"mode":"code"}' || item.target === 'Planning task')).toBe(false);
+    });
+
+    it('normalizes created Hub Tasks into first-class timeline events', () => {
+        const createdTask = parseProgressStatus({
+            task_name: 'Project task creation',
+            status: 'Created Hub Task: Fix chat timeline completion state',
+            event: 'hub_task_created',
+            result: '✅ Task created with ID: 7',
+            is_active: true,
+            run_id: 'run-hub-tasks',
+            timestamp: 640,
+        } as TaskProgress);
+
+        expect(createdTask).toMatchObject({
+            type: 'task',
+            label: 'Created Hub Task',
+            target: 'Fix chat timeline completion state',
+            status: 'completed',
+        });
+
+        const summaries = upsertWorkEvents({}, 'run-hub-tasks', 'session-1', [createdTask].filter(Boolean) as WorkEvent[], 'running');
+        expect(summaries['run-hub-tasks'].counts.tasks).toBe(1);
+        expect(aggregateTaskActivityItems(summaries).map(item => item.type)).toContain('task');
+    });
+
+    it('keeps budget-exceeded runs stopped instead of completing them after ask completion cleanup', () => {
+        const stopped = upsertWorkEvents({}, 'run-stopped', 'session-1', [], 'stopped');
+        const afterCompletion = completeRuntimeWorkSummaries(stopped, 'run-stopped', 'session-1', true);
+
+        expect(afterCompletion['run-stopped'].status).toBe('stopped');
+
+        const taskRun = buildTaskRunViewModel({
+            messages: [{ id: 'u1', role: 'user', content: 'создай задачи в Hub', timestamp: 1, run_id: 'run-stopped' }],
+            todos: [],
+            taskProgress: {
+                task_name: 'Hub Task creation',
+                status: 'Run stopped after budget limit',
+                result: 'BUDGET_EXCEEDED',
+                event: 'stopped',
+                is_active: false,
+                run_id: 'run-stopped',
+                timestamp: 2,
+            } as TaskProgress,
+            workSummariesByTurn: afterCompletion,
+            usageSnapshot: null,
+            contextStatus: null,
+            isLoading: false,
+        });
+
+        expect(taskRun?.status).toBe('stopped');
+        expect(taskRun?.statusText).toBe('Run stopped after budget limit');
+    });
+
+    it('rebuilds persisted work summaries from saved assistant tool metadata', () => {
+        const summaries = rebuildWorkSummariesFromMessages([
+            {
+                id: 'assistant-polybot-final',
+                role: 'assistant',
+                content: 'Комплексный анализ проекта Polybot\n\nКлючевые выводы и рекомендации.',
+                timestamp: 700,
+                run_id: 'run-polybot',
+                turn_id: 'run-polybot',
+                isStreaming: false,
+                toolCalls: [
+                    {
+                        id: 'cmd-cargo-check',
+                        name: 'execute_command',
+                        arguments: { command: 'cargo check' },
+                        result: 'Finished `dev` profile',
+                        status: 'completed',
+                        timestamp: 710,
+                    },
+                    {
+                        id: 'write-error-rs',
+                        name: 'write_file',
+                        arguments: { path: 'src/error.rs' },
+                        result: 'File updated, but VERIFICATION REJECTED: src/error.rs',
+                        status: 'error',
+                        timestamp: 720,
+                    },
+                ],
+            },
+        ], 'session-1');
+
+        expect(summaries['run-polybot']).toMatchObject({
+            status: 'completed',
+            sessionId: 'session-1',
+        });
+        expect(summaries['run-polybot'].items.map(item => item.type)).toEqual(['command', 'review']);
+        expect(summaries['run-polybot'].items.some(item => item.type === 'commentary')).toBe(false);
     });
 
     it('keeps assistant bubbles that carry implementation plan artifacts', () => {
@@ -1101,6 +1829,151 @@ describe('chat timeline normalization', () => {
         expect(shouldKeepAssistantBubble(message)).toBe(true);
         expect(shouldCreateWorkCommentary(message)).toBe(false);
         expect(isRenderableChatMessage(message)).toBe(true);
+    });
+
+    it('keeps final visible assistant text even when the terminal update still carries work payload', () => {
+        const message: ChatMessage = {
+            id: 'assistant-final-with-tool-metadata',
+            role: 'assistant',
+            content: 'Комплексный анализ проекта Polybot\n\nКлючевые выводы и рекомендации.',
+            timestamp: 530,
+            isStreaming: false,
+            toolCalls: [{
+                id: 'tool-read',
+                name: 'read_file',
+                arguments: { path: 'README.md' },
+                status: 'completed',
+            }],
+        };
+
+        expect(shouldKeepAssistantBubble(message)).toBe(true);
+    });
+
+    it('does not replace a long streamed final answer with a short terminal fragment', () => {
+        const longAnswer = [
+            'Комплексный анализ проекта Polybot',
+            '',
+            'Ключевые выводы:',
+            '- Архитектура проекта разделена на ingestion, execution, analysis и monitoring.',
+            '- Основные риски связаны с конфигурацией и тестовым покрытием.',
+            '- Рекомендуется усилить интеграционные тесты и документацию.',
+            '',
+            'Детальный разбор модулей: '.repeat(40),
+        ].join('\n');
+        const messages: ChatMessage[] = [{
+            id: 'assistant-final',
+            role: 'assistant',
+            content: longAnswer,
+            timestamp: 100,
+            isStreaming: true,
+            run_id: 'run-1',
+            turn_id: 'run-1',
+        }];
+
+        const next = upsertAssistantMessage(messages, {
+            id: 'assistant-final',
+            role: 'assistant',
+            content: 'Комплексный анализ проекта Polybot. Ключевые выводы.',
+            timestamp: 200,
+            isStreaming: false,
+            run_id: 'run-1',
+            turn_id: 'run-1',
+        });
+
+        expect(next).toHaveLength(1);
+        expect(next[0].isStreaming).toBe(false);
+        expect(next[0].content).toBe(longAnswer);
+    });
+
+    it('appends implementation plan artifacts instead of replacing old activity placeholders', () => {
+        const messages: ChatMessage[] = [
+            { id: 'user-old', role: 'user', content: 'old request', timestamp: 100 },
+            { id: 'activity-placeholder-old', role: 'assistant', content: '', timestamp: 110 },
+            { id: 'user-new', role: 'user', content: 'create a plan', timestamp: 200 },
+            { id: 'activity-placeholder-new', role: 'assistant', content: '', timestamp: 210 },
+        ];
+        const planMessage: ChatMessage = {
+            id: 'assistant-plan-new',
+            role: 'assistant',
+            content: '',
+            timestamp: 220,
+            artifacts: [{
+                id: 'plan-1',
+                type: 'implementation_plan',
+                title: 'Implementation Plan',
+                path: '.ricochet/artifacts/session-1/implementation_plan.md',
+                content: '# Plan',
+            }],
+        };
+
+        const next = upsertAssistantMessage(messages, planMessage);
+
+        expect(next).toHaveLength(5);
+        expect(next[next.length - 1]?.id).toBe('assistant-plan-new');
+        expect(next[1].id).toBe('activity-placeholder-old');
+        expect(next[3].id).toBe('activity-placeholder-new');
+    });
+
+    it('updates implementation plan decision status in place without clearing history', () => {
+        const messages: ChatMessage[] = [
+            { id: 'user-1', role: 'user', content: 'create a plan', timestamp: 100 },
+            {
+                id: 'assistant-plan',
+                role: 'assistant',
+                content: '',
+                timestamp: 110,
+                artifacts: [{
+                    id: 'plan-1',
+                    type: 'implementation_plan',
+                    title: 'Implementation Plan',
+                    path: '.ricochet/artifacts/session-1/implementation_plan.md',
+                    content: '# Plan',
+                }],
+            },
+            { id: 'assistant-after', role: 'assistant', content: 'still here', timestamp: 120 },
+        ];
+
+        const next = applyPlanDecisionResult(messages, {
+            session_id: 'session-1',
+            artifact_id: 'plan-1',
+            path: '.ricochet/artifacts/session-1/implementation_plan.md',
+            decision: 'revise',
+        });
+
+        expect(next).toHaveLength(messages.length);
+        expect(next.map(message => message.id)).toEqual(messages.map(message => message.id));
+        expect((next[1] as any).artifacts[0].status).toBe('revision_requested');
+        expect((next[1] as any).artifacts[0].decision).toBe('revise');
+    });
+
+    it('can match plan decision results by artifact path when session ids diverge', () => {
+        const messages: ChatMessage[] = [
+            {
+                id: 'assistant-plan',
+                role: 'assistant',
+                content: '',
+                timestamp: 110,
+                artifacts: [{
+                    id: 'plan-1',
+                    type: 'implementation_plan',
+                    title: 'Implementation Plan',
+                    path: '.ricochet/artifacts/session-1/implementation_plan.md',
+                    content: '# Plan',
+                    session_id: 'visible-session',
+                }],
+            },
+        ];
+        const payload = {
+            session_id: 'legacy-core-session',
+            artifact_id: 'plan-1',
+            path: '.ricochet/artifacts/session-1/implementation_plan.md',
+            decision: 'implement',
+            planApproved: true,
+        };
+
+        expect(hasMatchingPlanArtifact(messages, payload)).toBe(true);
+        const next = applyPlanDecisionResult(messages, payload);
+        expect((next[0] as any).artifacts[0].status).toBe('approved');
     });
 
     it('sanitizes legacy raw network errors into renderable error cards', () => {

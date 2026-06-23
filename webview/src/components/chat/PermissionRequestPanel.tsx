@@ -5,10 +5,87 @@ interface PermissionRequestPanelProps {
         id: string;
         question: string;
         choices?: string[];
+        choiceMetadata?: ChoiceOptionMetadata[];
         kind?: 'permission' | 'choice';
     };
     onResponse: (id: string, answer: string) => void;
     inline?: boolean; // When true, renders as chat message style
+}
+
+export interface ChoiceOptionMetadata {
+    value: string;
+    label?: string;
+    description?: string;
+    recommended?: boolean;
+    danger?: boolean;
+}
+
+export interface ApprovalChoiceViewModel {
+    value: string;
+    label: string;
+    description: string;
+    primary: boolean;
+    danger: boolean;
+}
+
+const GENERIC_CHOICE_DESCRIPTION = 'Send this decision to the agent.';
+
+function normalizeChoiceText(choice: string): string {
+    return choice.trim().toLowerCase();
+}
+
+function permissionChoiceLabel(choice: string): string {
+    const normalized = normalizeChoiceText(choice);
+    if (normalized === 'yes' || normalized === 'allow' || normalized === 'approve') return 'Approve';
+    if (normalized === "yes, and don't ask again for this tool" || normalized === 'always allow') return 'Always allow';
+    if (normalized === 'no' || normalized === 'deny' || normalized === 'reject') return 'Deny';
+    if (normalized === 'proceed') return 'Proceed';
+    return choice;
+}
+
+function permissionChoiceDescription(choice: string, metadata?: ChoiceOptionMetadata): string {
+    const normalized = normalizeChoiceText(choice);
+    if (metadata?.description && metadata.description !== GENERIC_CHOICE_DESCRIPTION && !/send this decision/i.test(metadata.description)) {
+        return metadata.description;
+    }
+    if (normalized === "yes, and don't ask again for this tool" || normalized === 'always allow') {
+        return 'Approve this action and stop asking for this tool category in this session.';
+    }
+    if (normalized === 'yes' || normalized === 'allow' || normalized === 'approve' || normalized === 'proceed') {
+        return 'Approve this action once.';
+    }
+    if (normalized === 'no' || normalized === 'deny' || normalized === 'reject') {
+        return 'Reject this action.';
+    }
+    return metadata?.description || GENERIC_CHOICE_DESCRIPTION;
+}
+
+function isPrimaryChoice(choice: string, metadata?: ChoiceOptionMetadata): boolean {
+    if (metadata?.recommended !== undefined) return Boolean(metadata.recommended);
+    const normalized = normalizeChoiceText(choice);
+    return normalized === 'yes' || normalized === 'allow' || normalized === 'approve' || normalized === 'always allow' || normalized === 'proceed';
+}
+
+function isDangerChoice(choice: string, metadata?: ChoiceOptionMetadata): boolean {
+    if (metadata?.danger !== undefined) return Boolean(metadata.danger);
+    const normalized = normalizeChoiceText(choice);
+    return normalized === 'no' || normalized === 'deny' || normalized === 'reject';
+}
+
+export function approvalChoiceViewModels(request: PermissionRequestPanelProps['request']): ApprovalChoiceViewModel[] {
+    const choices = request.choices?.length ? request.choices : ['Yes', 'Always Allow', 'No'];
+    return choices.map((choice, index) => {
+        const metadata = request.choiceMetadata?.find(item => item.value === choice) || request.choiceMetadata?.[index];
+        const value = metadata?.value || choice;
+        const label = permissionChoiceLabel(metadata?.label || choice);
+        return {
+            value,
+            label,
+            description: permissionChoiceDescription(choice, metadata),
+            primary: isPrimaryChoice(choice, metadata),
+            danger: isDangerChoice(choice, metadata),
+        };
+    });
 }
 
 export const PermissionRequestPanel: React.FC<PermissionRequestPanelProps> = ({ request, onResponse, inline = false }) => {
@@ -19,26 +96,7 @@ export const PermissionRequestPanel: React.FC<PermissionRequestPanelProps> = ({ 
     const description = hasStructuredTitle
         ? lines.slice(1).join('\n').trim()
         : q.trim();
-    const choices = request.choices?.length ? request.choices : ['Yes', 'Always Allow', 'No'];
-
-    const formatChoiceLabel = (choice: string) => {
-        const normalized = choice.toLowerCase();
-        if (normalized === 'yes' || normalized === 'allow') return 'Allow';
-        if (normalized === 'always allow') return 'Always Allow';
-        if (normalized === 'no' || normalized === 'deny') return 'Deny';
-        if (normalized === 'proceed') return 'Proceed';
-        return choice;
-    };
-
-    const isPrimaryChoice = (choice: string) => {
-        const normalized = choice.toLowerCase();
-        return normalized === 'yes' || normalized === 'allow' || normalized === 'always allow' || normalized === 'proceed';
-    };
-
-    const isDangerChoice = (choice: string) => {
-        const normalized = choice.toLowerCase();
-        return normalized === 'no' || normalized === 'deny';
-    };
+    const choices = approvalChoiceViewModels(request);
 
     const containerClass = inline
         ? "py-4 px-6 bg-vscode-sideBar-background/50 border-y border-blue-500/20 animate-fade-in"
@@ -63,18 +121,20 @@ export const PermissionRequestPanel: React.FC<PermissionRequestPanelProps> = ({ 
                     <div className="flex flex-wrap gap-2">
                         {choices.map((choice) => (
                             <button
-                                key={choice}
-                                onClick={() => onResponse(request.id, choice)}
+                                key={choice.value}
+                                onClick={() => onResponse(request.id, choice.value)}
+                                aria-label={`${choice.label}: ${choice.description}`}
                                 className={[
                                     'px-3 py-1.5 text-xs rounded-md transition-colors',
-                                    isPrimaryChoice(choice)
+                                    choice.primary
                                         ? 'bg-blue-600 hover:bg-blue-700 text-white'
-                                        : isDangerChoice(choice)
+                                        : choice.danger
                                             ? 'bg-red-600 hover:bg-red-700 text-white'
                                             : 'bg-vscode-button-secondaryBackground hover:bg-vscode-button-secondaryHoverBackground text-vscode-button-secondaryForeground'
                                 ].join(' ')}
+                                title={choice.description}
                             >
-                                {formatChoiceLabel(choice)}
+                                {choice.label}
                             </button>
                         ))}
                     </div>

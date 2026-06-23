@@ -17,9 +17,11 @@ export function useAgentSync(agentState: ReturnType<typeof useAgentStateMachine>
     useEffect(() => {
         const unsubscribe = onMessage((message: any) => {
             switch (message.type) {
-                case 'session_created':
-                    send({ type: 'session_created', sessionId: message.payload?.sessionId });
+                case 'session_created': {
+                    const sessionId = message.payload?.sessionId || message.payload?.session_id || message.payload?.id;
+                    if (sessionId) send({ type: 'session_created', sessionId });
                     break;
+                }
                 case 'api_req_started':
                     send({ type: 'api_req_started' });
                     break;
@@ -39,7 +41,7 @@ export function useAgentSync(agentState: ReturnType<typeof useAgentStateMachine>
                     }
                     break;
                 case 'ask_completion_result':
-                    send({ type: 'ask_completion_result' });
+                    send({ type: 'ask_completion_result', payload: message.payload });
                     break;
                 case 'permission_response_received':
                     send({ type: 'submit_input' });

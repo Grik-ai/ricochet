@@ -26,7 +26,21 @@
         "agent"
     ],
     "activationEvents": [
-        "onStartupFinished"
+        "onView:ricochet.chatView",
+        "onView:ricochet.pendingChanges",
+        "onCommand:ricochet.newChat",
+        "onCommand:ricochet.toggleLiveMode",
+        "onCommand:ricochet.openAgent",
+        "onCommand:ricochet.openHistory",
+        "onCommand:ricochet.openAccount",
+        "onCommand:ricochet.openSettings",
+        "onCommand:ricochet.installCli",
+        "onCommand:ricochet.refreshPendingChanges",
+        "onCommand:ricochet.openPendingChange",
+        "onCommand:ricochet.acceptEdit",
+        "onCommand:ricochet.rejectEdit",
+        "onCommand:ricochet.acceptHunk",
+        "onCommand:ricochet.rejectHunk"
     ],
     "main": "./dist/extension.js",
     "contributes": {
@@ -194,13 +208,18 @@
             "properties": {
                 "ricochet.grik.apiBaseUrl": {
                     "type": "string",
-                    "default": "https://grik.ai/api/v1",
+                    "default": "https://grik.io/api/v1",
                     "description": "Base URL for the Grik API used by Ricochet account, credits, and device login. For local development use http://localhost:8080/api/v1."
                 },
                 "ricochet.grik.webBaseUrl": {
                     "type": "string",
-                    "default": "https://grik.ai",
+                    "default": "https://grik.io",
                     "description": "Base URL for Grik web dashboard, registration, and billing pages."
+                },
+                "ricochet.webview.devServerUrl": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Development only. When set to a Vite dev server URL such as http://127.0.0.1:5173, Ricochet loads the webview from that server for hot reload instead of webview-dist."
                 }
             }
         }

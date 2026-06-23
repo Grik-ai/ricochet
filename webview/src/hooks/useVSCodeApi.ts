@@ -17,7 +17,7 @@ let vscodeApi: VSCodeApi | null = null;
 
 function getVSCodeApi(): VSCodeApi | null {
     if (vscodeApi) return vscodeApi;
-    if (typeof window.acquireVsCodeApi === 'function') {
+    if (typeof window !== 'undefined' && typeof window.acquireVsCodeApi === 'function') {
         vscodeApi = window.acquireVsCodeApi();
         return vscodeApi;
     }

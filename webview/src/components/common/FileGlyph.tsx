@@ -1,4 +1,27 @@
 import { memo } from 'react';
+import bashIcon from '../../assets/file-icons/bash.svg?raw';
+import cIcon from '../../assets/file-icons/c.svg?raw';
+import cppIcon from '../../assets/file-icons/cplusplus.svg?raw';
+import csharpIcon from '../../assets/file-icons/csharp.svg?raw';
+import cssIcon from '../../assets/file-icons/css.svg?raw';
+import dartIcon from '../../assets/file-icons/dart.svg?raw';
+import elixirIcon from '../../assets/file-icons/elixir.svg?raw';
+import goIcon from '../../assets/file-icons/go.svg?raw';
+import htmlIcon from '../../assets/file-icons/html5.svg?raw';
+import javaIcon from '../../assets/file-icons/java.svg?raw';
+import javascriptIcon from '../../assets/file-icons/javascript.svg?raw';
+import jsonIcon from '../../assets/file-icons/json.svg?raw';
+import kotlinIcon from '../../assets/file-icons/kotlin.svg?raw';
+import luaIcon from '../../assets/file-icons/lua.svg?raw';
+import markdownIcon from '../../assets/file-icons/markdown.svg?raw';
+import phpIcon from '../../assets/file-icons/php.svg?raw';
+import pythonIcon from '../../assets/file-icons/python.svg?raw';
+import rubyIcon from '../../assets/file-icons/ruby.svg?raw';
+import rustIcon from '../../assets/file-icons/rust.svg?raw';
+import swiftIcon from '../../assets/file-icons/swift.svg?raw';
+import typescriptIcon from '../../assets/file-icons/typescript.svg?raw';
+import wasmIcon from '../../assets/file-icons/webassembly.svg?raw';
+import zigIcon from '../../assets/file-icons/zig.svg?raw';
 
 export type FileGlyphType = 'file' | 'folder' | 'dir' | 'symbol' | 'search' | 'result' | 'definition' | 'function';
 export type FileGlyphSize = 'xs' | 'sm';
@@ -10,46 +33,79 @@ export type FileGlyphInfo =
         className: string;
     }
     | {
+        kind: 'svg';
+        svg: string;
+        className?: string;
+    }
+    | {
         kind: 'codicon';
         icon: string;
         className: string;
     };
 
 const exactFileGlyphs: Record<string, FileGlyphInfo> = {
-    'readme.md': { kind: 'badge', label: 'MD', className: 'bg-sky-500/18 text-sky-200 ring-sky-300/20' },
-    'changelog.md': { kind: 'badge', label: 'MD', className: 'bg-sky-500/18 text-sky-200 ring-sky-300/20' },
-    'package.json': { kind: 'badge', label: 'JS', className: 'bg-emerald-500/18 text-emerald-200 ring-emerald-300/20' },
-    'package-lock.json': { kind: 'badge', label: 'JS', className: 'bg-emerald-500/18 text-emerald-200 ring-emerald-300/20' },
-    'tsconfig.json': { kind: 'badge', label: 'TS', className: 'bg-blue-500/22 text-blue-100 ring-blue-300/25' },
-    'jsconfig.json': { kind: 'badge', label: 'JS', className: 'bg-yellow-500/20 text-yellow-100 ring-yellow-300/25' },
-    'cargo.toml': { kind: 'badge', label: 'RS', className: 'bg-orange-500/18 text-orange-100 ring-orange-300/25' },
-    'cargo.lock': { kind: 'badge', label: 'RS', className: 'bg-orange-500/18 text-orange-100 ring-orange-300/25' },
-    'go.mod': { kind: 'badge', label: 'GO', className: 'bg-cyan-500/18 text-cyan-100 ring-cyan-300/25' },
-    'go.sum': { kind: 'badge', label: 'GO', className: 'bg-cyan-500/18 text-cyan-100 ring-cyan-300/25' },
+    'readme.md': { kind: 'svg', svg: markdownIcon },
+    'changelog.md': { kind: 'svg', svg: markdownIcon },
+    'package.json': { kind: 'svg', svg: jsonIcon },
+    'package-lock.json': { kind: 'svg', svg: jsonIcon },
+    'tsconfig.json': { kind: 'svg', svg: typescriptIcon },
+    'jsconfig.json': { kind: 'svg', svg: javascriptIcon },
+    'cargo.toml': { kind: 'svg', svg: rustIcon },
+    'cargo.lock': { kind: 'svg', svg: rustIcon },
+    'go.mod': { kind: 'svg', svg: goIcon },
+    'go.sum': { kind: 'svg', svg: goIcon },
     '.env': { kind: 'codicon', icon: 'codicon-key', className: 'text-amber-300/65' },
     '.env.local': { kind: 'codicon', icon: 'codicon-key', className: 'text-amber-300/65' },
     '.gitignore': { kind: 'codicon', icon: 'codicon-git-branch', className: 'text-orange-300/62' },
 };
 
 const extensionGlyphs: Record<string, FileGlyphInfo> = {
-    tsx: { kind: 'badge', label: 'TSX', className: 'bg-cyan-500/18 text-cyan-100 ring-cyan-300/25' },
-    jsx: { kind: 'badge', label: 'JSX', className: 'bg-cyan-500/18 text-cyan-100 ring-cyan-300/25' },
-    ts: { kind: 'badge', label: 'TS', className: 'bg-blue-500/22 text-blue-100 ring-blue-300/25' },
-    js: { kind: 'badge', label: 'JS', className: 'bg-yellow-500/20 text-yellow-100 ring-yellow-300/25' },
-    mjs: { kind: 'badge', label: 'JS', className: 'bg-yellow-500/20 text-yellow-100 ring-yellow-300/25' },
-    cjs: { kind: 'badge', label: 'JS', className: 'bg-yellow-500/20 text-yellow-100 ring-yellow-300/25' },
-    rs: { kind: 'badge', label: 'RS', className: 'bg-orange-500/18 text-orange-100 ring-orange-300/25' },
-    go: { kind: 'badge', label: 'GO', className: 'bg-cyan-500/18 text-cyan-100 ring-cyan-300/25' },
-    py: { kind: 'badge', label: 'PY', className: 'bg-indigo-500/18 text-indigo-100 ring-indigo-300/25' },
-    md: { kind: 'badge', label: 'MD', className: 'bg-sky-500/18 text-sky-200 ring-sky-300/20' },
-    mdx: { kind: 'badge', label: 'MDX', className: 'bg-sky-500/18 text-sky-200 ring-sky-300/20' },
-    json: { kind: 'badge', label: '{}', className: 'bg-lime-500/16 text-lime-100 ring-lime-300/20' },
+    tsx: { kind: 'svg', svg: typescriptIcon },
+    jsx: { kind: 'svg', svg: javascriptIcon },
+    ts: { kind: 'svg', svg: typescriptIcon },
+    js: { kind: 'svg', svg: javascriptIcon },
+    mjs: { kind: 'svg', svg: javascriptIcon },
+    cjs: { kind: 'svg', svg: javascriptIcon },
+    rs: { kind: 'svg', svg: rustIcon },
+    go: { kind: 'svg', svg: goIcon },
+    py: { kind: 'svg', svg: pythonIcon },
+    md: { kind: 'svg', svg: markdownIcon },
+    mdx: { kind: 'svg', svg: markdownIcon },
+    json: { kind: 'svg', svg: jsonIcon },
     toml: { kind: 'badge', label: 'TOM', className: 'bg-stone-500/26 text-stone-100 ring-stone-300/20' },
     yaml: { kind: 'badge', label: 'YML', className: 'bg-purple-500/18 text-purple-100 ring-purple-300/24' },
     yml: { kind: 'badge', label: 'YML', className: 'bg-purple-500/18 text-purple-100 ring-purple-300/24' },
-    sql: { kind: 'badge', label: 'DB', className: 'bg-violet-500/18 text-violet-100 ring-violet-300/24' },
-    css: { kind: 'badge', label: 'CSS', className: 'bg-blue-500/18 text-blue-100 ring-blue-300/20' },
-    html: { kind: 'badge', label: 'HTML', className: 'bg-orange-500/18 text-orange-100 ring-orange-300/22' },
+    sql: { kind: 'codicon', icon: 'codicon-database', className: 'text-violet-300/70' },
+    db: { kind: 'codicon', icon: 'codicon-database', className: 'text-violet-300/70' },
+    sqlite: { kind: 'codicon', icon: 'codicon-database', className: 'text-violet-300/70' },
+    sqlite3: { kind: 'codicon', icon: 'codicon-database', className: 'text-violet-300/70' },
+    css: { kind: 'svg', svg: cssIcon },
+    scss: { kind: 'svg', svg: cssIcon },
+    sass: { kind: 'svg', svg: cssIcon },
+    html: { kind: 'svg', svg: htmlIcon },
+    htm: { kind: 'svg', svg: htmlIcon },
+    sh: { kind: 'svg', svg: bashIcon },
+    bash: { kind: 'svg', svg: bashIcon },
+    zsh: { kind: 'svg', svg: bashIcon },
+    c: { kind: 'svg', svg: cIcon },
+    h: { kind: 'svg', svg: cIcon },
+    cpp: { kind: 'svg', svg: cppIcon },
+    cc: { kind: 'svg', svg: cppIcon },
+    cxx: { kind: 'svg', svg: cppIcon },
+    hpp: { kind: 'svg', svg: cppIcon },
+    cs: { kind: 'svg', svg: csharpIcon },
+    java: { kind: 'svg', svg: javaIcon },
+    kt: { kind: 'svg', svg: kotlinIcon },
+    kts: { kind: 'svg', svg: kotlinIcon },
+    swift: { kind: 'svg', svg: swiftIcon },
+    rb: { kind: 'svg', svg: rubyIcon },
+    php: { kind: 'svg', svg: phpIcon },
+    lua: { kind: 'svg', svg: luaIcon },
+    ex: { kind: 'svg', svg: elixirIcon },
+    exs: { kind: 'svg', svg: elixirIcon },
+    dart: { kind: 'svg', svg: dartIcon },
+    wasm: { kind: 'svg', svg: wasmIcon },
+    zig: { kind: 'svg', svg: zigIcon },
 };
 
 const folderNames = new Set([
@@ -82,6 +138,20 @@ function extension(path = '') {
     if (name.endsWith('.d.ts')) return 'ts';
     const parts = name.split('.');
     return parts.length > 1 ? parts.pop() || '' : '';
+}
+
+function svgMarkup(rawSvg: string): string {
+    return rawSvg.replace(/<svg\b([^>]*)>/i, (_match, rawAttrs) => {
+        const attrs = String(rawAttrs || '')
+            .replace(/\s(?:width|height)="[^"]*"/gi, '')
+            .replace(/\s(?:aria-hidden|focusable)="[^"]*"/gi, '')
+            .trim();
+        const hasClass = /\sclass="/i.test(` ${attrs}`);
+        const withClass = hasClass
+            ? attrs.replace(/\sclass="([^"]*)"/i, ' class="$1 h-full w-full"')
+            : `${attrs} class="h-full w-full"`;
+        return `<svg ${withClass} aria-hidden="true" focusable="false">`;
+    });
 }
 
 export function fileGlyphInfo(path = '', type: FileGlyphType = 'file'): FileGlyphInfo {
@@ -127,6 +197,17 @@ export const FileGlyph = memo(({
                 aria-hidden="true"
                 title={title}
                 className={`codicon ${info.icon} inline-flex shrink-0 items-center justify-center ${box} ${mono ? 'text-vscode-fg/45' : info.className} ${className}`}
+            />
+        );
+    }
+
+    if (info.kind === 'svg') {
+        return (
+            <span
+                aria-hidden="true"
+                title={title}
+                className={`inline-flex shrink-0 items-center justify-center ${box} ${mono ? 'opacity-55 grayscale text-vscode-fg/55' : info.className || 'text-vscode-fg/70'} ${className}`}
+                dangerouslySetInnerHTML={{ __html: svgMarkup(info.svg) }}
             />
         );
     }

@@ -8,11 +8,57 @@ import { formatChatErrorInfo } from './chatErrors';
 import * as path from 'path';
 import * as fs from 'fs';
 
+export function isQueuedChatMessageResult(result: unknown): result is Record<string, any> {
+    if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
+    const record = result as Record<string, any>;
+    const queuedMessage = record.message;
+    return Boolean(
+        queuedMessage &&
+        typeof queuedMessage === 'object' &&
+        (record.run_id || queuedMessage.run_id) &&
+        (queuedMessage.id || record.message_id)
+    );
+}
+
+export function normalizeQueuedMessagePayload(
+    result: Record<string, any>,
+    sessionId: string | null,
+    runId: string | undefined,
+    content: string | undefined
+): Record<string, any> {
+    const queuedMessage = result.message && typeof result.message === 'object' ? result.message : {};
+    const normalizedSessionId = result.session_id || queuedMessage.session_id || sessionId || undefined;
+    const normalizedRunId = result.run_id || queuedMessage.run_id || runId;
+    const contextFiles = result.context_files || result.contextFiles || queuedMessage.context_files || queuedMessage.contextFiles || [];
+    return {
+        ...result,
+        session_id: normalizedSessionId,
+        sessionId: normalizedSessionId,
+        run_id: normalizedRunId,
+        runId: normalizedRunId,
+        context_files: contextFiles,
+        contextFiles,
+        message_id: result.message_id || queuedMessage.id,
+        queue_length: result.queue_length,
+        status: result.status || 'queued',
+        text: queuedMessage.text || content,
+        message: {
+            ...queuedMessage,
+            session_id: queuedMessage.session_id || normalizedSessionId,
+            run_id: queuedMessage.run_id || normalizedRunId,
+            text: queuedMessage.text || content,
+            context_files: contextFiles,
+            contextFiles,
+        },
+    };
+}
+
 export class ChatService {
     private isLiveModeEnabled = false;
     private diffService: DiffService;
     private readonly workspaceStateKey = 'ricochet_active_session_id';
     private readonly hydratedCoreSessions = new Set<string>();
+    private activeRunIdValue: string | null = null;
 
     // Throttling for chat updates to prevent webview crash
     private pendingChatUpdate: any = null;
@@ -38,6 +84,10 @@ export class ChatService {
         this.context.workspaceState.update(this.workspaceStateKey, sessionId);
     }
 
+    public get activeRunId(): string | null {
+        return this.activeRunIdValue;
+    }
+
     public setActiveSession(sessionId: string) {
         this.activeSessionId = sessionId;
     }
@@ -46,6 +96,9 @@ export class ChatService {
         switch (message.type) {
             case 'send_message':
                 const requestedRunId = message.payload?.run_id;
+                if (!this.activeRunIdValue) {
+                    this.activeRunIdValue = requestedRunId || null;
+                }
                 if (message.payload?.session_id && message.payload.session_id !== this.activeSessionId) {
                     this.activeSessionId = message.payload.session_id;
                 }
@@ -72,23 +125,65 @@ export class ChatService {
                 }
 
                 const requestSessionId = this.activeSessionId;
+                let timeoutWarningTimer: ReturnType<typeof setTimeout> | null = null;
 
                 // Save user message to session
                 if (requestSessionId) {
                     await this.sessionService.appendMessage(requestSessionId, {
                         role: 'user',
                         content: message.payload.content,
-                        timestamp: Date.now()
+                        timestamp: Date.now(),
+                        sessionId: requestSessionId,
+                        run_id: requestedRunId,
+                        turn_id: requestedRunId,
+                        contextFiles: message.payload.context_files || [],
+                        context_files: message.payload.context_files || []
                     });
                     await this.notifySessionMetadata(requestSessionId);
                 }
 
                 try {
-                    await this.core.send('chat_message', message.payload);
+                    timeoutWarningTimer = setTimeout(() => {
+                        if (requestedRunId && this.activeRunIdValue && this.activeRunIdValue !== requestedRunId) return;
+                        this.postMessage({
+                            type: 'task_progress',
+                            payload: {
+                                session_id: requestSessionId,
+                                run_id: requestedRunId,
+                                turn_id: requestedRunId,
+                                event: 'timeout_warning',
+                                task_name: 'Agent work',
+                                status: 'Still working. The agent has not sent a final completion yet.',
+                                summary: 'Still working',
+                                is_active: true,
+                                result: 'RUNNING',
+                                timestamp: Date.now(),
+                            }
+                        });
+                    }, 90_000);
+                    const result = await this.core.send('chat_message', message.payload);
+                    if (isQueuedChatMessageResult(result)) {
+                        const queuedPayload = normalizeQueuedMessagePayload(result, requestSessionId, requestedRunId, message.payload.content);
+                        console.log('[ChatService] Posting message_queued', {
+                            session_id: queuedPayload.session_id,
+                            run_id: queuedPayload.run_id,
+                            message_id: queuedPayload.message_id,
+                        });
+                        this.postMessage({ type: 'message_queued', payload: queuedPayload });
+                        if (!requestedRunId || this.activeRunIdValue === requestedRunId) {
+                            this.activeRunIdValue = null;
+                        }
+                        return;
+                    }
+
                     // The core promise resolves when the autonomous loop has concluded.
                     // Some short/read-only runs can finish without a final chat_update,
                     // so always release the webview input as a completion fallback.
+                    console.log('[ChatService] Posting ask_completion_result', { session_id: requestSessionId, run_id: requestedRunId });
                     this.postMessage({ type: 'ask_completion_result', payload: { session_id: requestSessionId, run_id: requestedRunId } });
+                    if (!requestedRunId || this.activeRunIdValue === requestedRunId) {
+                        this.activeRunIdValue = null;
+                    }
                 } catch (e: any) {
                     console.error('[ChatService] Error sending chat message:', e);
                     const errorInfo = this.formatChatError(e);
@@ -110,7 +205,15 @@ export class ChatService {
                             }
                         }
                     });
+                    console.log('[ChatService] Posting ask_completion_result after error', { session_id: requestSessionId, run_id: requestedRunId });
                     this.postMessage({ type: 'ask_completion_result', payload: { session_id: requestSessionId, run_id: requestedRunId } });
+                    if (!requestedRunId || this.activeRunIdValue === requestedRunId) {
+                        this.activeRunIdValue = null;
+                    }
+                } finally {
+                    if (timeoutWarningTimer) {
+                        clearTimeout(timeoutWarningTimer);
+                    }
                 }
                 break;
 
@@ -180,7 +283,7 @@ export class ChatService {
             const toolCalls = payload.message?.toolCalls;
             if (toolCalls && toolCalls.length > 0) {
                 for (const tool of toolCalls as any[]) {
-                    if (tool.status === 'pending' || tool.status === 'running' || tool.status === 'completed') {
+                    if (tool.status === 'completed') {
                         this.registerToolEditProposal(tool);
                     }
                 }
@@ -216,8 +319,9 @@ export class ChatService {
         const sessionId = payload.sessionId || this.activeSessionId;
         if (!sessionId || (this.activeSessionId && sessionId !== this.activeSessionId)) return;
 
-        await this.sessionService.updateUsage(sessionId, { ...payload, sessionId });
-        this.postMessage({ type: 'usage_update', payload: { ...payload, sessionId } });
+        const scopedPayload = { ...payload, sessionId, session_id: (payload as any).session_id || sessionId, run_id: (payload as any).run_id || this.activeRunIdValue || undefined };
+        await this.sessionService.updateUsage(sessionId, scopedPayload);
+        this.postMessage({ type: 'usage_update', payload: scopedPayload });
         await this.notifySessionMetadata(sessionId);
     }
 
@@ -231,6 +335,7 @@ export class ChatService {
 
         this.flushPendingUpdate();
         this.pendingChatUpdate = null;
+        this.activeRunIdValue = null;
 
         try {
             await this.core.send('abort_chat', { session_id: sessionId });
@@ -292,7 +397,7 @@ export class ChatService {
         }
 
         const proposal = this.buildEditProposal(filePath, toolName, args);
-        if (!proposal?.newContent) return;
+        if (!proposal) return;
 
         this.diffService.registerPendingEdit(filePath, proposal.newContent, {
             originalContent: proposal.originalContent,
@@ -316,23 +421,28 @@ export class ChatService {
         const currentContent = this.readTextIfExists(filePath);
 
         if (toolName === 'write_file' || toolName === 'write_to_file') {
-            const newContent = args.content || args.CodeContent || '';
-            if (!newContent) return undefined;
+            const newContent = Object.prototype.hasOwnProperty.call(args, 'content')
+                ? args.content
+                : args.CodeContent;
+            if (typeof newContent !== 'string') return undefined;
+            if (currentContent === newContent) return undefined;
             return {
-                originalContent: currentContent === newContent ? '' : currentContent,
+                originalContent: currentContent,
                 newContent
             };
         }
 
         const target = args.TargetContent || args.targetContent || args.target || '';
         const replacement = args.ReplacementContent || args.replacementContent || args.replacement || '';
-        if (!target && !replacement) return undefined;
+        if (!target) return undefined;
 
         if (currentContent !== undefined) {
             if (currentContent.includes(target)) {
+                const newContent = currentContent.replace(target, replacement);
+                if (newContent === currentContent) return undefined;
                 return {
                     originalContent: currentContent,
-                    newContent: currentContent.replace(target, replacement)
+                    newContent
                 };
             }
 
@@ -344,10 +454,7 @@ export class ChatService {
             }
         }
 
-        return {
-            originalContent: target,
-            newContent: replacement
-        };
+        return undefined;
     }
 
     private readTextIfExists(filePath: string): string | undefined {
@@ -406,6 +513,7 @@ export class ChatService {
         if (command === '/accept-all') {
             const edits = this.diffService.getPendingEdits();
             const files = edits.map(edit => edit.filePath).filter(Boolean);
+            const proposalIds = edits.map(edit => edit.proposalId).filter(Boolean);
             for (const edit of edits) {
                 await this.diffService.applyPendingEdit(edit.filePath);
             }
@@ -414,17 +522,27 @@ export class ChatService {
                 payload: {
                     decision: 'accepted',
                     files,
+                    proposalIds,
                     session_id: this.activeSessionId,
+                    run_id: this.activeRunIdValue || undefined,
                     timestamp: Date.now()
                 }
             });
-            this.postMessage({ type: 'pending_edits', payload: [] });
+            this.postMessage({
+                type: 'pending_edits',
+                payload: {
+                    session_id: this.activeSessionId,
+                    run_id: this.activeRunIdValue || undefined,
+                    edits: []
+                }
+            });
             return;
         }
 
         if (command === '/reject-all') {
             const edits = this.diffService.getPendingEdits();
             const files = edits.map(edit => edit.filePath).filter(Boolean);
+            const proposalIds = edits.map(edit => edit.proposalId).filter(Boolean);
             for (const edit of edits) {
                 await this.diffService.rejectPendingEdit(edit.filePath);
             }
@@ -433,11 +551,20 @@ export class ChatService {
                 payload: {
                     decision: 'rejected',
                     files,
+                    proposalIds,
                     session_id: this.activeSessionId,
+                    run_id: this.activeRunIdValue || undefined,
                     timestamp: Date.now()
                 }
             });
-            this.postMessage({ type: 'pending_edits', payload: [] });
+            this.postMessage({
+                type: 'pending_edits',
+                payload: {
+                    session_id: this.activeSessionId,
+                    run_id: this.activeRunIdValue || undefined,
+                    edits: []
+                }
+            });
             vscode.window.showInformationMessage(`Discarded all ${edits.length} pending changes.`);
             return;
         }

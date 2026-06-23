@@ -220,6 +220,19 @@ func mergeContextFileAttachments(primary []protocol.ContextFileAttachment, legac
 	return out
 }
 
+func contextFileAttachmentPaths(files []protocol.ContextFileAttachment) []string {
+	paths := make([]string, 0, len(files)*2)
+	for _, file := range files {
+		if strings.TrimSpace(file.Path) != "" {
+			paths = append(paths, file.Path)
+		}
+		if strings.TrimSpace(file.StagedPath) != "" {
+			paths = append(paths, file.StagedPath)
+		}
+	}
+	return paths
+}
+
 func languageFenceForPath(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".go":

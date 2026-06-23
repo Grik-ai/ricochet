@@ -6,6 +6,7 @@ import {
     ContextStatus,
     ToolLifecycleEventPayload,
     TodoViewPayload,
+    QueuedMessagePayload,
     UsageSnapshot,
     normalizeChatUpdate,
     normalizeInteractionRequest,
@@ -37,6 +38,8 @@ export interface ChatMessage {
     checkpointHash?: string;  // Workspace checkpoint for restore
     errorInfo?: ChatErrorInfo;
     artifacts?: Artifact[];
+    contextFiles?: ContextFilePayload[];
+    context_files?: ContextFilePayload[];
 }
 
 export interface Artifact {
@@ -48,15 +51,29 @@ export interface Artifact {
     content?: string;
     session_id?: string;
     status?: string;
+    decision?: string;
+    decision_error?: string;
 }
 
 export type WorkSummaryStatus = 'running' | 'waiting' | 'completed' | 'failed' | 'stopped' | 'rejected';
-export type WorkEventType = 'commentary' | 'read' | 'search' | 'command' | 'edit' | 'worker' | 'approval' | 'artifact' | 'error';
+export type WorkEventType = 'commentary' | 'task' | 'read' | 'search' | 'command' | 'edit' | 'review' | 'worker' | 'approval' | 'artifact' | 'error';
 
 export interface ActivityCounts {
     files?: number;
     folders?: number;
     results?: number;
+}
+
+export interface EditHunkPreview {
+    id?: string;
+    oldStart?: number;
+    oldLength?: number;
+    newStart?: number;
+    newLength?: number;
+    oldLines?: string[];
+    newLines?: string[];
+    additions?: number;
+    deletions?: number;
 }
 
 export interface ActivityEntry {
@@ -71,9 +88,17 @@ export interface WorkEvent {
     label: string;
     target?: string;
     path?: string;
+    agentId?: string;
+    lineRange?: string;
     status?: 'running' | 'completed' | 'failed' | 'waiting';
     additions?: number;
     deletions?: number;
+    state?: string;
+    hasDiff?: boolean;
+    reviewable?: boolean;
+    proposalId?: string;
+    relativePath?: string;
+    displayName?: string;
     artifactType?: string;
     command?: string;
     resultPreview?: string;
@@ -86,6 +111,8 @@ export interface WorkEvent {
     completedAt?: number;
     entries?: ActivityEntry[];
     counts?: ActivityCounts;
+    hunks?: EditHunkPreview[];
+    diffPreview?: string;
     error?: string;
     timestamp: number;
 }
@@ -94,6 +121,7 @@ export interface EditApprovalResolvedPayload {
     decision?: 'accepted' | 'rejected' | string;
     files?: string[];
     filePaths?: string[];
+    proposalIds?: string[];
     session_id?: string;
     sessionId?: string;
     run_id?: string;
@@ -140,10 +168,25 @@ export interface WorkSummary {
         searches: number;
         commands: number;
         edits: number;
+        tasks?: number;
         workers: number;
         approvals: number;
     };
     items: WorkEvent[];
+}
+
+export type QueuedTurnStatus = 'queued' | 'running' | 'failed';
+
+export interface QueuedTurnState {
+    runId: string;
+    sessionId?: string;
+    messageId?: string;
+    status: QueuedTurnStatus;
+    text?: string;
+    queueLength?: number;
+    error?: string;
+    delivery?: string;
+    timestamp: number;
 }
 
 export interface TaskMetadata {
@@ -153,6 +196,7 @@ export interface TaskMetadata {
     contextLimit: number;
     timeSpent?: number;   // in seconds
     thoughtTime?: number; // in seconds
+    runPhase?: 'intermediate' | 'final';
 }
 
 export interface ProgressStep {
@@ -210,6 +254,8 @@ export interface TaskProgress {
     segment_id?: string;
     parent_segment_id?: string;
     event?: string;
+    agent_identifier?: string;
+    agent_color?: string;
     task_name: string;
     status: string;
     summary?: string;
@@ -223,6 +269,8 @@ export interface TaskProgress {
     is_active: boolean;
     timestamp?: number;
     completed_at?: number;
+    worker_queued?: number;
+    worker_running?: number;
     tool_count?: number;
     token_count?: number;
 }
@@ -275,8 +323,13 @@ export interface TaskRunTokenUsage {
     used: number;
     max: number;
     percent: number;
+    availableTokens?: number;
+    reservedOutputTokens?: number;
     inputTokens: number;
     outputTokens: number;
+    cachedInputTokens?: number;
+    cacheCreationTokens?: number;
+    reasoningOutputTokens?: number;
     totalTokens: number;
     costUsd: number;
     source?: string;
@@ -298,6 +351,8 @@ export interface TaskRunViewModel {
     attentionReason?: string;
     attentionAction?: TaskRunAttentionAction;
     workSummary?: WorkSummary;
+    activityItems?: WorkEvent[];
+    activityHistoryCount?: number;
     reasoningText?: string;
     completionText?: string;
     completedAt?: number;
@@ -318,6 +373,49 @@ function latestUserPrompt(messages: ChatMessage[]): string {
         }
     }
     return '';
+}
+
+function expandTitleWords(text?: string): string {
+    return (text || '')
+        .replace(/([a-zа-яё])([A-ZА-ЯЁ])/g, '$1 $2')
+        .replace(/[_-]+/g, ' ')
+        .trim();
+}
+
+function normalizedTitleKey(text?: string): string {
+    return expandTitleWords(text)
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function isGenericProjectAnalysisPrompt(text?: string): boolean {
+    const normalized = normalizedTitleKey(text);
+    if (!normalized) return false;
+    return /^(hello\s+)?(check|analyze|analyse|review|inspect)\s+(the\s+)?(project|repo|repository|codebase)$/.test(normalized)
+        || /^(project|repo|repository|codebase)\s+(analysis|check|review)$/.test(normalized)
+        || /^проанализ\p{L}*\s+(проект|репозитор\p{L}*|кодовую\s+базу|кодобаз\p{L}*)$/u.test(normalized)
+        || /^(анализ|проверка)\s+(проекта|репозитор\p{L}*|кодовой\s+базы)$/u.test(normalized);
+}
+
+function taskRunTitle(progress: TaskProgress | null, messages: ChatMessage[]): string {
+    const progressTitle = trimTaskTitle(progress?.task_name);
+    const promptTitle = latestUserPrompt(messages);
+
+    if (progressTitle) {
+        const isEchoedPrompt = normalizedTitleKey(progressTitle) === normalizedTitleKey(promptTitle);
+        if ((isEchoedPrompt || isGenericProjectAnalysisPrompt(progressTitle)) && isGenericProjectAnalysisPrompt(progressTitle || promptTitle)) {
+            return 'Project analysis';
+        }
+        return progressTitle;
+    }
+
+    if (isGenericProjectAnalysisPrompt(promptTitle)) {
+        return 'Project analysis';
+    }
+
+    return promptTitle || 'Ricochet task';
 }
 
 function latestAssistantCompletion(messages: ChatMessage[]): string {
@@ -354,6 +452,15 @@ function isToolActivityText(text?: string): boolean {
         normalized.startsWith('semantic search:') ||
         normalized.startsWith('search web:') ||
         normalized.startsWith('running tool ');
+}
+
+function isGenericTimelineBoundaryText(text?: string): boolean {
+    const normalized = (text || '')
+        .trim()
+        .replace(/[.。…]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .toLowerCase();
+    return /^(planning task|running task|planning|preparing task plan|task planning|планирование задачи|подготовка плана)$/.test(normalized);
 }
 
 export function normalizeHubTasksPayload(payload: unknown): HubTask[] {
@@ -460,13 +567,13 @@ function isWorkerFailed(worker: TaskRunWorker): boolean {
 
 function buildWorkerSummary(workers: TaskRunWorker[]): string {
     if (!workers.length) return '';
-    const workerCount = (count: number) => `${count} ${count === 1 ? 'worker' : 'workers'}`;
+    const agentCount = (count: number) => `${count} ${count === 1 ? 'agent' : 'agents'}`;
     const running = workers.filter(worker => isWorkerRunning(worker) && !isWorkerQueued(worker)).length;
     const queued = workers.filter(isWorkerQueued).length;
     const done = workers.filter(isWorkerDone).length;
     const failed = workers.filter(isWorkerFailed).length;
     return [
-        running ? `${workerCount(running)} running` : '',
+        running ? `${agentCount(running)} running` : '',
         queued ? `${queued} queued` : '',
         done ? `${done} done` : '',
         failed ? `${failed} failed` : '',
@@ -597,10 +704,13 @@ export function buildTaskTokenUsage(
     usageSnapshot: UsageSnapshot | null,
     contextStatus: ContextStatus | null,
 ): TaskRunTokenUsage {
-    const used = usageSnapshot?.contextTokens || contextStatus?.tokens_used || progress?.token_count || 0;
-    const max = usageSnapshot?.contextWindow || contextStatus?.tokens_max || 0;
+    const used = contextStatus?.tokens_used || usageSnapshot?.contextTokens || progress?.token_count || 0;
+    const max = contextStatus?.tokens_max || usageSnapshot?.contextWindow || 0;
     const inputTokens = usageSnapshot?.inputTokens || 0;
     const outputTokens = usageSnapshot?.outputTokens || 0;
+    const cachedInputTokens = usageSnapshot?.cachedInputTokens || 0;
+    const cacheCreationTokens = usageSnapshot?.cacheCreationTokens || 0;
+    const reasoningOutputTokens = usageSnapshot?.reasoningOutputTokens || 0;
     const totalTokens = inputTokens + outputTokens || progress?.token_count || used;
     const percent = max > 0
         ? Math.min(100, Math.max(0, Math.round((used / max) * 100)))
@@ -610,27 +720,79 @@ export function buildTaskTokenUsage(
         used,
         max,
         percent,
+        availableTokens: max > 0 ? Math.max(0, max - used) : undefined,
+        reservedOutputTokens: undefined,
         inputTokens,
         outputTokens,
+        cachedInputTokens,
+        cacheCreationTokens,
+        reasoningOutputTokens,
         totalTokens,
         costUsd: usageSnapshot?.estimatedCostUsd || contextStatus?.cumulative_cost || 0,
         source: usageSnapshot?.source,
     };
 }
 
+function meaningfulWorkItemCount(summary: WorkSummary): number {
+    return summary.items.filter(item => !isInternalWorkEvent(item)).length;
+}
+
+function chooseMostInformativeSummary(summaries: WorkSummary[]): WorkSummary | undefined {
+    return [...summaries].sort((a, b) => {
+        const signalDelta = meaningfulWorkItemCount(b) - meaningfulWorkItemCount(a);
+        if (signalDelta !== 0) return signalDelta;
+        return (b.startedAt || 0) - (a.startedAt || 0);
+    })[0];
+}
+
 function chooseTaskWorkSummary(workSummariesByTurn: Record<string, WorkSummary>): WorkSummary | undefined {
-    const summaries = Object.values(workSummariesByTurn).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
-    return summaries.find(summary => summary.status === 'running' || summary.status === 'waiting') || summaries[0];
+    const summaries = Object.values(workSummariesByTurn);
+    const active = summaries.filter(summary => summary.status === 'running' || summary.status === 'waiting');
+    return chooseMostInformativeSummary(active) || chooseMostInformativeSummary(summaries);
+}
+
+function isTaskActivityTimelineEvent(item: WorkEvent): boolean {
+    if (isInternalWorkEvent(item)) return false;
+    if (item.type === 'commentary' || item.type === 'worker' || item.type === 'artifact') return false;
+    return item.type === 'read'
+        || item.type === 'task'
+        || item.type === 'search'
+        || item.type === 'command'
+        || item.type === 'edit'
+        || item.type === 'review'
+        || item.type === 'approval'
+        || item.type === 'error';
+}
+
+export function aggregateTaskActivityItems(workSummariesByTurn: Record<string, WorkSummary>): WorkEvent[] {
+    const seen = new Set<string>();
+    return Object.values(workSummariesByTurn)
+        .sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0))
+        .flatMap(summary => summary.items)
+        .filter(isTaskActivityTimelineEvent)
+        .filter((item, index) => {
+            const key = item.id || `${item.type}:${item.timestamp || index}:${item.path || item.target || item.command || ''}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        })
+        .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+}
+
+function isTerminalWorkStatus(status?: WorkSummaryStatus): boolean {
+    return status === 'completed' || status === 'failed' || status === 'stopped' || status === 'rejected';
 }
 
 function statusFromTaskRun(progress: TaskProgress | null, summary?: WorkSummary, workers: TaskRunWorker[] = []): TaskRunViewModel['status'] {
+    const progressStatus = progress ? statusFromProgress(progress) : undefined;
+    if (isTerminalWorkStatus(progressStatus)) return progressStatus as TaskRunViewModel['status'];
     if (summary?.status === 'waiting') return 'waiting';
     if (summary?.status === 'failed') return 'failed';
     if (summary?.status === 'stopped') return 'stopped';
     if (summary?.status === 'rejected') return 'rejected';
     if (workers.some(isWorkerFailed)) return 'failed';
     if (workers.some(isWorkerRunning)) return 'running';
-    if (progress) return statusFromProgress(progress);
+    if (progressStatus) return progressStatus;
     return summary?.status || 'completed';
 }
 
@@ -645,7 +807,7 @@ function displayChecklistForStatus(
     checklistSource: TaskRunViewModel['checklistSource'],
     status: TaskRunViewModel['status'],
 ): TaskRunChecklistItem[] {
-    if (status !== 'completed' || checklistSource !== 'provisional') {
+    if (status !== 'completed' || (checklistSource !== 'provisional' && checklistSource !== 'step')) {
         return checklist;
     }
     return checklist.map(item => ({ ...item, status: 'completed' as const }));
@@ -659,8 +821,9 @@ function conciseWorkStatus(summary?: WorkSummary): string {
         if (running.type === 'search') return 'Searching codebase';
         if (running.type === 'command') return 'Running command';
         if (running.type === 'edit') return 'Editing files';
+        if (running.type === 'review') return 'Reviewing changes';
         if (running.type === 'approval') return 'Waiting for approval';
-        if (running.type === 'worker') return 'Running worker';
+        if (running.type === 'worker') return 'Running agent';
     }
     const waitingEdits = summary.items.filter(item => item.type === 'edit' && item.status === 'waiting').length;
     if (summary.status === 'waiting' && waitingEdits > 0) {
@@ -669,8 +832,19 @@ function conciseWorkStatus(summary?: WorkSummary): string {
     if (summary.status === 'waiting') return 'Waiting for approval';
     if (summary.status === 'failed') return 'Work needs attention';
     if (summary.status === 'completed') {
-        const edits = summary.items.filter(item => item.type === 'edit').length;
-        if (edits > 0) return `${edits} ${edits === 1 ? 'change' : 'changes'} applied`;
+        const edits = summary.items.filter(item => item.type === 'edit');
+        const reviewIssues = summary.items.filter(item => item.type === 'review' && (item.status === 'failed' || Boolean(item.error))).length;
+        if (reviewIssues > 0) return `${reviewIssues} ${reviewIssues === 1 ? 'review issue' : 'review issues'}`;
+        const failedEdits = edits.filter(item => item.status === 'failed' || Boolean(item.error) || /conflict|failed|failure|error|reject|rejected|blocked/i.test(item.state || item.label || '')).length;
+        if (failedEdits > 0) return `${failedEdits} ${failedEdits === 1 ? 'edit' : 'edits'} need review`;
+        const changedEdits = edits.filter(item => Boolean(
+            item.hasDiff
+            || (item.additions || 0) > 0
+            || (item.deletions || 0) > 0
+            || item.hunks?.some(hunk => (hunk.additions || 0) > 0 || (hunk.deletions || 0) > 0 || (hunk.oldLines?.length || 0) > 0 || (hunk.newLines?.length || 0) > 0)
+            || item.diffPreview?.trim()
+        )).length;
+        if (changedEdits > 0) return `${changedEdits} ${changedEdits === 1 ? 'change' : 'changes'} applied`;
         return 'Work summary ready';
     }
     if (summary.status === 'rejected') {
@@ -692,6 +866,39 @@ function compactAttentionText(text?: string): string {
     const firstLine = (text || '').trim().split(/\r?\n/)[0]?.trim() || '';
     if (!firstLine) return '';
     return firstLine.length > 92 ? `${firstLine.slice(0, 89)}...` : firstLine;
+}
+
+function pendingEditsFromPayload(payload: any): any[] {
+    if (Array.isArray(payload)) return payload;
+    if (payload && typeof payload === 'object' && Array.isArray(payload.edits)) return payload.edits;
+    return [];
+}
+
+function pendingEditsPayloadRunId(payload: any): string | undefined {
+    if (!payload || Array.isArray(payload) || typeof payload !== 'object') return undefined;
+    return payload.run_id || payload.runId;
+}
+
+function pendingEditsPayloadSessionId(payload: any): string | undefined {
+    if (!payload || Array.isArray(payload) || typeof payload !== 'object') return undefined;
+    return payload.session_id || payload.sessionId;
+}
+
+function editPayloadState(edit: any): string {
+    return String(edit?.state || edit?.status || '').toLowerCase();
+}
+
+function editPayloadHasDiff(edit: any): boolean {
+    if (edit?.hasDiff === true) return true;
+    if (edit?.hasDiff === false && !edit?.hunks?.length) return false;
+    if ((edit?.additions || 0) > 0 || (edit?.deletions || 0) > 0) return true;
+    if (Array.isArray(edit?.hunks) && edit.hunks.some((hunk: any) => (hunk?.additions || 0) > 0 || (hunk?.deletions || 0) > 0 || (hunk?.oldLines?.length || 0) > 0 || (hunk?.newLines?.length || 0) > 0)) return true;
+    return Boolean(typeof edit?.diffPreview === 'string' && edit.diffPreview.trim());
+}
+
+function editPayloadFailed(edit: any): boolean {
+    const state = editPayloadState(edit);
+    return Boolean(edit?.error || edit?.conflictReason) || /conflict|failed|failure|error|reject|rejected|blocked/.test(state);
 }
 
 function buildAttentionState({
@@ -726,7 +933,7 @@ function buildAttentionState({
     const failedWorker = workers.find(isWorkerFailed);
     if (failedWorker) {
         return {
-            attentionReason: `Worker failed: ${failedWorker.name}`,
+            attentionReason: `Agent failed: ${failedWorker.name}`,
             attentionAction: { kind: 'open_agent', label: 'Open Agent' },
         };
     }
@@ -802,6 +1009,8 @@ export function buildTaskRunViewModel({
     isLoading: boolean;
 }): TaskRunViewModel | null {
     const workSummary = chooseTaskWorkSummary(workSummariesByTurn);
+    const activityItems = aggregateTaskActivityItems(workSummariesByTurn);
+    const activityHistoryCount = activityItems.length;
     const normalizedWorkers = normalizeTaskRunWorkers(workers);
     const rawChecklist = buildTaskChecklist(taskProgress, todos, hubTasks);
     const hasTaskSignal = Boolean(taskProgress || rawChecklist.length > 0 || workSummary || normalizedWorkers.length > 0);
@@ -830,15 +1039,18 @@ export function buildTaskRunViewModel({
     const totalChecklistCount = checklist.length;
     const isTerminal = status === 'completed' || status === 'failed' || status === 'stopped' || status === 'rejected';
     const isActive = isTerminal ? false : (isLoading || status === 'running' || status === 'waiting' || Boolean(taskProgress?.is_active));
-    const title = trimTaskTitle(taskProgress?.task_name) || latestUserPrompt(messages) || 'Ricochet task';
+    const title = taskRunTitle(taskProgress, messages);
     const workerSummary = buildWorkerSummary(normalizedWorkers);
     const workStatusText = conciseWorkStatus(workSummary);
+    const stoppedProgressText = /stopped|budget|aborted|cancelled/i.test(taskProgress?.status || '')
+        ? taskProgress?.status || ''
+        : '';
     const statusText = status === 'completed'
         ? workStatusText || 'Task completed'
-        : status === 'rejected'
-            ? workStatusText || 'Changes discarded'
+            : status === 'rejected'
+                ? workStatusText || 'Changes discarded'
             : status === 'stopped'
-                ? 'Stopped'
+                ? stoppedProgressText || workStatusText || 'Stopped'
                 : status === 'failed'
                     ? attention.attentionReason || 'Needs attention'
                     : status === 'waiting'
@@ -861,6 +1073,8 @@ export function buildTaskRunViewModel({
         attentionReason: attention.attentionReason,
         attentionAction: attention.attentionAction,
         workSummary,
+        activityItems,
+        activityHistoryCount,
         reasoningText: latestReasoningText(messages),
         completionText: status === 'completed' ? latestAssistantCompletion(messages) : undefined,
         completedAt: taskProgress?.completed_at || workSummary?.completedAt,
@@ -889,16 +1103,38 @@ function mergeArrayByKey<T>(existing: T[] | undefined, incoming: T[] | undefined
     return merged;
 }
 
+function shouldPreserveExistingAssistantContent(existing: ChatMessage, incoming: ChatMessage): boolean {
+    if (existing.role !== 'assistant' || incoming.role !== 'assistant') return false;
+    if (!existing.content || !incoming.content) return false;
+    if (incoming.isStreaming) return false;
+
+    const existingVisible = cleanAssistantVisibleText(existing.content).trim();
+    const incomingVisible = cleanAssistantVisibleText(incoming.content).trim();
+    if (!existingVisible || !incomingVisible) return false;
+    if (incomingVisible.length >= existingVisible.length) return false;
+
+    const incomingLooksLikeStatus =
+        incomingVisible.length < 260 ||
+        /^(task completed|work summary ready|completed|заверш|готово|ключевые выводы|комплексн)/i.test(incomingVisible);
+
+    return existingVisible.length > 400 &&
+        incomingVisible.length < existingVisible.length * 0.72 &&
+        (existingVisible.includes(incomingVisible) || incomingLooksLikeStatus);
+}
+
 function mergeChatMessage(existing: ChatMessage, incoming: ChatMessage): ChatMessage {
     const existingAny = existing as any;
     const incomingAny = incoming as any;
+    const preserveExistingContent = shouldPreserveExistingAssistantContent(existing, incoming);
     return {
         ...existing,
         ...incoming,
-        content: incoming.content ? incoming.content : existing.content,
+        content: preserveExistingContent ? existing.content : incoming.content ? incoming.content : existing.content,
         reasoning: incoming.reasoning ? incoming.reasoning : existing.reasoning,
         checkpointHash: incoming.checkpointHash ?? existing.checkpointHash,
         metadata: incoming.metadata ?? existing.metadata,
+        contextFiles: incoming.contextFiles?.length ? incoming.contextFiles : existing.contextFiles,
+        context_files: incoming.context_files?.length ? incoming.context_files : existing.context_files,
         steps: mergeArrayByKey(existing.steps, incoming.steps, step => step.id),
         toolCalls: mergeArrayByKey(existing.toolCalls, incoming.toolCalls, (tool, index) => tool.id || `${tool.name}:${tool.timestamp ?? index}`),
         activities: mergeArrayByKey(existing.activities, incoming.activities, (activity, index) => [
@@ -927,20 +1163,24 @@ function findLastUserIndex(messages: ChatMessage[]): number {
     return -1;
 }
 
-function upsertAssistantMessage(messages: ChatMessage[], incoming: ChatMessage): ChatMessage[] {
-    const existing = messages.find(message => message.id === incoming.id);
-    if (existing) {
-        return messages.map(message => message.id === incoming.id ? mergeChatMessage(message, incoming) : message);
-    }
+export function upsertAssistantMessage(messages: ChatMessage[], incoming: ChatMessage): ChatMessage[] {
+	const existing = messages.find(message => message.id === incoming.id);
+	if (existing) {
+		return messages.map(message => message.id === incoming.id ? mergeChatMessage(message, incoming) : message);
+	}
 
-    if (!isRenderableChatMessage(incoming)) {
-        return messages;
-    }
+	if (!isRenderableChatMessage(incoming)) {
+		return messages;
+	}
 
-    const lastUserIndex = findLastUserIndex(messages);
-    const placeholderIndex = messages.findIndex((message, index) =>
-        index > lastUserIndex &&
-        message.role === 'assistant' &&
+	if (hasPlanArtifact(incoming)) {
+		return [...messages, incoming];
+	}
+
+	const lastUserIndex = findLastUserIndex(messages);
+	const placeholderIndex = messages.findIndex((message, index) =>
+		index > lastUserIndex &&
+		message.role === 'assistant' &&
         isActivityPlaceholder(message) &&
         !(message.activities?.length || message.toolCalls?.length)
     );
@@ -951,7 +1191,73 @@ function upsertAssistantMessage(messages: ChatMessage[], incoming: ChatMessage):
         return next;
     }
 
-    return [...messages, incoming];
+	return [...messages, incoming];
+}
+
+export interface PlanDecisionResultPayload {
+    ok?: boolean;
+    session_id?: string;
+    sessionId?: string;
+    artifact_id?: string;
+    artifactId?: string;
+    path?: string;
+    decision?: string;
+    planApproved?: boolean;
+    error?: string;
+}
+
+function normalizePlanDecisionStatus(payload: PlanDecisionResultPayload): string {
+    if (payload.ok === false || payload.error) return 'error';
+    const decision = String(payload.decision || '').toLowerCase();
+    if (payload.planApproved || decision === 'implement' || decision === 'approve' || decision === 'approved') return 'approved';
+    if (decision === 'revise' || decision === 'revision' || decision === 'revision_requested') return 'revision_requested';
+    if (decision === 'save' || decision === 'save_only') return 'saved';
+    return decision || 'reviewed';
+}
+
+export function planArtifactMatches(artifact: any, payload: PlanDecisionResultPayload): boolean {
+    if (artifact?.type !== 'implementation_plan') return false;
+    const artifactID = String(payload.artifact_id || payload.artifactId || '').trim();
+    const path = String(payload.path || '').trim();
+    return Boolean(
+        (artifactID && (artifact?.id === artifactID || artifact?.path === artifactID || artifact?.title === artifactID)) ||
+        (path && artifact?.path === path)
+    );
+}
+
+export function hasMatchingPlanArtifact(messages: ChatMessage[], payload: PlanDecisionResultPayload): boolean {
+    return messages.some(message => {
+        const artifacts = (message as any).artifacts;
+        return Array.isArray(artifacts) && artifacts.some((artifact: any) => planArtifactMatches(artifact, payload));
+    });
+}
+
+export function applyPlanDecisionResult(messages: ChatMessage[], payload: PlanDecisionResultPayload): ChatMessage[] {
+    let matched = false;
+    const status = normalizePlanDecisionStatus(payload);
+    const decision = payload.decision || (payload.planApproved ? 'implement' : undefined);
+
+    const next = messages.map(message => {
+        const artifacts = (message as any).artifacts;
+        if (!Array.isArray(artifacts)) return message;
+        let messageMatched = false;
+
+        const updatedArtifacts = artifacts.map((artifact: any) => {
+            if (!planArtifactMatches(artifact, payload)) return artifact;
+            matched = true;
+            messageMatched = true;
+            return {
+                ...artifact,
+                status,
+                decision,
+                decision_error: payload.error || undefined,
+            };
+        });
+
+        return messageMatched ? { ...message, artifacts: updatedArtifacts } : message;
+    });
+
+    return matched ? next : messages;
 }
 
 function filterRenderableMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -967,6 +1273,81 @@ function hasWorkPayload(message?: Partial<ChatMessage> | null): boolean {
     );
 }
 
+export function assistantRunPhase(message?: Partial<ChatMessage> | null): TaskMetadata['runPhase'] | undefined {
+    const phase = message?.metadata?.runPhase;
+    return phase === 'intermediate' || phase === 'final' ? phase : undefined;
+}
+
+export function isIntermediateAssistantDraft(message?: Partial<ChatMessage> | null): boolean {
+    if (!message || message.role !== 'assistant') return false;
+    const phase = assistantRunPhase(message);
+    if (phase === 'final') return false;
+    if (phase === 'intermediate') return true;
+    return Boolean(hasWorkPayload(message) && message.toolCalls?.length && cleanAssistantVisibleText(message.content || ''));
+}
+
+export function withInferredRunPhase(message: ChatMessage): ChatMessage {
+    if (message.role !== 'assistant') return message;
+    if (assistantRunPhase(message)) return message;
+    if (!isIntermediateAssistantDraft(message)) return message;
+    return {
+        ...message,
+        metadata: {
+            ...(message.metadata || {
+                tokensIn: 0,
+                tokensOut: 0,
+                totalCost: 0,
+                contextLimit: 0,
+            }),
+            runPhase: 'intermediate',
+        },
+    };
+}
+
+export function promoteLatestIntermediateDraft(messages: ChatMessage[], runId?: string | null): ChatMessage[] {
+    const candidateIndexes = messages
+        .map((message, index) => ({ message, index }))
+        .filter(({ message }) => (
+            isIntermediateAssistantDraft(message) &&
+            (!runId || message.run_id === runId || message.turn_id === runId)
+        ));
+    if (candidateIndexes.length === 0) return messages;
+
+    const hasExplicitFinal = messages.some(message =>
+        message.role === 'assistant' &&
+        assistantRunPhase(message) === 'final' &&
+        (!runId || message.run_id === runId || message.turn_id === runId)
+    );
+    if (hasExplicitFinal) return messages;
+
+    const latest = candidateIndexes[candidateIndexes.length - 1];
+    return messages.map((message, index) => {
+        if (index !== latest.index) return message;
+        return {
+            ...message,
+            isStreaming: false,
+            metadata: {
+                ...(message.metadata || {
+                    tokensIn: 0,
+                    tokensOut: 0,
+                    totalCost: 0,
+                    contextLimit: 0,
+                }),
+                runPhase: 'final',
+            },
+        };
+    });
+}
+
+export function promoteCompletedIntermediateDrafts(messages: ChatMessage[]): ChatMessage[] {
+    const runIds = Array.from(new Set(messages
+        .filter(message => message.role === 'assistant' && isIntermediateAssistantDraft(message))
+        .map(message => message.run_id || message.turn_id)
+        .filter(Boolean) as string[]));
+
+    return runIds.reduce((next, runId) => promoteLatestIntermediateDraft(next, runId), messages);
+}
+
 export function hasPlanArtifact(message?: Partial<ChatMessage> | null): boolean {
     const artifacts = (message as any)?.artifacts;
     return Array.isArray(artifacts) && artifacts.some((artifact: any) => artifact?.type === 'implementation_plan');
@@ -977,6 +1358,9 @@ export function shouldKeepAssistantBubble(message: ChatMessage, forceWorkComment
     if (message.checkpointHash) return true;
     if (hasPlanArtifact(message)) return true;
     if (forceWorkCommentary) return false;
+    const commentaryText = normalizeWorkCommentaryText(message.content || '');
+    if (commentaryText && !isWorkCommentaryText(commentaryText)) return true;
+    if (!message.isStreaming && commentaryText) return true;
     if (!hasWorkPayload(message)) return true;
     return false;
 }
@@ -999,15 +1383,19 @@ const RAW_TOOL_ARGUMENT_KEYS = [
     'kind',
     'arguments',
     'tool',
+    'hash',
+    'start_line',
+    'end_line',
 ];
 
 function containsRawToolArgumentKeys(text: string): boolean {
-    return /"?(?:script|command|path|query|TaskName|TaskStatus|TaskSummary|PredictedTaskSize|mode|plan_mode|checklist_source|content|summary|title|kind|arguments|tool)"?\s*:/.test(text);
+    return /"?(?:script|command|path|query|TaskName|TaskStatus|TaskSummary|PredictedTaskSize|mode|plan_mode|checklist_source|content|summary|title|kind|arguments|tool|hash|start_line|end_line)"?\s*:/.test(text);
 }
 
 function isRawToolArgumentText(text: string): boolean {
     const trimmed = text.trim();
     if (!trimmed) return false;
+    if (/^(?:\{\s*\}|\[\s*\])$/.test(trimmed)) return true;
     if (/^\{[\s\S]*\}$/.test(trimmed)) {
         try {
             const parsed = JSON.parse(trimmed);
@@ -1019,22 +1407,53 @@ function isRawToolArgumentText(text: string): boolean {
     return false;
 }
 
+function stripEmptyJsonResidue(text: string): string {
+    return text
+        .split(/\r?\n/)
+        .filter(line => !/^\s*(?:\{\s*\}|\[\s*\])\s*$/.test(line))
+        .join('\n')
+        .trim();
+}
+
 export function normalizeWorkCommentaryText(content: string): string {
     const visibleText = cleanAssistantVisibleText(content || '').trim();
     if (!visibleText) return '';
     if (isRawToolArgumentText(visibleText)) return '';
+    if (isGenericTimelineBoundaryText(visibleText)) return '';
 
     const lines = visibleText.split(/\r?\n/);
     const rawJsonStart = lines.findIndex(line => line.trim().startsWith('{'));
     if (rawJsonStart >= 0 && containsRawToolArgumentKeys(lines.slice(rawJsonStart).join('\n'))) {
-        return lines.slice(0, rawJsonStart).join('\n').trim();
+        const leadingText = stripEmptyJsonResidue(lines.slice(0, rawJsonStart).join('\n'));
+        return isGenericTimelineBoundaryText(leadingText) ? '' : leadingText;
     }
 
-    return visibleText;
+    const stripped = stripEmptyJsonResidue(visibleText);
+    return isGenericTimelineBoundaryText(stripped) ? '' : stripped;
+}
+
+export function isWorkCommentaryText(text: string): boolean {
+    const normalized = stripEmptyJsonResidue(cleanAssistantVisibleText(text || ''));
+    if (!normalized) return false;
+    if (isGenericTimelineBoundaryText(normalized)) return false;
+    if (normalized.length > 320) return false;
+
+    const lines = normalized.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if (lines.length > 6) return false;
+    if (/^(planning task|running task|preparing task plan|планирование задачи|подготовка плана)$/i.test(normalized)) return false;
+    if (lines.filter(line => /^#{1,6}\s+/.test(line)).length > 0) return false;
+    if (lines.filter(line => /^[-*+]\s+|^\d+[.)]\s+/.test(line)).length >= 3) return false;
+    if (/\|.+\|/.test(normalized)) return false;
+
+    const reportSectionPattern = /\b(overview|architecture|recommendations|conclusion|summary|key findings|technical stack|project structure)\b|(?:обзор|архитектур|рекомендац|вывод|заключени|ключевые выводы|технический стек|структура проекта|общая характеристика)/i;
+    if (reportSectionPattern.test(normalized) && normalized.length > 140) return false;
+
+    return true;
 }
 
 export function shouldCreateWorkCommentary(message: ChatMessage): boolean {
-    return message.role === 'assistant' && Boolean(message.isStreaming) && hasWorkPayload(message) && Boolean(normalizeWorkCommentaryText(message.content || ''));
+    const commentaryText = normalizeWorkCommentaryText(message.content || '');
+    return message.role === 'assistant' && Boolean(message.isStreaming) && hasWorkPayload(message) && isWorkCommentaryText(commentaryText);
 }
 
 function messageToCommentaryEvent(message: ChatMessage, forceWorkCommentary = false): WorkEvent | null {
@@ -1042,6 +1461,7 @@ function messageToCommentaryEvent(message: ChatMessage, forceWorkCommentary = fa
     if (!forceWorkCommentary && !hasWorkPayload(message)) return null;
     const visibleText = normalizeWorkCommentaryText(message.content || '');
     if (!visibleText) return null;
+    if (!forceWorkCommentary && !isWorkCommentaryText(visibleText)) return null;
 
     return {
         id: `commentary-${message.id}`,
@@ -1054,11 +1474,34 @@ function messageToCommentaryEvent(message: ChatMessage, forceWorkCommentary = fa
 }
 
 function emptyWorkCounts(): WorkSummary['counts'] {
-    return { filesRead: 0, filesExplored: 0, foldersExplored: 0, searches: 0, commands: 0, edits: 0, workers: 0, approvals: 0 };
+    return { filesRead: 0, filesExplored: 0, foldersExplored: 0, searches: 0, commands: 0, edits: 0, tasks: 0, workers: 0, approvals: 0 };
 }
 
 function getTurnId(message?: Partial<ChatMessage> | null, fallback?: string | null): string {
     return message?.run_id || fallback || message?.turn_id || `turn-${Date.now()}`;
+}
+
+function normalizeQueuedTurnPayload(payload: QueuedMessagePayload | undefined, fallbackSessionId: string | null): QueuedTurnState | null {
+    if (!payload || typeof payload !== 'object') return null;
+    const queuedMessage = payload.message || {};
+    const runId = payload.run_id || payload.runId || queuedMessage.run_id;
+    if (!runId) return null;
+    const sessionId = payload.session_id || payload.sessionId || queuedMessage.session_id || fallbackSessionId || undefined;
+    return {
+        runId,
+        sessionId,
+        messageId: payload.message_id || queuedMessage.id,
+        status: payload.error ? 'failed' : 'queued',
+        text: payload.text || queuedMessage.text,
+        queueLength: payload.queue_length,
+        error: payload.error,
+        delivery: queuedMessage.delivery,
+        timestamp: queuedMessage.timestamp || Date.now(),
+    };
+}
+
+function queuedTurnMatchesSession(turn: QueuedTurnState, sessionId: string | null): boolean {
+    return !sessionId || !turn.sessionId || turn.sessionId === sessionId;
 }
 
 function getToolArgs(tool: ToolCall): Record<string, any> {
@@ -1075,6 +1518,7 @@ function toolStatusToWorkStatus(status?: string): WorkEvent['status'] {
     const normalized = (status || '').toLowerCase();
     if (normalized === 'error' || normalized === 'failed' || normalized === 'aborted') return 'failed';
     if (normalized === 'completed' || normalized === 'success' || normalized === 'succeeded') return 'completed';
+    if (normalized === 'pending' || normalized === 'waiting' || normalized === 'approval_required') return 'waiting';
     return 'running';
 }
 
@@ -1144,6 +1588,52 @@ function artifactDisplayTarget(artifact: any): string {
     return String(artifact?.title || artifact?.type || 'Artifact');
 }
 
+function timelineEventsFromMessage(message: ChatMessage, includeCommentary: boolean): WorkEvent[] {
+    const commentaryEvent = includeCommentary
+        ? messageToCommentaryEvent(message, shouldCreateWorkCommentary(message))
+        : null;
+
+    return [
+        ...(commentaryEvent ? [commentaryEvent] : []),
+        ...((message.activities || [])
+            .map((activity, index) => activityToWorkEvent(activity, index))
+            .filter(Boolean) as WorkEvent[]),
+        ...((message.toolCalls || [])
+            .map(classifyTool)
+            .filter(Boolean) as WorkEvent[]),
+        ...(((message as any).artifacts || [])
+            .filter(isTimelineArtifact)
+            .map((artifact: any, index: number) => ({
+                id: `artifact-${artifact.path || artifact.title || index}`,
+                type: 'artifact' as const,
+                label: 'Document',
+                target: artifactDisplayTarget(artifact),
+                path: artifact.path,
+                artifactType: artifact.type,
+                status: 'completed' as const,
+                timestamp: message.timestamp || Date.now(),
+            }))),
+    ];
+}
+
+export function rebuildWorkSummariesFromMessages(messages: ChatMessage[], sessionId?: string): Record<string, WorkSummary> {
+    return messages
+        .filter(message => message.role === 'assistant')
+        .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+        .reduce<Record<string, WorkSummary>>((summaries, message) => {
+            const events = timelineEventsFromMessage(message, false);
+            if (!events.length && !message.errorInfo) return summaries;
+            const turnId = getTurnId(message, message.run_id || message.turn_id);
+            return upsertWorkEvents(
+                summaries,
+                turnId,
+                sessionId,
+                events,
+                message.errorInfo ? 'failed' : message.isStreaming ? 'running' : 'completed',
+            );
+        }, {});
+}
+
 function isInternalWorkEvent(item: WorkEvent): boolean {
     const toolName = item.command || item.target || item.label;
     if (item.type === 'artifact' && isRicochetArtifactPath(item.path || item.target)) {
@@ -1155,7 +1645,7 @@ function isInternalWorkEvent(item: WorkEvent): boolean {
 }
 
 function isSilentMetaTool(toolName?: string): boolean {
-    return /^(?:task_boundary|update_todos|update_plan|create_task|next_task|complete_task|list_tasks|add_subtask|delete_task|switch_mode|submit_plan|write_scratchpad|read_scratchpad)$/i.test((toolName || '').trim());
+    return /^(?:task_boundary|update_todos|update_plan|create_task|next_task|complete_task|list_tasks|add_subtask|delete_task|switch_mode|submit_plan|write_scratchpad|read_scratchpad|retrieve_context_original)$/i.test((toolName || '').trim());
 }
 
 export function classifyTool(tool: ToolCall): WorkEvent | null {
@@ -1206,7 +1696,7 @@ export function classifyTool(tool: ToolCall): WorkEvent | null {
         return {
             id: `tool-worker-${rawId}`,
             type: 'worker',
-            label: 'Checked worker',
+            label: 'Checked agent',
             target: rawId,
             status,
             error,
@@ -1241,9 +1731,10 @@ export function classifyTool(tool: ToolCall): WorkEvent | null {
     }
 
     if (tool.name.includes('write') || tool.name.includes('edit') || tool.name.includes('replace') || tool.name.includes('apply_diff')) {
+        const failedReview = status === 'failed' && shouldRouteEditFailureToReview(`${tool.result || ''} ${tool.name}`);
         return {
             id: `tool-${tool.id}`,
-            type: 'edit',
+            type: failedReview ? 'review' : 'edit',
             label: status === 'running' ? 'Editing' : status === 'failed' ? 'Edit failed' : 'Edited',
             target: compactTarget(filePath || tool.name),
             path: filePath || undefined,
@@ -1274,12 +1765,22 @@ export function classifyTool(tool: ToolCall): WorkEvent | null {
         };
     }
 
-    if (tool.name === 'subagent' || tool.name === 'start_swarm') {
+    if (tool.name === 'subagent' || tool.name === 'start_swarm' || tool.name === 'use_subagents') {
+        const agentTargets = [
+            ...(Array.isArray(args.workers) ? args.workers : []),
+            ...(Array.isArray(args.agents) ? args.agents : []),
+            ...(Array.isArray(args.subagents) ? args.subagents : []),
+        ].filter(Boolean);
+        const count = agentTargets.length;
         return {
             id: `tool-${tool.id}`,
-            type: 'worker',
-            label: tool.name === 'start_swarm' ? 'Started workers' : 'Requested worker',
-            target: String(args.description || args.goal || tool.name),
+            type: 'commentary',
+            label: status === 'running'
+                ? 'Launching agents'
+                : count > 0
+                    ? `Launched ${count} ${count === 1 ? 'agent' : 'agents'}`
+                    : 'Launched agents',
+            target: count > 0 ? agentTargets.join(', ') : String(args.description || args.goal || 'Parallel analysis'),
             status,
             error,
             timestamp: tool.timestamp || Date.now(),
@@ -1310,6 +1811,7 @@ export function activityToWorkEvent(activity: ActivityItem, index: number): Work
             status: activity.status === 'failed' ? 'failed' : activity.status === 'running' ? 'running' : 'completed',
             entries: activity.entries,
             counts: activity.counts,
+            lineRange: activity.lineRange,
             error: activity.error,
             timestamp,
         };
@@ -1327,13 +1829,15 @@ export function activityToWorkEvent(activity: ActivityItem, index: number): Work
         };
     }
     if (activity.type === 'edit') {
+        const failedReview = activity.status === 'failed' || shouldRouteEditFailureToReview(`${activity.error || ''} ${activity.message || ''}`);
         return {
             id: `activity-edit-${activity.file || index}`,
-            type: 'edit',
-            label: 'Edited',
+            type: failedReview ? 'review' : 'edit',
+            label: failedReview ? 'Edit failed' : 'Edited',
             target: compactTarget(activity.file || ''),
             path: activity.file,
-            status: 'completed',
+            status: failedReview ? 'failed' : 'completed',
+            error: activity.error,
             timestamp,
         };
     }
@@ -1408,6 +1912,81 @@ function toolLifecycleSummaryStatus(event: ToolLifecycleEventPayload): WorkSumma
     return 'running';
 }
 
+function parseLifecycleLineNumber(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value);
+    if (typeof value !== 'string') return null;
+    const match = value.trim().match(/\d+/);
+    if (!match) return null;
+    const parsed = Number.parseInt(match[0], 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function formatLifecycleLineRange(start: unknown, end?: unknown): string | undefined {
+    const startLine = parseLifecycleLineNumber(start);
+    const endLine = parseLifecycleLineNumber(end);
+    if (!startLine) return undefined;
+    return endLine && endLine !== startLine ? `L${startLine}-L${endLine}` : `L${startLine}`;
+}
+
+function normalizeLifecycleLineRange(raw?: unknown): string | undefined {
+    if (typeof raw !== 'string') return undefined;
+    const value = raw.trim().replace(/^#/, '');
+    if (!value) return undefined;
+    const range = value.match(/^L?(\d+)\s*[-–—:]\s*L?(\d+)$/i);
+    if (range) return `L${range[1]}-L${range[2]}`;
+    const single = value.match(/^L?(\d+)$/i);
+    if (single) return `L${single[1]}`;
+    return value.startsWith('L') ? value : `L${value}`;
+}
+
+function lineRangeFromLifecycleText(raw?: string): string | undefined {
+    const text = (raw || '').trim();
+    if (!text) return undefined;
+    const patterns = [
+        /(?:lines?|range)\s*:?\s*#?L?(\d+)\s*[-–—]\s*#?L?(\d+)/i,
+        /(?:lines?|range)\s*:?\s*#?L?(\d+)\s*:\s*#?L?(\d+)/i,
+        /#?L(\d+)\s*[-–—]\s*#?L?(\d+)/i,
+        /#?L(\d+)\s*:\s*#?L?(\d+)/i,
+        /(?:startLine|start_line|readLineStart|read_line_start)["'\s:=]+(\d+)[\s\S]{0,80}(?:endLine|end_line|readLineEnd|read_line_end)["'\s:=]+(\d+)/i,
+        /(?:^|[\s:])#?L?(\d+)\s*[-–—]\s*#?L?(\d+)(?:\b|$)/i,
+    ];
+    for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (match) return formatLifecycleLineRange(match[1], match[2]);
+    }
+    return undefined;
+}
+
+function lineRangeFromToolLifecycle(event: ToolLifecycleEventPayload): string | undefined {
+    const direct = normalizeLifecycleLineRange(event.lineRange || event.line_range);
+    if (direct) return direct;
+
+    const start = event.readLineStart ?? event.read_line_start ?? event.startLine ?? event.start_line;
+    const end = event.readLineEnd ?? event.read_line_end ?? event.endLine ?? event.end_line;
+    const explicitRange = formatLifecycleLineRange(start, end);
+    if (explicitRange) return explicitRange;
+
+    return lineRangeFromLifecycleText(event.args_summary) || lineRangeFromLifecycleText(event.output_preview);
+}
+
+function agentCountFromLifecycle(event: ToolLifecycleEventPayload): number {
+    const output = (event.output_preview || '').trim();
+    const outputAgents = output
+        ? output
+            .split(/\r?\n/)
+            .filter(line => /\bagent[-_\w]*\b/i.test(line) || /\s->\s/.test(line))
+            .length
+        : 0;
+    if (outputAgents > 0) return outputAgents;
+
+    const summary = (event.args_summary || '').trim();
+    if (!summary) return 0;
+    if (summary.includes(',')) {
+        return summary.split(',').map(part => part.trim()).filter(Boolean).length;
+    }
+    return /\bagents?\b/i.test(summary) || /\bsubagents?\b/i.test(summary) ? 1 : 0;
+}
+
 export function toolLifecycleEventToWorkEvent(event: ToolLifecycleEventPayload): WorkEvent | null {
     const toolName = (event.tool_name || '').trim();
     if (!toolName || shouldHideLifecycleTool(toolName)) return null;
@@ -1418,6 +1997,9 @@ export function toolLifecycleEventToWorkEvent(event: ToolLifecycleEventPayload):
     const firstFile = event.affected_files?.find(Boolean) || '';
     const summary = (event.args_summary || '').trim();
     const target = firstFile || summary || toolName;
+    const lineRange = (normalized.includes('read') || normalized.includes('view') || normalized.startsWith('get_'))
+        ? lineRangeFromToolLifecycle(event)
+        : undefined;
     if (isInternalRicochetPath(firstFile) || isInternalRicochetPath(summary)) return null;
     const id = event.tool_use_id
         ? `tool-${event.tool_use_id}`
@@ -1433,6 +2015,7 @@ export function toolLifecycleEventToWorkEvent(event: ToolLifecycleEventPayload):
         durationMs: event.duration_ms,
         startedAt: event.started_at,
         completedAt: event.completed_at,
+        lineRange,
         timestamp,
     };
 
@@ -1477,9 +2060,10 @@ export function toolLifecycleEventToWorkEvent(event: ToolLifecycleEventPayload):
     }
 
     if (normalized.includes('write') || normalized.includes('edit') || normalized.includes('replace') || normalized.includes('apply_diff') || normalized.includes('delete')) {
+        const failedReview = status === 'failed' && shouldRouteEditFailureToReview(`${event.error || ''} ${summary} ${toolName}`);
         return {
             ...common,
-            type: 'edit',
+            type: failedReview ? 'review' : 'edit',
             label: status === 'running' ? 'Editing' : status === 'failed' ? 'Edit failed' : 'Edited',
         };
     }
@@ -1502,10 +2086,15 @@ export function toolLifecycleEventToWorkEvent(event: ToolLifecycleEventPayload):
     }
 
     if (normalized.includes('subagent') || normalized.includes('swarm') || normalized.includes('worker')) {
+        const agentCount = agentCountFromLifecycle(event);
         return {
             ...common,
-            type: 'worker',
-            label: status === 'running' ? 'Worker running' : 'Worker finished',
+            type: 'commentary',
+            label: status === 'running'
+                ? 'Launching agents'
+                : agentCount > 0
+                    ? `Launched ${agentCount} ${agentCount === 1 ? 'agent' : 'agents'}`
+                    : 'Launched agents',
         };
     }
 
@@ -1540,7 +2129,17 @@ function cleanProgressTarget(raw: string): string {
 
 function isGenericProgressText(raw?: string): boolean {
     const text = (raw || '').trim();
-    return !text || /^(working|thinking|processing request|idle|running)$/i.test(text);
+    return !text || isGenericTimelineBoundaryText(text) || /^(working|thinking|processing request|idle|running)$/i.test(text);
+}
+
+function isEditFailureText(raw?: string): boolean {
+    const text = (raw || '').toLowerCase();
+    return /invalid arguments|unexpected end of json|targetcontent cannot be empty|target content cannot be empty|targetcontent not found|target content not found|verification rejected|shadow audit rejected|stuck detected/.test(text);
+}
+
+function shouldRouteEditFailureToReview(raw?: string): boolean {
+    const text = (raw || '').toLowerCase();
+    return /permission denied|verification rejected|verification failed|shadow audit|audit reject|review failed|stuck detected|invalid arguments|unexpected end of json|targetcontent|target content|conflict|blocked/.test(text);
 }
 
 function isStructuredHeartbeatStatus(status: string): boolean {
@@ -1559,9 +2158,36 @@ export function parseProgressStatus(progress: TaskProgress): WorkEvent | null {
     const timestamp = progress.timestamp || Date.now();
     const baseId = progress.segment_id || `${progress.run_id || progress.turn_id || 'progress'}-${progress.sequence || timestamp}`;
     const genericTaskName = isGenericProgressText(progress.task_name) || /^agent activity$/i.test(progress.task_name || '');
+    const workerId = typeof progress.agent_identifier === 'string' ? progress.agent_identifier.trim() : '';
 
     if (isGenericProgressText(status) && isGenericProgressText(progress.summary) && genericTaskName) {
         return null;
+    }
+
+    if (workerId || event.startsWith('worker_') || event === 'mission_timed_out') {
+        const failed = event === 'worker_failed' || /failed|error|aborted|timeout/i.test(status);
+        const queued = /queued|pending|waiting/i.test(status);
+        const label = event === 'worker_spawned'
+            ? 'Queued agent'
+            : event === 'worker_completed'
+                ? 'Completed agent'
+                : failed
+                    ? 'Agent failed'
+                    : 'Running agent';
+        const target = [
+            progress.task_name && !genericTaskName ? progress.task_name : workerId || 'Worker',
+            progress.summary,
+        ].filter(Boolean).join(' · ');
+        return {
+            id: `${baseId}-worker-${workerId || target}-${timestamp}`,
+            type: 'worker',
+            label,
+            target: compactTarget(target),
+            agentId: workerId || undefined,
+            status: failed ? 'failed' : queued ? 'waiting' : progress.is_active ? 'running' : 'completed',
+            error: failed ? status || progress.summary : undefined,
+            timestamp,
+        };
     }
 
     if (/^(mission accomplished|task complete|completed)$/i.test(status) || event === 'completed' || isStructuredHeartbeatStatus(status)) {
@@ -1577,6 +2203,53 @@ export function parseProgressStatus(progress: TaskProgress): WorkEvent | null {
     const args = fromTool ? parseToolStatusArguments(status) : {};
     const path = args.path || args.TargetFile || args.AbsolutePath || args.file || args.SearchPath || args.DirectoryPath || '';
     const query = args.query || args.Query || args.pattern || args.Pattern || '';
+    const toolLooksLikeEdit = toolName.includes('write') || toolName.includes('edit') || toolName.includes('replace') || toolName.includes('apply_diff');
+
+    if (isEditFailureText(status) && (toolLooksLikeEdit || /write_file|replace_file_content|edited|modified|updated|targetcontent/i.test(status))) {
+        const target = cleanProgressTarget(path || args.filePath || args.targetFile || toolName || 'workspace edit');
+        return {
+            id: `${baseId}-edit-failed-${target}-${timestamp}`,
+            type: shouldRouteEditFailureToReview(status) ? 'review' : 'edit',
+            label: 'Edit failed',
+            target: compactTarget(target),
+            path: path || undefined,
+            status: 'failed',
+            state: 'failed',
+            hasDiff: false,
+            reviewable: false,
+            error: status,
+            timestamp,
+        };
+    }
+
+    if (event === 'hub_task_created') {
+        const target = status.replace(/^created\s+hub\s+task:\s*/i, '').trim() || progress.summary || 'Hub Task';
+        return {
+            id: `${baseId}-hub-task-${target}-${timestamp}`,
+            type: 'task',
+            label: 'Created Hub Task',
+            target: compactTarget(target),
+            status: 'completed',
+            timestamp,
+        };
+    }
+
+    if (event === 'error' || String(progress.result || '').toLowerCase() === 'error') {
+        const target = status || progress.summary || 'Task failed';
+        return {
+            id: `${baseId}-error-${target}-${timestamp}`,
+            type: 'error',
+            label: 'Error',
+            target: compactTarget(target),
+            status: 'failed',
+            error: target,
+            timestamp,
+        };
+    }
+
+    if (event === 'task_boundary' && !fromTool) {
+        return null;
+    }
 
     if (lower.includes('waiting for approval')) {
         return {
@@ -1649,6 +2322,8 @@ export function parseProgressStatus(progress: TaskProgress): WorkEvent | null {
             label: lower.startsWith('edited ') ? 'Edited' : 'Modified',
             target: compactTarget(target),
             path: path || undefined,
+            hasDiff: false,
+            reviewable: false,
             status: progress.is_active ? 'running' : 'completed',
             timestamp,
         };
@@ -1711,7 +2386,7 @@ export function parseProgressStatus(progress: TaskProgress): WorkEvent | null {
         };
     }
 
-    if ((event === 'phase' || event === 'task_boundary' || event === 'mission_progress' || genericTaskName) && !fromTool && !isGenericProgressText(status)) {
+    if ((event === 'phase' || event === 'mission_progress' || genericTaskName) && !fromTool && !isGenericProgressText(status)) {
         const target = cleanProgressTarget(status);
         return {
             id: `${baseId}-phase-${target}`,
@@ -1755,9 +2430,16 @@ function basenameTarget(target: string): string {
 
 function isDuplicateWorkEvent(a: WorkEvent, b: WorkEvent): boolean {
     if (a.type !== b.type) return false;
+    if (a.type === 'worker' && a.agentId && b.agentId) return a.agentId === b.agentId;
 
     const aTarget = normalizedWorkTarget(a);
     const bTarget = normalizedWorkTarget(b);
+    if (a.type === 'approval') {
+        const aGeneric = !aTarget || /waiting for approval|approval required|permission/i.test(aTarget);
+        const bGeneric = !bTarget || /waiting for approval|approval required|permission/i.test(bTarget);
+        return a.id === b.id || aTarget === bTarget || aGeneric || bGeneric;
+    }
+
     if (!aTarget || !bTarget) return a.id === b.id;
     if (aTarget === bTarget) return true;
 
@@ -1769,7 +2451,7 @@ function isDuplicateWorkEvent(a: WorkEvent, b: WorkEvent): boolean {
 }
 
 function mergeWorkEvent(existing: WorkEvent, incoming: WorkEvent): WorkEvent {
-    const statusRank = { failed: 4, waiting: 3, completed: 2, running: 1 } as const;
+    const statusRank = { failed: 4, completed: 3, waiting: 2, running: 1 } as const;
     const existingRank = existing.status ? statusRank[existing.status] : 0;
     const incomingRank = incoming.status ? statusRank[incoming.status] : 0;
     const mergedStatus = existing.type === 'approval' && incoming.type === 'approval'
@@ -1788,13 +2470,24 @@ function mergeWorkEvent(existing: WorkEvent, incoming: WorkEvent): WorkEvent {
         if (incoming.status === 'running') return capCommandPreview(`${current}${next}`);
         return capCommandPreview(next);
     };
+    const mergedId = existing.type === 'approval' && incoming.type === 'approval' && incoming.id.startsWith('approval-')
+        ? incoming.id
+        : existing.id;
+    const mergeLineRanges = () => {
+        if (!incoming.lineRange) return existing.lineRange;
+        if (!existing.lineRange) return incoming.lineRange;
+        const ranges = existing.lineRange.split(',').map(part => part.trim()).filter(Boolean);
+        if (!ranges.includes(incoming.lineRange)) ranges.push(incoming.lineRange);
+        return ranges.join(', ');
+    };
     return {
         ...existing,
         ...incoming,
-        id: existing.id,
+        id: mergedId,
         label: existing.label !== 'Agent activity' ? existing.label : incoming.label,
         target: existing.target && existing.target.length >= (incoming.target || '').length ? existing.target : incoming.target || existing.target,
         path: existing.path || incoming.path,
+        lineRange: mergeLineRanges(),
         command: incoming.command || existing.command,
         script: incoming.script || existing.script,
         resultPreview: mergeResultPreview(),
@@ -1818,7 +2511,7 @@ function recalculateWorkSummary(summary: WorkSummary): WorkSummary {
         : sortedItems.reduce((latest, item, index) => item.status === 'running' ? index : latest, -1);
     const normalizedItems = sortedItems
         .map((item, index) => {
-            if (item.type === 'approval' && item.status === 'waiting' && isTerminalSummary) {
+            if (item.status === 'waiting' && isTerminalSummary) {
                 return { ...item, status: 'completed' as const };
             }
             if (item.status !== 'running') return item;
@@ -1835,6 +2528,7 @@ function recalculateWorkSummary(summary: WorkSummary): WorkSummary {
         search: new Set<string>(),
         command: new Set<string>(),
         edit: new Set<string>(),
+        task: new Set<string>(),
         worker: new Set<string>(),
         approval: new Set<string>(),
     };
@@ -1854,6 +2548,7 @@ function recalculateWorkSummary(summary: WorkSummary): WorkSummary {
         }
         if (item.type === 'command') seen.command.add(key);
         if (item.type === 'edit') seen.edit.add(key);
+        if (item.type === 'task') seen.task.add(key);
         if (item.type === 'worker') seen.worker.add(key);
         if (item.type === 'approval') seen.approval.add(key);
     });
@@ -1868,6 +2563,7 @@ function recalculateWorkSummary(summary: WorkSummary): WorkSummary {
             searches: seen.search.size,
             commands: seen.command.size,
             edits: seen.edit.size,
+            tasks: seen.task.size,
             workers: seen.worker.size,
             approvals: seen.approval.size,
         },
@@ -1972,18 +2668,74 @@ export function upsertWorkEvents(
     };
 }
 
+export function completeWorkSummaryForTurn(
+    summaries: Record<string, WorkSummary>,
+    turnId: string | null | undefined,
+    sessionId: string | undefined,
+): Record<string, WorkSummary> {
+    if (!turnId) return completeActiveWorkSummaries(summaries, sessionId);
+    const existing = summaries[turnId];
+    if (existing && isTerminalWorkStatus(existing.status) && existing.status !== 'completed') {
+        return summaries;
+    }
+    return upsertWorkEvents(summaries, turnId, sessionId, [], 'completed');
+}
+
+export function completeRuntimeWorkSummaries(
+    summaries: Record<string, WorkSummary>,
+    turnId: string | null | undefined,
+    sessionId: string | undefined,
+    closeSessionActive: boolean,
+): Record<string, WorkSummary> {
+    const next = turnId
+        ? completeWorkSummaryForTurn(summaries, turnId, sessionId)
+        : summaries;
+    return closeSessionActive ? completeActiveWorkSummaries(next, sessionId) : next;
+}
+
+export function completeActiveWorkSummaries(
+    summaries: Record<string, WorkSummary>,
+    sessionId: string | undefined,
+): Record<string, WorkSummary> {
+    let changed = false;
+    const next = Object.entries(summaries).reduce<Record<string, WorkSummary>>((acc, [turnId, summary]) => {
+        const sameSession = !sessionId || !summary.sessionId || summary.sessionId === sessionId;
+        if (sameSession && (summary.status === 'running' || summary.status === 'waiting')) {
+            changed = true;
+            acc[turnId] = upsertWorkEvents({ [turnId]: summary }, turnId, summary.sessionId || sessionId, [], 'completed')[turnId];
+        } else {
+            acc[turnId] = summary;
+        }
+        return acc;
+    }, {});
+    return changed ? next : summaries;
+}
+
 export function closeEditRows(
     summaries: Record<string, WorkSummary>,
     files: string[] = [],
     decision: 'accepted' | 'rejected' = 'accepted',
+    proposalIds: string[] = [],
 ): Record<string, WorkSummary> {
     const normalizedFiles = new Set(files.map(file => compactTarget(file).toLowerCase()).filter(Boolean));
+    const normalizedProposalIds = new Set(proposalIds.map(id => String(id).toLowerCase()).filter(Boolean));
     let changed = false;
 
     const next = Object.entries(summaries).reduce<Record<string, WorkSummary>>((acc, [turnId, summary]) => {
         const items = summary.items.map(item => {
             if (item.type !== 'edit' || item.status !== 'waiting') return item;
             const target = compactTarget(item.path || item.target || '').toLowerCase();
+            const idMatches = normalizedProposalIds.size > 0 && normalizedProposalIds.has(item.id.replace(/^pending-edit-/, '').toLowerCase());
+            if (normalizedProposalIds.size > 0 && !idMatches && normalizedFiles.size === 0) return item;
+            if (idMatches) {
+                changed = true;
+                return {
+                    ...item,
+                    label: decision === 'rejected' ? 'Changes discarded' : item.label,
+                    status: 'completed' as const,
+                    timestamp: Date.now(),
+                };
+            }
             if (normalizedFiles.size > 0 && !normalizedFiles.has(target)) return item;
             changed = true;
             return {
@@ -2051,6 +2803,7 @@ function statusFromProgress(progress: TaskProgress): WorkSummaryStatus {
     const event = (progress.event || '').toLowerCase();
     const result = (progress.result || '').toLowerCase();
     if (/waiting for approval/i.test(status)) return 'waiting';
+    if (event === 'stopped' || result === 'stopped' || result === 'budget_exceeded') return 'stopped';
     if (event === 'error' || result === 'error' || /failed|error/i.test(status)) return 'failed';
     if (/stopped|aborted|cancelled/i.test(status)) return 'stopped';
     if (event === 'completed' || result === 'completed' || /mission accomplished|task complete/i.test(status)) return 'completed';
@@ -2091,6 +2844,7 @@ export function useChat(sessionId: string | null = null) {
     const [currentMode, setCurrentMode] = useState<string>('code');
     const [taskProgress, setTaskProgress] = useState<TaskProgress | null>(null);
     const [workSummariesByTurn, setWorkSummariesByTurn] = useState<Record<string, WorkSummary>>({});
+    const [queuedTurnsByRunId, setQueuedTurnsByRunId] = useState<Record<string, QueuedTurnState>>({});
     const [pendingPermissions, setPendingPermissions] = useState<Record<string, any>>({});
     const [pendingEdits, setPendingEdits] = useState<any[]>([]);
     const [isStopping, setIsStopping] = useState(false);
@@ -2104,19 +2858,71 @@ export function useChat(sessionId: string | null = null) {
     const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const messagesRef = useRef<ChatMessage[]>([]);
     const activeRunIdRef = useRef<string | null>(null);
-    const stoppedRunIdsRef = useRef<Set<string>>(new Set());
+    const terminalRunStatesRef = useRef<Map<string, WorkSummaryStatus>>(new Map());
     const suppressUnscopedEventsUntilRef = useRef(0);
     const DEBOUNCE_MS = 400; // Aggressive debounce to prevent crash during heavy streaming
 
-    const shouldIgnoreRuntimeEvent = useCallback((runId?: string) => {
-        if (runId) return stoppedRunIdsRef.current.has(runId);
+    const markRunTerminal = useCallback((runId?: string | null, status: WorkSummaryStatus = 'completed') => {
+        const id = runId || activeRunIdRef.current;
+        if (id) terminalRunStatesRef.current.set(id, status);
+        suppressUnscopedEventsUntilRef.current = Date.now() + 15000;
+        return id;
+    }, []);
+
+    const shouldIgnoreRuntimeEvent = useCallback((runId?: string, options: { allowCompletedChatUpdate?: boolean } = {}) => {
+        if (runId) {
+            const terminalStatus = terminalRunStatesRef.current.get(runId);
+            if (!terminalStatus) return false;
+            return !(options.allowCompletedChatUpdate && terminalStatus === 'completed');
+        }
         return Date.now() < suppressUnscopedEventsUntilRef.current;
     }, []);
 
+    const markQueuedRunStarted = useCallback((runId?: string, payloadSessionId?: string) => {
+        if (!runId) return;
+        setQueuedTurnsByRunId(prev => {
+            const queued = prev[runId];
+            if (!queued) return prev;
+            if (sessionId && payloadSessionId && payloadSessionId !== sessionId) return prev;
+            return {
+                ...prev,
+                [runId]: {
+                    ...queued,
+                    status: 'running',
+                    sessionId: queued.sessionId || payloadSessionId || sessionId || undefined,
+                },
+            };
+        });
+    }, [sessionId]);
+
+    const clearQueuedRun = useCallback((runId?: string | null, payloadSessionId?: string) => {
+        if (!runId) return;
+        setQueuedTurnsByRunId(prev => {
+            const queued = prev[runId];
+            if (!queued) return prev;
+            if (sessionId && payloadSessionId && payloadSessionId !== sessionId) return prev;
+            const next = { ...prev };
+            delete next[runId];
+            return next;
+        });
+    }, [sessionId]);
+
+    const failQueuedRun = useCallback((payload: QueuedMessagePayload | undefined) => {
+        const queued = normalizeQueuedTurnPayload(payload, sessionId);
+        if (!queued || !queuedTurnMatchesSession(queued, sessionId)) return;
+        setQueuedTurnsByRunId(prev => ({
+            ...prev,
+            [queued.runId]: {
+                ...(prev[queued.runId] || queued),
+                ...queued,
+                status: 'failed',
+                error: queued.error || 'Queued message failed.',
+            },
+        }));
+    }, [sessionId]);
+
     const finishStoppedRun = useCallback((runId?: string | null) => {
-        const id = runId || activeRunIdRef.current;
-        if (id) stoppedRunIdsRef.current.add(id);
-        suppressUnscopedEventsUntilRef.current = Date.now() + 15000;
+        const id = markRunTerminal(runId, 'stopped');
         activeRunIdRef.current = null;
         pendingUpdateRef.current = null;
         if (debounceTimerRef.current) {
@@ -2128,9 +2934,10 @@ export function useChat(sessionId: string | null = null) {
         setTaskProgress(prev => prev ? { ...prev, is_active: false, status: 'Stopped' } : null);
         if (id) {
             setWorkSummariesByTurn(prev => upsertWorkEvents(prev, id, sessionId || undefined, [], 'stopped'));
+            clearQueuedRun(id, sessionId || undefined);
         }
         setPendingPermissions({});
-    }, [sessionId]);
+    }, [clearQueuedRun, markRunTerminal, sessionId]);
 
     useEffect(() => {
         messagesRef.current = messages;
@@ -2160,11 +2967,7 @@ export function useChat(sessionId: string | null = null) {
             delete next[id];
             return next;
         });
-        setWorkSummariesByTurn(prev => {
-            const turnId = activeRunIdRef.current;
-            if (!turnId) return prev;
-            return upsertWorkEvents(prev, turnId, sessionId || undefined, [], 'running');
-        });
+        setWorkSummariesByTurn(prev => closeApprovalRows(prev, `approval-${id}`));
     }, [postMessage, sessionId]);
 
     const finalizeStreamingMessages = useCallback(() => {
@@ -2203,39 +3006,19 @@ export function useChat(sessionId: string | null = null) {
                     const update = normalizeChatUpdate(message);
                     if (!update) return;
                     if (sessionId && update.session_id && update.session_id !== sessionId) return;
-                    if (shouldIgnoreRuntimeEvent(update.run_id || update.message?.run_id)) return;
+                    if (shouldIgnoreRuntimeEvent(update.run_id || update.message?.run_id, { allowCompletedChatUpdate: true })) return;
                     if (!update.message?.id || !update.message?.role) return; // Filter empty dummy messages
-                    const incomingMessage = {
+                    markQueuedRunStarted(update.run_id || update.message.run_id, update.session_id || sessionId || undefined);
+                    const incomingMessage = withInferredRunPhase({
                         timestamp: Date.now(),
                         ...update.message,
                         run_id: update.message.run_id || update.run_id,
                         turn_id: getTurnId(update.message, update.run_id || activeRunIdRef.current)
-                    } as ChatMessage;
+                    } as ChatMessage);
                     const turnId = getTurnId(incomingMessage, update.run_id || activeRunIdRef.current);
                     const forceWorkCommentary = shouldCreateWorkCommentary(incomingMessage);
-                    const commentaryEvent = messageToCommentaryEvent(incomingMessage, forceWorkCommentary);
                     const keepAssistantBubble = shouldKeepAssistantBubble(incomingMessage, forceWorkCommentary);
-                    const workEvents: WorkEvent[] = [
-                        ...(commentaryEvent ? [commentaryEvent] : []),
-                        ...((incomingMessage.activities || [])
-                            .map((activity, index) => activityToWorkEvent(activity, index))
-                            .filter(Boolean) as WorkEvent[]),
-                        ...((incomingMessage.toolCalls || [])
-                            .map(classifyTool)
-                            .filter(Boolean) as WorkEvent[]),
-                        ...(((incomingMessage as any).artifacts || [])
-                            .filter(isTimelineArtifact)
-                            .map((artifact: any, index: number) => ({
-                            id: `artifact-${artifact.path || artifact.title || index}`,
-                            type: 'artifact' as const,
-                            label: 'Document',
-                            target: artifactDisplayTarget(artifact),
-                            path: artifact.path,
-                            artifactType: artifact.type,
-                            status: 'completed' as const,
-                            timestamp: incomingMessage.timestamp || Date.now(),
-                        }))),
-                    ];
+                    const workEvents = timelineEventsFromMessage(incomingMessage, true);
                     if (workEvents.length > 0) {
                         setWorkSummariesByTurn(prev => upsertWorkEvents(
                             prev,
@@ -2302,15 +3085,36 @@ export function useChat(sessionId: string | null = null) {
                             return [...prev, incomingMessage];
                         });
                         if (incomingMessage.role === 'assistant') {
-                            setIsLoading(false);
-                            if (!hasWorkPayload(incomingMessage)) {
-                                setWorkSummariesByTurn(prev => upsertWorkEvents(
-                                    prev,
-                                    turnId,
-                                    update.session_id || sessionId || undefined,
-                                    [],
-                                    incomingMessage.errorInfo ? 'failed' : 'completed'
-                                ));
+                            const finalRunMatches = !update.run_id || !activeRunIdRef.current || update.run_id === activeRunIdRef.current;
+                            const intermediateDraft = isIntermediateAssistantDraft(incomingMessage);
+                            if (!intermediateDraft) {
+                                clearQueuedRun(update.run_id || incomingMessage.run_id, update.session_id || sessionId || undefined);
+                            }
+                            if (finalRunMatches && !intermediateDraft) {
+                                setIsLoading(false);
+                            }
+                            if (!intermediateDraft && !hasWorkPayload(incomingMessage)) {
+                                setWorkSummariesByTurn(prev => {
+                                    const nextStatus: WorkSummaryStatus = incomingMessage.errorInfo ? 'failed' : 'completed';
+                                    if (nextStatus === 'completed') {
+                                        return completeRuntimeWorkSummaries(
+                                            prev,
+                                            turnId,
+                                            update.session_id || sessionId || undefined,
+                                            finalRunMatches
+                                        );
+                                    }
+                                    return upsertWorkEvents(prev, turnId, update.session_id || sessionId || undefined, [], nextStatus);
+                                });
+                            }
+                            if (finalRunMatches && !intermediateDraft) {
+                                activeRunIdRef.current = null;
+                                setIsStopping(false);
+                                setPendingPermissions({});
+                                setPendingEdits([]);
+                                if (!incomingMessage.errorInfo) {
+                                    setTaskProgress(prev => prev ? { ...prev, is_active: false } : prev);
+                                }
                             }
                         }
                     } else {
@@ -2339,7 +3143,7 @@ export function useChat(sessionId: string | null = null) {
                                 ...prev,
                                 [request.id]: request
                             }));
-                            const turnId = activeRunIdRef.current || `turn-${request.id}`;
+                            const turnId = request.runId || request.run_id || activeRunIdRef.current || `turn-${request.id}`;
                             setWorkSummariesByTurn(prev => upsertWorkEvents(prev, turnId, request.sessionId || sessionId || undefined, [{
                                 id: `approval-${request.id}`,
                                 type: 'approval',
@@ -2370,9 +3174,21 @@ export function useChat(sessionId: string | null = null) {
                         if (sessionId && payloadSessionId && payloadSessionId !== sessionId) return;
                         if (shouldIgnoreRuntimeEvent(payload.run_id || payload.runId)) return;
                         const files = payload.files || payload.filePaths || [];
+                        const proposalIds = payload.proposalIds || [];
                         const decision = payload.decision === 'rejected' ? 'rejected' : 'accepted';
                         setPendingEdits([]);
-                        setWorkSummariesByTurn(prev => closeEditRows(prev, files, decision));
+                        setWorkSummariesByTurn(prev => closeEditRows(prev, files, decision, proposalIds));
+                    }
+                    break;
+                case 'plan_decision_result':
+                    {
+                        const payload = (message.payload || {}) as PlanDecisionResultPayload;
+                        const payloadSessionId = payload.session_id || payload.sessionId;
+                        setMessages(prev => {
+                            const hasExplicitArtifactMatch = hasMatchingPlanArtifact(prev, payload);
+                            if (sessionId && payloadSessionId && payloadSessionId !== sessionId && !hasExplicitArtifactMatch) return prev;
+                            return applyPlanDecisionResult(prev, payload);
+                        });
                     }
                     break;
                 case 'ask_completion_result':
@@ -2381,16 +3197,48 @@ export function useChat(sessionId: string | null = null) {
                         const payloadSessionId = payload.session_id || payload.sessionId;
                         if (sessionId && payloadSessionId && payloadSessionId !== sessionId) return;
                         if (shouldIgnoreRuntimeEvent(payload.run_id)) return;
+                        const completionRunId = payload.run_id || activeRunIdRef.current;
+                        const matchesActiveRun = !payload.run_id || !activeRunIdRef.current || payload.run_id === activeRunIdRef.current;
+                        console.log('[useChat] Received ask_completion_result', {
+                            session_id: payloadSessionId || sessionId,
+                            run_id: payload.run_id,
+                            active_run_id: activeRunIdRef.current,
+                            matches_active_run: matchesActiveRun,
+                        });
+                        markRunTerminal(completionRunId, 'completed');
+                        if (matchesActiveRun) {
+                            finalizeStreamingMessages();
+                            setMessages(prev => promoteLatestIntermediateDraft(prev, completionRunId));
+                            activeRunIdRef.current = null;
+                            setIsLoading(false);
+                            setIsStopping(false);
+                            setPendingPermissions({});
+                            setPendingEdits([]);
+                            setTaskProgress(prev => {
+                                if (!prev) return null;
+                                if (completionRunId && prev.run_id && prev.run_id !== completionRunId) return prev;
+                                return {
+                                    ...prev,
+                                    is_active: false,
+                                    result: prev.result || 'COMPLETED',
+                                    status: prev.status || 'Task complete',
+                                    completed_at: prev.completed_at || Date.now(),
+                                };
+                            });
+                        }
+                        setWorkSummariesByTurn(prev => completeRuntimeWorkSummaries(
+                            prev,
+                            completionRunId,
+                            payloadSessionId || sessionId || undefined,
+                            matchesActiveRun
+                        ));
+                        clearQueuedRun(completionRunId, payloadSessionId || sessionId || undefined);
+                        console.log('[useChat] Applied ask_completion_result cleanup', {
+                            session_id: payloadSessionId || sessionId,
+                            run_id: completionRunId,
+                            active_cleanup: matchesActiveRun,
+                        });
                     }
-                    finalizeStreamingMessages();
-                    setIsLoading(false);
-                    setIsStopping(false);
-                    setTaskProgress(prev => prev ? { ...prev, is_active: false } : null);
-                    setWorkSummariesByTurn(prev => {
-                        const turnId = activeRunIdRef.current;
-                        if (!turnId) return prev;
-                        return upsertWorkEvents(prev, turnId, sessionId || undefined, [], 'completed');
-                    });
                     break;
                 case 'generation_cancelled':
                 case 'run_aborted':
@@ -2405,14 +3253,18 @@ export function useChat(sessionId: string | null = null) {
                 case 'chat_cleared':
                     setMessages([]);
                     setWorkSummariesByTurn({});
+                    setQueuedTurnsByRunId({});
                     setHubTasks([]);
                     break;
                 case 'state':
                     // ... existing
-                            const state = message.payload as { messages?: ChatMessage[]; mode?: string; todos?: Todo[]; session_id?: string };
+                    const state = message.payload as { messages?: ChatMessage[]; mode?: string; todos?: Todo[]; session_id?: string };
+                    if (sessionId && state.session_id && state.session_id !== sessionId) return;
                     if (state.messages) {
-                        setMessages(filterRenderableMessages(state.messages));
-                        setWorkSummariesByTurn({});
+                        const nextMessages = promoteCompletedIntermediateDrafts(filterRenderableMessages(state.messages.map(withInferredRunPhase)));
+                        setMessages(nextMessages);
+                        setWorkSummariesByTurn(rebuildWorkSummariesFromMessages(nextMessages, state.session_id || sessionId || undefined));
+                        setQueuedTurnsByRunId({});
                     }
                     if (!activeRunIdRef.current) {
                         setTaskProgress(null);
@@ -2423,9 +3275,15 @@ export function useChat(sessionId: string | null = null) {
                     if (state.todos) setTodos(state.todos);
                     break;
                 case 'session_loaded':
-                    const loaded = message.payload as { messages?: ChatMessage[]; todos?: Todo[] };
-                    setMessages(filterRenderableMessages(loaded.messages || []));
-                    setWorkSummariesByTurn({});
+                    const loaded = message.payload as { id?: string; session_id?: string; sessionId?: string; messages?: ChatMessage[]; todos?: Todo[] };
+                    const loadedSessionId = loaded.id || loaded.session_id || loaded.sessionId;
+                    if (sessionId && loadedSessionId && loadedSessionId !== sessionId) return;
+                    {
+                        const nextMessages = promoteCompletedIntermediateDrafts(filterRenderableMessages((loaded.messages || []).map(withInferredRunPhase)));
+                        setMessages(nextMessages);
+                        setWorkSummariesByTurn(rebuildWorkSummariesFromMessages(nextMessages, loadedSessionId || sessionId || undefined));
+                    }
+                    setQueuedTurnsByRunId({});
                     if (!activeRunIdRef.current) {
                         setTaskProgress(null);
                     }
@@ -2457,6 +3315,7 @@ export function useChat(sessionId: string | null = null) {
                         const payload = (message.payload || {}) as CommandEvent;
                         if (sessionId && payload.session_id && payload.session_id !== sessionId) return;
                         if (shouldIgnoreRuntimeEvent(payload.run_id)) return;
+                        markQueuedRunStarted(payload.run_id, payload.session_id || sessionId || undefined);
                         const workEvent = commandEventToWorkEvent(payload);
                         if (!workEvent) return;
                         const turnId = resolveRuntimeTurnIdForEvent({
@@ -2483,6 +3342,7 @@ export function useChat(sessionId: string | null = null) {
                         const payload = (message.payload || {}) as ToolLifecycleEventPayload;
                         if (sessionId && payload.session_id && payload.session_id !== sessionId) return;
                         if (shouldIgnoreRuntimeEvent(payload.run_id)) return;
+                        markQueuedRunStarted(payload.run_id, payload.session_id || sessionId || undefined);
                         const workEvent = toolLifecycleEventToWorkEvent(payload);
                         const turnId = resolveRuntimeTurnIdForEvent({
                             runId: payload.run_id,
@@ -2519,6 +3379,7 @@ export function useChat(sessionId: string | null = null) {
                         };
                         if (sessionId && payload.session_id && payload.session_id !== sessionId) return;
                         if (shouldIgnoreRuntimeEvent(payload.run_id)) return;
+                        markQueuedRunStarted(payload.run_id, payload.session_id || sessionId || undefined);
                         const turnId = payload.run_id || activeRunIdRef.current || `context-${payload.timestamp || Date.now()}`;
                         const failed = /failed/i.test(payload.event || '') || Boolean(payload.error);
                         setWorkSummariesByTurn(prev => upsertWorkEvents(prev, turnId, payload.session_id || sessionId || undefined, [{
@@ -2549,6 +3410,7 @@ export function useChat(sessionId: string | null = null) {
                         };
                         if (sessionId && payload.session_id && payload.session_id !== sessionId) return;
                         if (shouldIgnoreRuntimeEvent(payload.run_id)) return;
+                        markQueuedRunStarted(payload.run_id, payload.session_id || sessionId || undefined);
                         const failed = /failed/i.test(payload.event || '') || Boolean(payload.error);
                         const turnId = payload.run_id || activeRunIdRef.current || `checkpoint-${payload.timestamp || Date.now()}`;
                         setWorkSummariesByTurn(prev => upsertWorkEvents(prev, turnId, payload.session_id || sessionId || undefined, [{
@@ -2564,7 +3426,26 @@ export function useChat(sessionId: string | null = null) {
                     }
                     break;
                 case 'message_queued':
-                    setIsLoading(true);
+                    {
+                        const queued = normalizeQueuedTurnPayload(message.payload as QueuedMessagePayload, sessionId);
+                        if (!queued || !queuedTurnMatchesSession(queued, sessionId)) return;
+                        setQueuedTurnsByRunId(prev => ({ ...prev, [queued.runId]: queued }));
+                        setWorkSummariesByTurn(prev => {
+                            const summary = prev[queued.runId];
+                            if (!summary || summary.items.length > 0) return prev;
+                            const next = { ...prev };
+                            delete next[queued.runId];
+                            return next;
+                        });
+                        if (activeRunIdRef.current === queued.runId) {
+                            activeRunIdRef.current = null;
+                        }
+                        setIsLoading(true);
+                    }
+                    break;
+                case 'queued_message_error':
+                    failQueuedRun(message.payload as QueuedMessagePayload);
+                    setIsLoading(false);
                     break;
                 case 'task_progress':
                     const progressPayload = normalizeTaskProgress(message) as TaskProgress | null;
@@ -2572,6 +3453,7 @@ export function useChat(sessionId: string | null = null) {
                     if (shouldIgnoreRuntimeEvent(progressPayload.run_id)) return;
                     const progress = normalizeProgressPayload(progressPayload);
                     if (sessionId && progress.session_id && progress.session_id !== sessionId) return;
+                    markQueuedRunStarted(progress.run_id, progress.session_id || sessionId || undefined);
                     setTaskProgress(progress);
                     if (progress.todos?.length) {
                         setTodos(progress.todos);
@@ -2579,13 +3461,37 @@ export function useChat(sessionId: string | null = null) {
                     {
                         const turnId = progress.run_id || activeRunIdRef.current || progress.turn_id || `progress-${progress.segment_id || Date.now()}`;
                         const workEvent = parseProgressStatus(progress);
-                        setWorkSummariesByTurn(prev => upsertWorkEvents(
-                            prev,
-                            turnId,
-                            progress.session_id || sessionId || undefined,
-                            workEvent ? [workEvent] : [],
-                            statusFromProgress(progress)
-                        ));
+                        const progressStatus = statusFromProgress(progress);
+                        const progressRunMatches = !progress.run_id || !activeRunIdRef.current || progress.run_id === activeRunIdRef.current;
+                        setWorkSummariesByTurn(prev => {
+                            const next = upsertWorkEvents(
+                                prev,
+                                turnId,
+                                progress.session_id || sessionId || undefined,
+                                workEvent ? [workEvent] : [],
+                                progressStatus
+                            );
+                            if (progressStatus === 'completed') {
+                                return completeRuntimeWorkSummaries(
+                                    next,
+                                    turnId,
+                                    progress.session_id || sessionId || undefined,
+                                    progressRunMatches
+                                );
+                            }
+                            return next;
+                        });
+                        if (isTerminalWorkStatus(progressStatus)) {
+                            clearQueuedRun(progress.run_id, progress.session_id || sessionId || undefined);
+                            if (progressRunMatches) {
+                                activeRunIdRef.current = null;
+                                setIsLoading(false);
+                                setIsStopping(false);
+                                setPendingPermissions({});
+                                setPendingEdits([]);
+                            }
+                            break;
+                        }
                     }
                     if (progress.is_active) {
                         setIsLoading(true); // Keep UI in loading state while tools are running
@@ -2594,23 +3500,51 @@ export function useChat(sessionId: string | null = null) {
                     }
                     break;
                 case 'pending_edits':
-                    if (shouldIgnoreRuntimeEvent((message.payload as any)?.run_id)) return;
-                    setPendingEdits(Array.isArray(message.payload) ? message.payload as any[] : []);
                     {
-                        const edits = Array.isArray(message.payload) ? message.payload as any[] : [];
-                        const turnId = (message.payload as any)?.run_id || activeRunIdRef.current;
+                        const payload = message.payload as any;
+                        const payloadRunId = pendingEditsPayloadRunId(payload);
+                        const payloadSessionId = pendingEditsPayloadSessionId(payload);
+                        if (payloadRunId && shouldIgnoreRuntimeEvent(payloadRunId)) return;
+                        if (payloadSessionId && sessionId && payloadSessionId !== sessionId) return;
+                        const edits = pendingEditsFromPayload(payload);
+                        setPendingEdits(edits);
+                        const turnId = payloadRunId || activeRunIdRef.current;
                         if (turnId && edits.length > 0) {
+                            const hasReviewableDiff = edits.some(edit => editPayloadHasDiff(edit) && !editPayloadFailed(edit) && edit.reviewable !== false);
+                            const hasFailedEdit = edits.some(editPayloadFailed);
+                            const nextSummaryStatus: WorkSummaryStatus = hasReviewableDiff
+                                ? 'waiting'
+                                : hasFailedEdit
+                                    ? 'failed'
+                                    : 'completed';
                             setWorkSummariesByTurn(prev => upsertWorkEvents(prev, turnId, sessionId || undefined, edits.map(edit => ({
-                                id: `pending-edit-${edit.filePath}`,
-                                type: 'edit' as const,
-                                label: edit.isNewFile ? 'Created' : 'Modified',
-                                target: compactTarget(edit.filePath || ''),
+                                id: `pending-edit-${edit.proposalId || edit.filePath || edit.relativePath}`,
+                                type: editPayloadFailed(edit) ? 'review' as const : 'edit' as const,
+                                label: editPayloadFailed(edit)
+                                    ? 'Review failed'
+                                    : editPayloadHasDiff(edit)
+                                        ? edit.isNewFile ? 'Created' : 'Modified'
+                                        : 'No changes',
+                                target: compactTarget(edit.relativePath || edit.filePath || edit.displayName || ''),
                                 path: edit.filePath,
+                                relativePath: edit.relativePath,
+                                displayName: edit.displayName,
+                                proposalId: edit.proposalId,
                                 additions: typeof edit.additions === 'number' ? edit.additions : undefined,
                                 deletions: typeof edit.deletions === 'number' ? edit.deletions : undefined,
-                                status: edit.status === 'conflicted' ? 'failed' as const : 'waiting' as const,
+                                state: edit.state || edit.status,
+                                hasDiff: editPayloadHasDiff(edit),
+                                reviewable: edit.reviewable,
+                                hunks: Array.isArray(edit.hunks) ? edit.hunks : undefined,
+                                diffPreview: typeof edit.diffPreview === 'string' ? edit.diffPreview : undefined,
+                                status: editPayloadFailed(edit)
+                                    ? 'failed' as const
+                                    : editPayloadHasDiff(edit) && edit.reviewable !== false
+                                        ? 'waiting' as const
+                                        : 'completed' as const,
+                                error: edit.error || edit.conflictReason,
                                 timestamp: Date.now(),
-                            })), 'waiting'));
+                            })), nextSummaryStatus));
                         } else if (edits.length === 0) {
                             setWorkSummariesByTurn(prev => closeEditRows(prev, [], 'accepted'));
                         }
@@ -2618,6 +3552,7 @@ export function useChat(sessionId: string | null = null) {
                     break;
                 case 'error':
                     const errMsg = (message.payload as { message: string }).message;
+                    markRunTerminal(activeRunIdRef.current, 'failed');
                     setMessages(prev => [...prev, {
                         id: `err-${Date.now()}`,
                         role: 'assistant',
@@ -2639,7 +3574,17 @@ export function useChat(sessionId: string | null = null) {
             }
         });
         return () => { unsubscribe(); };
-    }, [onMessage, sessionId, finalizeStreamingMessages, shouldIgnoreRuntimeEvent, finishStoppedRun]);
+    }, [
+        onMessage,
+        sessionId,
+        finalizeStreamingMessages,
+        shouldIgnoreRuntimeEvent,
+        finishStoppedRun,
+        markRunTerminal,
+        markQueuedRunStarted,
+        clearQueuedRun,
+        failQueuedRun
+    ]);
 
     // Request state when sessionId changes (restores history when switching sessions)
     useEffect(() => {
@@ -2648,10 +3593,13 @@ export function useChat(sessionId: string | null = null) {
         setTodos([]);
         setHubTasks([]);
         setWorkSummariesByTurn({});
+        setQueuedTurnsByRunId({});
         setTaskProgress(null);
         setPendingPermissions({});
         setPendingEdits([]);
         activeRunIdRef.current = null;
+        terminalRunStatesRef.current.clear();
+        suppressUnscopedEventsUntilRef.current = 0;
         pendingUpdateRef.current = null;
         if (debounceTimerRef.current) {
             clearTimeout(debounceTimerRef.current);
@@ -2681,33 +3629,13 @@ export function useChat(sessionId: string | null = null) {
         // Slash Command Interception
         if (content.trim().startsWith('/')) {
             const [cmd] = content.trim().split(' ');
-            if (cmd === '/clear' || cmd === '/reset') {
+            if (cmd === '/clear') {
                 postMessage({ type: 'clear_chat' });
                 return;
             }
-            // /mode is handled by backend text processing usually, or we can handle it here if we want explicit event.
-            // For now, let other commands pass through to backend (e.g. /mode)
         }
 
-        const userMessage: ChatMessage = {
-            id: `msg-${Date.now()}`,
-            role: 'user',
-            content: content.trim(),
-            timestamp: Date.now()
-        };
         const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        activeRunIdRef.current = runId;
-        stoppedRunIdsRef.current.delete(runId);
-        suppressUnscopedEventsUntilRef.current = 0;
-
-        setMessages(prev => [...prev, { ...userMessage, run_id: runId, turn_id: runId }]);
-        setTaskProgress(null);
-        setPendingPermissions({});
-        setWorkSummariesByTurn(prev => upsertWorkEvents(prev, runId, sessionId || undefined, [], 'running'));
-        setIsLoading(true);
-        setIsStopping(false);
-        setInputValue('');
-
         const contextPayload = contextFiles
             .filter(file => file?.path)
             .map(file => ({
@@ -2719,6 +3647,24 @@ export function useChat(sessionId: string | null = null) {
                 mime: file.mime,
                 stagedPath: file.stagedPath,
             }));
+        const userMessage: ChatMessage = {
+            id: `msg-${Date.now()}`,
+            role: 'user',
+            content: content.trim(),
+            timestamp: Date.now(),
+            contextFiles: contextPayload,
+        };
+        activeRunIdRef.current = activeRunIdRef.current || runId;
+        terminalRunStatesRef.current.delete(runId);
+        suppressUnscopedEventsUntilRef.current = 0;
+
+        setMessages(prev => [...prev, { ...userMessage, run_id: runId, turn_id: runId }]);
+        setTaskProgress(null);
+        setPendingPermissions({});
+        setWorkSummariesByTurn(prev => upsertWorkEvents(prev, runId, sessionId || undefined, [], 'running'));
+        setIsLoading(true);
+        setIsStopping(false);
+        setInputValue('');
 
         postMessage({
             type: 'send_message',
@@ -2727,13 +3673,6 @@ export function useChat(sessionId: string | null = null) {
                 : { content: content.trim(), run_id: runId, context_files: contextPayload, plan_mode: planMode }
         });
     }, [postMessage, sessionId]);
-
-    const switchMode = useCallback((mode: string) => {
-        postMessage({
-            type: 'send_message',
-            payload: { content: `/mode ${mode}` }
-        });
-    }, [postMessage]);
 
     const searchFiles = useCallback((query: string) => {
         postMessage({
@@ -2793,12 +3732,12 @@ export function useChat(sessionId: string | null = null) {
         taskProgress,
         taskRun,
         workSummariesByTurn,
+        queuedTurnsByRunId,
         fileResults,
         pendingPermissions,
         pendingEdits,
         setInputValue,
         sendMessage,
-        switchMode,
         searchFiles,
         executeCommand,
         saveCheckpoint,

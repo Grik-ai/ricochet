@@ -5,221 +5,98 @@
 </p>
 
 <p align="center">
-  <strong>AI coding agent for VS Code-compatible editors, powered by a local Go sidecar.</strong><br>
-  Plan, edit, review, verify, and control your workspace remotely through Live Mode.
+  <strong>Reviewable AI coding inside VS Code-compatible editors.</strong><br>
+  Chat with an agent, inspect its work timeline, review pending edits, and choose hosted or BYOK models.
 </p>
 
 <p align="center">
   <a href="https://marketplace.visualstudio.com/items?itemName=grik.ricochet"><img src="https://img.shields.io/visual-studio-marketplace/v/grik.ricochet?style=flat&logo=visual-studio-code&label=VS%20Code%20Marketplace" alt="VS Code Marketplace"></a>
-  <a href="https://goreportcard.com/report/github.com/Grik-ai/ricochet"><img src="https://goreportcard.com/badge/github.com/Grik-ai/ricochet" alt="Go Report Card"></a>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
-  <img src="https://img.shields.io/badge/BYOK-enabled-2ea44f" alt="BYOK enabled">
+  <a href="../LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="Apache 2.0 license"></a>
+  <img src="https://img.shields.io/badge/Grik%20Account-supported-111827" alt="Grik Account supported">
+  <img src="https://img.shields.io/badge/BYOK-supported-2ea44f" alt="BYOK supported">
 </p>
 
-<p align="center">
-  <a href="#features">Features</a> ·
-  <a href="#models-and-byok">Models and BYOK</a> ·
-  <a href="#installation">Installation</a> ·
-  <a href="#architecture">Architecture</a> ·
-  <a href="#development">Development</a>
-</p>
-
----
-
-Ricochet is a VS Code extension that connects a polished chat/review interface to `ricochet-core`, a native Go agent runtime. The extension handles editor integration, webview state, pending changes, diff review, checkpoints, and remote Live Mode controls while the core handles planning, tool execution, model routing, MCP, skills, and safeguards.
-
-## Features
+## What The Extension Provides
 
 | Feature | Description |
 | --- | --- |
-| Agent chat | Ask Ricochet to inspect, plan, edit, run commands, and summarize work. |
-| Plan / Act / Verify | Switch between planning, implementation, and verification workflows. |
-| Pending changes | Review AI edits through native diffs before applying them to the workspace. |
-| Checkpoints | Keep hidden git-backed checkpoints for task-level restore and inspection. |
-| Task timeline | See reads, searches, commands, edits, approvals, artifacts, workers, and errors. |
-| Swarm workers | Coordinate bounded subagents and batch workers for parallel investigation. |
-| Skills console | Load project, bundled, legacy, and root-rule skills into the agent context. |
-| MCP hub | Connect compatible Model Context Protocol servers and OAuth-backed tools. |
-| Live Mode / Ether | Route a session through Telegram or Discord when you are away from the IDE. |
-| Voice messages | Transcribe Telegram voice prompts through the configured Whisper flow. |
-| Multi-session history | Resume previous chats and keep separate task state per session. |
-| BYOK model picker | Use your own provider keys and choose free or paid models from the catalog. |
+| Agent chat | Ask Ricochet to inspect, plan, edit, run commands, and verify work. |
+| Task timeline | See file reads, searches, commands, edits, approvals, artifacts, and errors as typed events. |
+| Pending changes | Review proposed file edits through native diff views before applying them. |
+| Mission dashboard | Track live task progress, worker activity, Hub Tasks, and approvals. |
+| Model picker | Use Grik hosted subscription models or configure BYOK providers. |
+| Account view | Sign in with Grik and review account, credits, and local Ricochet usage estimates. |
+| Checkpoints | Inspect and restore task-level workspace snapshots. |
+| Live Mode | Optionally route the current session through Telegram or Discord. |
 
 ## Supported Editors
 
 - VS Code
 - Cursor
 - Windsurf
-- Other VS Code-compatible editors that can install marketplace extensions
+- Other VS Code-compatible editors that can install marketplace extensions or VSIX packages
 
-## Models And BYOK
+## Install
 
-Ricochet can run without a Ricochet subscription in BYOK mode. You configure your own provider key, select a model, and the Go core sends requests to that provider.
-
-Current provider defaults:
-
-| Setting | Value |
-| --- | --- |
-| Default provider | `openrouter` |
-| Default model | `qwen/qwen3-coder:free` |
-| BYOK | Enabled |
-| Marketplace id | `grik.ricochet` |
-
-The catalog includes free model entries such as OpenRouter `Qwen 3 Coder (Free)`, plus other free entries from configured providers. Paid models are also supported, but any provider costs are billed by the provider through your own API key.
-
-Provider families include OpenRouter, OpenAI-compatible APIs, DeepSeek, Mistral, Z.AI/GLM, OpenAI, Gemini, Anthropic, xAI, MiniMax, and Grik gateway models when configured.
-
-## Installation
-
-### Marketplace
+Install from the VS Code Marketplace:
 
 ```bash
 ext install grik.ricochet
 ```
 
-Then open the Ricochet activity bar view and configure a provider key in Settings.
-
-### From Source
+Or use the installer:
 
 ```bash
-git clone https://github.com/Grik-ai/ricochet.git
-cd ricochet
-
-cd extension-vscode
-npm install
-npm run build
+curl -fsSL https://grik.io/ricochet/install | sh
 ```
 
-To launch an Extension Development Host, open the repository in VS Code and press `F5`, or run the extension watch task:
+Package-manager entrypoints:
 
 ```bash
-cd extension-vscode
-npm run watch
+npx @grik-ai/ricochet-installer
+pnpm dlx @grik-ai/ricochet-installer
+bunx @grik-ai/ricochet-installer
+brew install grik-ai/tap/ricochet && ricochet-install
 ```
 
-## Extension Commands
+## Quick Start
 
-Ricochet contributes these commands:
+1. Open the Ricochet activity bar view.
+2. Sign in with Grik, or open Provider Access and add a BYOK provider key.
+3. Pick a model.
+4. Ask Ricochet to inspect, plan, implement, or verify a task.
+5. Review pending changes before saving them into the workspace.
 
-| Command | Purpose |
-| --- | --- |
-| `Ricochet: New Task` | Start a new agent session. |
-| `Ricochet: Toggle Live Mode` | Enable or disable Telegram/Discord remote control. |
-| `Ricochet: Open Agent` | Open the agent dashboard. |
-| `Ricochet: Open History` | Browse previous sessions. |
-| `Ricochet: Open Grik Account` | Open account and device login flows. |
-| `Ricochet: Open Settings` | Configure models, providers, skills, MCP, and Live Mode. |
-| `Ricochet: Install CLI Globally` | Install the bundled CLI on the system path. |
-| `Ricochet: Refresh Pending Changes` | Refresh the pending changes tree. |
-| `Ricochet: Accept/Reject File` | Apply or discard a pending file edit. |
-| `Ricochet: Accept/Reject Hunk` | Apply or discard a specific diff hunk. |
+## Model Access
 
-## Workflow
+Ricochet supports two access modes:
 
-1. The webview sends chat input and settings events to the extension.
-2. The extension starts or reuses `ricochet-core` as a stdio sidecar.
-3. The core streams assistant messages, task progress, tool lifecycle events, checkpoints, artifacts, and approval requests.
-4. File edits are registered as pending changes in the extension and shown through native diff review.
-5. Approved edits are applied to the workspace; rejected edits are discarded.
-6. Live Mode can route the same session through Telegram or Discord and surface approval requests remotely.
+- **Grik Account** for hosted subscription models. Grik-managed credentials and billing limits are not stored in the repository.
+- **BYOK providers** for users who want to use their own provider keys locally.
 
-## Architecture
+See [../docs/providers.md](../docs/providers.md) for the provider catalog and key storage model.
 
-```text
-extension-vscode/
-  src/extension.ts                 activation and command registration
-  src/core-process.ts              sidecar lifecycle and JSON-RPC transport
-  src/webview-provider.ts          webview bridge and message routing
-  src/services/chat/               chat events, pending edit proposals, Live Mode
-  src/services/diff/               native diff and pending edit review
-  src/services/checkpoints/        shadow checkpoint integration
-  src/services/session/            local session state
-  src/services/mcp/                MCP bridge integration
+## Safety Notes
 
-webview/
-  src/components/chat/             chat timeline, input, task summaries, approvals
-  src/components/settings/         providers, models, skills, MCP, permissions
-  src/components/checkpoints/      checkpoint list and restore UI
-  src/hooks/                       chat, sessions, live mode, usage, network health
+Ricochet can inspect files, propose edits, and run commands. Use workspace trust, review pending changes, and keep provider keys in local settings or environment variables.
 
-core/
-  internal/agent/                  orchestration, planning, providers, workers
-  internal/tools/                  filesystem, command, MCP, skill, batch tools
-  internal/safeguard/              permissions, approvals, ignored paths
-  internal/livemode/               Telegram/Discord session routing
-```
-
-## Configuration
-
-Local settings are stored under `~/.ricochet/`:
-
-| File or directory | Purpose |
-| --- | --- |
-| `settings.json` | Provider keys, selected model, Live Mode settings, extension preferences. |
-| `permissions.json` | Auto-approval and "always allow" decisions. |
-| `mcp_tokens.json` | OAuth tokens for MCP servers. |
-| `sessions/` | Persistent chat and task history. |
-
-Workspace configuration can live in `.ricochet/`, including project skills and MCP settings.
-
-## Live Mode
-
-Live Mode lets the active Ricochet session receive input from Telegram or Discord:
-
-1. Configure the bot token and chat/user allowlist in Settings.
-2. Toggle Live Mode from the chat title bar.
-3. Send text or voice messages from your phone.
-4. Review progress, completions, and approval prompts remotely.
+Security details and disclosure guidance are in [../SECURITY.md](../SECURITY.md).
 
 ## Development
 
-Build the extension:
-
-```bash
-cd extension-vscode
-npm install
-npm run build
-```
-
-Run extension tests:
-
-```bash
-cd extension-vscode
-npm test
-```
-
-Build the webview:
-
-```bash
-cd webview
-npm install
-npm run build
-```
-
-Build and test the Go core:
-
-```bash
-cd core
-go build ./cmd/ricochet
-go test ./...
-```
-
-Build all packaged targets:
+From the repository root:
 
 ```bash
 ./scripts/build-all.sh
 ```
 
-## Contributing
+Focused extension workflow:
 
-Useful contributions include provider fixes, safer edit review flows, MCP integrations, UI polish, reproducible bug reports, tests, and documentation improvements.
+```bash
+cd extension-vscode
+npm install
+npm run build
+npm test -- --run
+```
 
-## Support
-
-Ricochet is an independent open-source project maintained by Igor Pryimak. If it helps you, please star the repository, open issues with clear reproduction steps, or send focused pull requests.
-
-- GitHub: [github.com/Grik-ai/ricochet](https://github.com/Grik-ai/ricochet)
-
-## License
-
-Apache 2.0 © 2025 Igor Pryimak, TK BAZIS - M / GRIK - AI
+Open the repository in VS Code and press `F5` to launch an Extension Development Host.

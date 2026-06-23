@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+    buildDiscordInstallUrl,
+    buildDiscordSetupSteps,
     buildContextHealth,
     buildContextReportText,
     contextThresholdPreset,
@@ -8,6 +10,16 @@ import {
 import type { ContextStatus } from '../../types/protocol';
 
 describe('Settings context helpers', () => {
+    it('builds Discord install helper links and setup copy', () => {
+        expect(buildDiscordInstallUrl('')).toBe('');
+        expect(buildDiscordInstallUrl(' 1456955772943466542 ')).toBe('https://discord.com/oauth2/authorize?client_id=1456955772943466542&permissions=311385246720&scope=bot%20applications.commands');
+
+        const setup = buildDiscordSetupSteps('1456955772943466542');
+        expect(setup).toContain('/ricochet new');
+        expect(setup).toContain('write directly there');
+        expect(setup).toContain('scope=bot%20applications.commands');
+    });
+
     it('maps threshold presets to compact values', () => {
         expect(contextThresholdPreset(60)).toBe('early');
         expect(contextThresholdPreset(70)).toBe('balanced');
