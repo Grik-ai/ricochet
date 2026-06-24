@@ -36,7 +36,7 @@ var slashCommandRegistry = []SlashCommandSpec{
 	{Name: "/status", Usage: "/status", Description: "Show session, model, usage, provider key, and Live/Ether state.", Category: "Core", Tier: SlashCommandPrimary, AvailableDuringRun: true, RemoteSafe: true, BridgeSafe: true, Source: "builtin", Implemented: true},
 	{Name: "/usage", Usage: "/usage", Description: "Show usage snapshot.", Category: "Core", Tier: SlashCommandAdvanced, AvailableDuringRun: true, RemoteSafe: true, BridgeSafe: true, Source: "builtin", Implemented: true},
 	{Name: "/doctor", Usage: "/doctor", Description: "Check local configuration health.", Category: "Core", Tier: SlashCommandAdvanced, Source: "builtin", Implemented: true},
-	{Name: "/login", Usage: "/login", Description: "Sign in to Ricochet Cloud/Grik with device login.", Category: "Account", Tier: SlashCommandAdvanced, Source: "builtin", Implemented: true},
+	{Name: "/login", Usage: "/login", Description: "Sign in to Grik in your browser with Google-backed device approval.", Category: "Account", Tier: SlashCommandAdvanced, Source: "builtin", Implemented: true},
 	{Name: "/logout", Usage: "/logout", Description: "Remove the saved Ricochet Cloud/Grik token.", Category: "Account", Tier: SlashCommandAdvanced, Source: "builtin", Implemented: true},
 	{Name: "/account", Usage: "/account [billing|models]", Description: "Show cloud account, billing, and subscription models.", Category: "Account", Tier: SlashCommandPrimary, Source: "builtin", Implemented: true},
 	{Name: "/billing", Usage: "/billing", Description: "Show cloud credits and entitlements.", Category: "Account", Tier: SlashCommandAdvanced, Source: "builtin", Implemented: true},

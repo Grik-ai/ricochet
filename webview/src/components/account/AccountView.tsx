@@ -278,7 +278,7 @@ function SignedOutState({ isBusy, onSignIn }: { isBusy: boolean; onSignIn: () =>
             </div>
             <h1 className="mt-5 text-[28px] font-semibold tracking-normal text-vscode-fg/94">Sign in to Grik</h1>
             <p className="mt-3 max-w-lg text-[13px] leading-6 text-vscode-fg/56">
-                Hosted Ricochet models use your Grik subscription and credits. BYOK providers stay separate in Provider Access.
+                Hosted Ricochet models use your Grik subscription and credits. Continue with Google in the browser; BYOK providers stay separate in Provider Access.
             </p>
             <button
                 onClick={onSignIn}
@@ -308,10 +308,10 @@ function DeviceLoginState({
     const remaining = useDeviceLoginCountdown(expiresAt);
     return (
         <section className="mx-auto flex min-h-[56vh] w-full max-w-xl flex-col justify-center py-8">
-            <div className="text-[11px] font-medium uppercase tracking-wide text-vscode-fg/45">Device login</div>
+            <div className="text-[11px] font-medium uppercase tracking-wide text-vscode-fg/45">Grik browser sign in</div>
             <h1 className="mt-3 text-[24px] font-semibold tracking-normal text-vscode-fg/92">Finish sign in in your browser</h1>
             <p className="mt-2 text-[13px] leading-6 text-vscode-fg/56">
-                Enter this code in the Grik browser window. Ricochet will connect automatically after approval.
+                Continue with Google on Grik, then approve this code. Ricochet will connect automatically after approval.
             </p>
             <div className="mt-5 rounded-lg bg-white/[0.04] px-4 py-4 text-center font-mono text-[24px] tracking-[0.2em] text-vscode-fg/92">
                 {userCode}
@@ -328,7 +328,7 @@ function DeviceLoginState({
             </div>
             <div className="mt-5 flex flex-wrap items-center gap-2">
                 <ActionButton primary onClick={() => onOpenExternal(verificationUrl)} icon={<ExternalLink className="h-3.5 w-3.5" />}>
-                    Open browser
+                    Continue with Google
                 </ActionButton>
                 <ActionButton onClick={onCancel}>
                     Cancel

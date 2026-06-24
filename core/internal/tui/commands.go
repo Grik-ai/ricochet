@@ -916,7 +916,7 @@ func (m *Model) loginCommand() tea.Cmd {
 		if m.MsgChan != nil {
 			m.MsgChan <- SlashCmdResMsg{
 				Command: "/login",
-				Response: fmt.Sprintf("Open `%s` and enter code `%s`.\nWaiting for approval until %s.",
+				Response: fmt.Sprintf("Open `%s`, continue with Google, and approve code `%s`.\nWaiting for approval until %s. Never share this code.",
 					code.VerificationURL,
 					code.UserCode,
 					code.ExpiresAt.Format(time.Kitchen),

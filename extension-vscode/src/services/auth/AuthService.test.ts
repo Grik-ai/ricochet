@@ -25,6 +25,39 @@ describe('AuthService account sync', () => {
         vi.restoreAllMocks();
     });
 
+    it('starts Grik device login and opens the Google-backed verification page', async () => {
+        const messages: Array<{ type: string; payload?: any }> = [];
+        const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            if (url.includes('/auth/device/code')) {
+                expect(init?.method).toBe('POST');
+                expect(JSON.parse(String(init?.body))).toMatchObject({
+                    client: 'ricochet-vscode',
+                    scope: 'ricochet_code',
+                });
+                return jsonResponse({
+                    device_code: 'device-code',
+                    user_code: 'GRIK-TEST',
+                    verification_url: 'https://grik.io/en/ricochet/device?user_code=GRIK-TEST',
+                    expires_in: 900,
+                    interval: 30,
+                });
+            }
+            throw new Error(`Unexpected fetch: ${url}`);
+        });
+        vi.stubGlobal('fetch', fetchMock);
+
+        const service = new AuthService(createContext(), (message) => messages.push(message));
+        await service.startLogin();
+        service.cancelLogin();
+
+        expect(latestPayload(messages, 'device_auth_started')).toMatchObject({
+            userCode: 'GRIK-TEST',
+            verificationUrl: 'https://grik.io/en/ricochet/device?user_code=GRIK-TEST',
+            interval: 30,
+        });
+    });
+
     it('keeps device login connected when /users/me temporarily fails', async () => {
         const messages: Array<{ type: string; payload?: any }> = [];
         const coreSync = vi.fn(async () => undefined);

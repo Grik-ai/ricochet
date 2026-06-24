@@ -112,6 +112,7 @@ describe('AccountView', () => {
 
         expect(html).toContain('Sign in to Grik');
         expect(html).toContain('Hosted Ricochet models use your Grik subscription');
+        expect(html).toContain('Continue with Google in the browser');
         expect(html).not.toContain('border border-vscode-border bg-vscode-input-bg');
     });
 
@@ -139,6 +140,8 @@ describe('AccountView', () => {
         expect(html).toContain('GRIK-TEST');
         expect(html).toContain('Expires in');
         expect(html).toContain('Never share this code');
+        expect(html).toContain('Continue with Google');
+        expect(html).toContain('Grik browser sign in');
     });
 
     it('renders quota warnings and model limit rows when Grik budget is constrained', () => {

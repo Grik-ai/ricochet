@@ -578,7 +578,7 @@ export function approvalModeFromSettings(settings?: AutoApprovalSettings): Appro
 const DEFAULT_COMMANDS = [
     { command: '/help', description: 'Show available Ricochet commands' },
     { command: '/status', description: 'Show session, provider, model, and Live status' },
-    { command: '/login', description: 'Sign in to Ricochet Cloud/Grik' },
+    { command: '/login', description: 'Sign in to Grik in your browser' },
     { command: '/provider', description: 'Choose or inspect the default provider' },
     { command: '/model', description: 'Choose or inspect the default model' },
     { command: '/apikey', description: 'Manage BYOK provider keys' },

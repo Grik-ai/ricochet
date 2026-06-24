@@ -28,6 +28,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     env:
       HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
+      HAS_VSCE_PAT: ${{ secrets.VSCE_PAT != '' }}
       HAS_HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
       HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
     steps:
@@ -57,8 +58,13 @@ jobs:
         run: |
           set -euo pipefail
           echo "OVSX_PAT configured: ${HAS_OVSX_PAT}"
+          echo "VSCE_PAT configured: ${HAS_VSCE_PAT}"
           echo "NPM_TOKEN configured: ${HAS_NPM_TOKEN}"
           echo "HOMEBREW_TAP_TOKEN configured: ${HAS_HOMEBREW_TAP_TOKEN}"
+
+          if [[ "${HAS_VSCE_PAT}" != "true" ]]; then
+            echo "::warning::Missing VSCE_PAT. The GitHub Release will still be created, but VS Code Marketplace publish will be skipped."
+          fi
 
           if [[ "${HAS_OVSX_PAT}" != "true" ]]; then
             echo "::warning::Missing OVSX_PAT. The GitHub Release will still be created, but Open VSX publish will be skipped."
@@ -206,6 +212,7 @@ jobs:
       VERSION: ${{ needs.validate.outputs.version }}
       TAG: ${{ needs.validate.outputs.tag }}
       HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
+      HAS_VSCE_PAT: ${{ secrets.VSCE_PAT != '' }}
       HAS_HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
       HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
     steps:
@@ -339,6 +346,22 @@ jobs:
         shell: bash
         run: |
           echo "::warning::NPM_TOKEN is not configured; skipping npm publish."
+
+      - name: Publish VS Code Marketplace
+        if: env.HAS_VSCE_PAT == 'true'
+        shell: bash
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          set -euo pipefail
+          cd extension-vscode
+          npx @vscode/vsce publish --packagePath "ricochet-${VERSION}.vsix" -p "${VSCE_PAT}"
+
+      - name: Skip VS Code Marketplace Publish
+        if: env.HAS_VSCE_PAT != 'true'
+        shell: bash
+        run: |
+          echo "::warning::VSCE_PAT is not configured; skipping VS Code Marketplace publish."
 
       - name: Publish Open VSX
         if: env.HAS_OVSX_PAT == 'true'
