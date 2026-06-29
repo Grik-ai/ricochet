@@ -36,22 +36,24 @@ type ProviderConfig struct {
 
 // ModelConfig defines a model available from the provider
 type ModelConfig struct {
-	ID                   string  `yaml:"id"`
-	Name                 string  `yaml:"name"`
-	ContextWindow        int     `yaml:"context_window"`
-	InputPrice           float64 `yaml:"input_price"`
-	OutputPrice          float64 `yaml:"output_price"`
-	IsFree               bool    `yaml:"free"`
-	SupportsTools        bool    `yaml:"supports_tools"`
-	Recommended          bool    `yaml:"recommended,omitempty"`
-	AccessMode           string  `yaml:"access_mode,omitempty"`
-	KeySource            string  `yaml:"key_source,omitempty"`
-	RequiresSubscription bool    `yaml:"requires_subscription,omitempty"`
-	BillingSKU           string  `yaml:"billing_sku,omitempty"`
-	Limited              bool    `yaml:"limited,omitempty"`
-	Deprecated           bool    `yaml:"deprecated,omitempty"`
-	APIType              string  `yaml:"api_type,omitempty"`
-	Source               string  `yaml:"source,omitempty"`
+	ID                    string  `yaml:"id"`
+	Name                  string  `yaml:"name"`
+	ContextWindow         int     `yaml:"context_window"`
+	InputPrice            float64 `yaml:"input_price"`
+	OutputPrice           float64 `yaml:"output_price"`
+	IsFree                bool    `yaml:"free"`
+	SupportsTools         bool    `yaml:"supports_tools"`
+	Recommended           bool    `yaml:"recommended,omitempty"`
+	AccessMode            string  `yaml:"access_mode,omitempty"`
+	KeySource             string  `yaml:"key_source,omitempty"`
+	CredentialMode        string  `yaml:"credential_mode,omitempty"`
+	RequiresSubscription  bool    `yaml:"requires_subscription,omitempty"`
+	BillingSKU            string  `yaml:"billing_sku,omitempty"`
+	Limited               bool    `yaml:"limited,omitempty"`
+	Deprecated            bool    `yaml:"deprecated,omitempty"`
+	APIType               string  `yaml:"api_type,omitempty"`
+	Source                string  `yaml:"source,omitempty"`
+	MayTrainOnYourPrompts bool    `yaml:"may_train_on_your_prompts,omitempty" json:"mayTrainOnYourPrompts,omitempty"`
 }
 
 // BYOKConfig defines bring-your-own-key settings
@@ -62,34 +64,38 @@ type BYOKConfig struct {
 
 // AvailableProvider is returned to frontend
 type AvailableProvider struct {
-	ID         string           `json:"id"`
-	Name       string           `json:"name"`
-	HasKey     bool             `json:"hasKey"`     // Server has key configured
-	HasUserKey bool             `json:"hasUserKey"` // User has configured a BYOK key
-	KeySource  string           `json:"keySource"`  // "server", "user", "hosted", "none"
-	AccessMode string           `json:"accessMode,omitempty"`
-	Available  bool             `json:"available"` // User can use (server key OR BYOK)
-	Models     []AvailableModel `json:"models"`
+	ID                             string           `json:"id"`
+	Name                           string           `json:"name"`
+	HasKey                         bool             `json:"hasKey"`     // Server has key configured
+	HasUserKey                     bool             `json:"hasUserKey"` // User has configured a BYOK key
+	KeySource                      string           `json:"keySource"`  // "server", "user", "hosted", "none"
+	AccessMode                     string           `json:"accessMode,omitempty"`
+	Available                      bool             `json:"available"` // User can use (server key OR BYOK)
+	Models                         []AvailableModel `json:"models"`
+	PromptTrainingModelCount       int              `json:"promptTrainingModelCount,omitempty"`
+	HiddenPromptTrainingModelCount int              `json:"hiddenPromptTrainingModelCount,omitempty"`
 }
 
 // AvailableModel is returned to frontend
 type AvailableModel struct {
-	ID                   string  `json:"id"`
-	Name                 string  `json:"name"`
-	ContextWindow        int     `json:"contextWindow"`
-	InputPrice           float64 `json:"inputPrice"`
-	OutputPrice          float64 `json:"outputPrice"`
-	IsFree               bool    `json:"isFree"`
-	SupportsTools        bool    `json:"supportsTools"`
-	Recommended          bool    `json:"recommended,omitempty"`
-	AccessMode           string  `json:"accessMode,omitempty"`
-	KeySource            string  `json:"keySource,omitempty"`
-	RequiresSubscription bool    `json:"requiresSubscription,omitempty"`
-	BillingSKU           string  `json:"billingSku,omitempty"`
-	Limited              bool    `json:"limited,omitempty"`
-	Deprecated           bool    `json:"deprecated,omitempty"`
-	APIType              string  `json:"apiType,omitempty"`
-	Source               string  `json:"source,omitempty"`
+	ID                    string  `json:"id"`
+	Name                  string  `json:"name"`
+	ContextWindow         int     `json:"contextWindow"`
+	InputPrice            float64 `json:"inputPrice"`
+	OutputPrice           float64 `json:"outputPrice"`
+	IsFree                bool    `json:"isFree"`
+	SupportsTools         bool    `json:"supportsTools"`
+	Recommended           bool    `json:"recommended,omitempty"`
+	AccessMode            string  `json:"accessMode,omitempty"`
+	KeySource             string  `json:"keySource,omitempty"`
+	CredentialMode        string  `json:"credentialMode,omitempty"`
+	RequiresSubscription  bool    `json:"requiresSubscription,omitempty"`
+	BillingSKU            string  `json:"billingSku,omitempty"`
+	Limited               bool    `json:"limited,omitempty"`
+	Deprecated            bool    `json:"deprecated,omitempty"`
+	APIType               string  `json:"apiType,omitempty"`
+	Source                string  `json:"source,omitempty"`
+	MayTrainOnYourPrompts bool    `json:"mayTrainOnYourPrompts,omitempty"`
 }
 
 // ProvidersManager handles loading and querying providers config
@@ -259,7 +265,14 @@ func (pm *ProvidersManager) GetAvailableProviders() []AvailableProvider {
 
 		hasServerKey := p.Key != ""
 		hasUserKey := pm.userKeys[id] != ""
-		available := hasServerKey || (pm.config.BYOK.Enabled && hasUserKey)
+		hasAnonymousModel := false
+		for _, m := range p.Models {
+			if normalizeCredentialMode(m, p) == "none" {
+				hasAnonymousModel = true
+				break
+			}
+		}
+		available := hasServerKey || (pm.config.BYOK.Enabled && hasUserKey) || hasAnonymousModel
 		keySource := "none"
 		if hasUserKey {
 			keySource = "user"
@@ -272,29 +285,36 @@ func (pm *ProvidersManager) GetAvailableProviders() []AvailableProvider {
 		accessMode := p.AccessMode
 
 		models := make([]AvailableModel, 0, len(p.Models))
+		promptTrainingModelCount := 0
 		for _, m := range p.Models {
 			modelAccessMode := normalizeModelAccessMode(m, accessMode)
 			modelKeySource := m.KeySource
 			if modelKeySource == "" && modelAccessMode == "subscription" {
 				modelKeySource = "hosted"
 			}
+			modelCredentialMode := normalizeCredentialMode(m, p)
+			if m.MayTrainOnYourPrompts {
+				promptTrainingModelCount++
+			}
 			models = append(models, AvailableModel{
-				ID:                   m.ID,
-				Name:                 m.Name,
-				ContextWindow:        m.ContextWindow,
-				InputPrice:           m.InputPrice,
-				OutputPrice:          m.OutputPrice,
-				IsFree:               m.IsFree,
-				SupportsTools:        m.SupportsTools,
-				Recommended:          m.Recommended,
-				AccessMode:           modelAccessMode,
-				KeySource:            modelKeySource,
-				RequiresSubscription: m.RequiresSubscription,
-				BillingSKU:           m.BillingSKU,
-				Limited:              m.Limited,
-				Deprecated:           m.Deprecated,
-				APIType:              m.APIType,
-				Source:               m.Source,
+				ID:                    m.ID,
+				Name:                  m.Name,
+				ContextWindow:         m.ContextWindow,
+				InputPrice:            m.InputPrice,
+				OutputPrice:           m.OutputPrice,
+				IsFree:                m.IsFree,
+				SupportsTools:         m.SupportsTools,
+				Recommended:           m.Recommended,
+				AccessMode:            modelAccessMode,
+				KeySource:             modelKeySource,
+				CredentialMode:        modelCredentialMode,
+				RequiresSubscription:  m.RequiresSubscription,
+				BillingSKU:            m.BillingSKU,
+				Limited:               m.Limited,
+				Deprecated:            m.Deprecated,
+				APIType:               m.APIType,
+				Source:                m.Source,
+				MayTrainOnYourPrompts: m.MayTrainOnYourPrompts,
 			})
 		}
 
@@ -304,18 +324,46 @@ func (pm *ProvidersManager) GetAvailableProviders() []AvailableProvider {
 		}
 
 		result = append(result, AvailableProvider{
-			ID:         id,
-			Name:       name,
-			HasKey:     hasServerKey,
-			HasUserKey: hasUserKey,
-			KeySource:  keySource,
-			AccessMode: accessMode,
-			Available:  available,
-			Models:     models,
+			ID:                       id,
+			Name:                     name,
+			HasKey:                   hasServerKey,
+			HasUserKey:               hasUserKey,
+			KeySource:                keySource,
+			AccessMode:               accessMode,
+			Available:                available,
+			Models:                   models,
+			PromptTrainingModelCount: promptTrainingModelCount,
 		})
 	}
 
 	return result
+}
+
+// FilterPromptTrainingModels hides only models explicitly marked as prompt-training risks.
+func FilterPromptTrainingModels(providers []AvailableProvider, hide bool) []AvailableProvider {
+	if !hide {
+		return providers
+	}
+
+	filtered := make([]AvailableProvider, 0, len(providers))
+	for _, provider := range providers {
+		models := make([]AvailableModel, 0, len(provider.Models))
+		hiddenCount := 0
+		for _, model := range provider.Models {
+			if model.MayTrainOnYourPrompts {
+				hiddenCount++
+				continue
+			}
+			models = append(models, model)
+		}
+		provider.Models = models
+		provider.HiddenPromptTrainingModelCount = hiddenCount
+		if provider.PromptTrainingModelCount == 0 && hiddenCount > 0 {
+			provider.PromptTrainingModelCount = hiddenCount
+		}
+		filtered = append(filtered, provider)
+	}
+	return filtered
 }
 
 func normalizeModelAccessMode(model ModelConfig, providerAccessMode string) string {
@@ -329,6 +377,43 @@ func normalizeModelAccessMode(model ModelConfig, providerAccessMode string) stri
 		return "subscription"
 	}
 	return "byok"
+}
+
+func normalizeCredentialMode(model ModelConfig, provider ProviderConfig) string {
+	if model.CredentialMode != "" {
+		return model.CredentialMode
+	}
+	modelAccessMode := normalizeModelAccessMode(model, provider.AccessMode)
+	if modelAccessMode == "subscription" || model.RequiresSubscription || model.KeySource == "hosted" || provider.KeySource == "hosted" && provider.AccessMode == "subscription" {
+		return "grik_account"
+	}
+	return "provider_key"
+}
+
+// ModelCredentialMode returns the credential mode required for a configured model.
+func (pm *ProvidersManager) ModelCredentialMode(providerID, modelID string) (string, bool) {
+	provider, ok := pm.config.Providers[providerID]
+	if !ok || !provider.Enabled {
+		return "", false
+	}
+	for _, model := range provider.Models {
+		if model.ID == modelID {
+			return normalizeCredentialMode(model, provider), true
+		}
+	}
+	return "", false
+}
+
+// ModelAllowsAnonymousUse reports whether a model explicitly requires no credentials.
+func (pm *ProvidersManager) ModelAllowsAnonymousUse(providerID, modelID string) bool {
+	mode, ok := pm.ModelCredentialMode(providerID, modelID)
+	return ok && mode == "none"
+}
+
+// ModelRequiresGrikAccount reports whether a model requires Grik hosted account access.
+func (pm *ProvidersManager) ModelRequiresGrikAccount(providerID, modelID string) bool {
+	mode, ok := pm.ModelCredentialMode(providerID, modelID)
+	return ok && mode == "grik_account"
 }
 
 type openRouterModelsResponse struct {
@@ -476,7 +561,7 @@ func (pm *ProvidersManager) GetDefaultProvider() string {
 	if pm.config.DefaultProvider != "" {
 		return pm.config.DefaultProvider
 	}
-	return "openrouter"
+	return "grik"
 }
 
 // GetDefaultModel returns the default model ID
@@ -498,13 +583,20 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				KeySource:  "hosted",
 				AccessMode: "subscription",
 				Models: []ModelConfig{
-					{ID: "ricochet-code", Name: "Grik Ricochet Code", ContextWindow: 200000, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", Recommended: true},
+					{ID: "qwen/qwen3-coder:free", Name: "Qwen 3 Coder (Anonymous Free)", ContextWindow: 262000, IsFree: true, SupportsTools: true, AccessMode: "free", CredentialMode: "none", Recommended: true},
+					{ID: "ricochet-code", Name: "Grik Ricochet Code", ContextWindow: 200000, InputPrice: 5.0, OutputPrice: 20.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", Recommended: true},
 					{ID: "openai/gpt-5.5", Name: "GPT-5.5 (Subscription)", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 30.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses", Recommended: true},
+					{ID: "openai/gpt-5.4", Name: "GPT-5.4 (Subscription)", ContextWindow: 1000000, InputPrice: 2.5, OutputPrice: 15.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses"},
+					{ID: "openai/gpt-5.4-mini", Name: "GPT-5.4 Mini (Subscription)", ContextWindow: 400000, InputPrice: 0.75, OutputPrice: 4.5, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses"},
 					{ID: "anthropic/claude-fable-5", Name: "Claude Fable 5 (Subscription)", ContextWindow: 1000000, InputPrice: 10.0, OutputPrice: 50.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 					{ID: "anthropic/claude-opus-4-8", Name: "Claude Opus 4.8 (Subscription)", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 25.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", Recommended: true},
 					{ID: "anthropic/claude-sonnet-4-6", Name: "Claude Sonnet 4.6 (Subscription)", ContextWindow: 1000000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 					{ID: "xai/grok-4.3", Name: "Grok 4.3 (Subscription)", ContextWindow: 1000000, InputPrice: 1.25, OutputPrice: 2.50, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
+					{ID: "xai/grok-build-0.1", Name: "Grok Build 0.1 (Subscription)", ContextWindow: 256000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
+					{ID: "deepseek/deepseek-v4-flash", Name: "DeepSeek V4 Flash (Subscription)", ContextWindow: 1000000, InputPrice: 0.14, OutputPrice: 0.28, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 					{ID: "deepseek/deepseek-v4-pro", Name: "DeepSeek V4 Pro (Subscription)", ContextWindow: 1000000, InputPrice: 0.435, OutputPrice: 0.87, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
+					{ID: "zhipu/glm-5.1", Name: "GLM-5.1 (Subscription)", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
+					{ID: "minimax/minimax-m3", Name: "MiniMax M3 (Subscription)", ContextWindow: 1000000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 				},
 				AttemptTimeoutMs: 1000,
 			},
@@ -627,7 +719,7 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				AttemptTimeoutMs: 1000,
 			},
 		},
-		DefaultProvider: "openrouter",
+		DefaultProvider: "grik",
 		DefaultModel:    "qwen/qwen3-coder:free",
 		BYOK: BYOKConfig{
 			Enabled:             true,

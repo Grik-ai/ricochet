@@ -1462,16 +1462,25 @@ func (c *Controller) resolveProviderForRequest(planMode bool) (Provider, Provide
 		return defaultProvider, defaultConfig
 	}
 
+	credentialMode, modelKnown := c.providersManager.ModelCredentialMode(modeModel.Provider, modeModel.Model)
+	if !modelKnown {
+		log.Printf("Mode model %s:%s skipped: model unavailable", modeModel.Provider, modeModel.Model)
+		return defaultProvider, defaultConfig
+	}
 	apiKey := c.providersManager.GetAPIKey(modeModel.Provider)
-	if apiKey == "" {
+	if apiKey == "" && credentialMode != "none" {
 		log.Printf("Mode model %s:%s skipped: API key unavailable", modeModel.Provider, modeModel.Model)
 		return defaultProvider, defaultConfig
+	}
+	if credentialMode == "none" {
+		apiKey = ""
 	}
 	modeConfig := defaultConfig
 	modeConfig.Provider = modeModel.Provider
 	modeConfig.Model = modeModel.Model
 	modeConfig.APIKey = apiKey
 	modeConfig.BaseURL = c.providersManager.GetBaseURL(modeModel.Provider)
+	modeConfig.CredentialMode = credentialMode
 
 	modeProvider, err := NewProvider(modeConfig)
 	if err != nil {
@@ -2020,26 +2029,43 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 				modelID := parts[1]
 
 				// Validate and get key
-				apiKey := c.providersManager.GetAPIKey(providerID)
-				if apiKey == "" {
+				credentialMode, modelKnown := c.providersManager.ModelCredentialMode(providerID, modelID)
+				if !modelKnown {
 					callback(ChatUpdate{
 						SessionID: input.SessionID,
 						Message: &ChatMessage{
 							ID:        uuid.New().String(),
 							Role:      "assistant",
-							Content:   fmt.Sprintf("❌ No API key found for provider '%s'. Please configure it in settings or .env.", providerID),
+							Content:   fmt.Sprintf("❌ Model '%s' is not available for provider '%s'.", modelID, providerID),
 							Timestamp: time.Now().UnixMilli(),
 						},
 					})
 					return nil
 				}
+				apiKey := c.providersManager.GetAPIKey(providerID)
+				if apiKey == "" && credentialMode != "none" {
+					callback(ChatUpdate{
+						SessionID: input.SessionID,
+						Message: &ChatMessage{
+							ID:        uuid.New().String(),
+							Role:      "assistant",
+							Content:   fmt.Sprintf("❌ No access configured for provider '%s'. Sign in to Grik or add an API key in settings.", providerID),
+							Timestamp: time.Now().UnixMilli(),
+						},
+					})
+					return nil
+				}
+				if credentialMode == "none" {
+					apiKey = ""
+				}
 
 				// Re-initialize provider
 				newConfig := ProviderConfig{
-					Provider: providerID,
-					Model:    modelID,
-					APIKey:   apiKey,
-					BaseURL:  c.providersManager.GetBaseURL(providerID),
+					Provider:       providerID,
+					Model:          modelID,
+					APIKey:         apiKey,
+					BaseURL:        c.providersManager.GetBaseURL(providerID),
+					CredentialMode: credentialMode,
 				}
 
 				newProvider, err := NewProvider(newConfig)

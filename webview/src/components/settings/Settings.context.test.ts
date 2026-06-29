@@ -6,6 +6,8 @@ import {
     buildContextReportText,
     contextThresholdPreset,
     contextThresholdPresetValue,
+    filterPromptTrainingModelsForStealth,
+    isPromptTrainingModel,
 } from './Settings';
 import type { ContextStatus } from '../../types/protocol';
 
@@ -61,5 +63,19 @@ describe('Settings context helpers', () => {
         expect(report).toContain('Restore points: on, 2 saved');
         expect(report).toContain('Warning: Context is 70% full');
         expect(report).toContain('Suggestion: Narrow broad file reads');
+    });
+
+    it('filters only models explicitly marked as prompt-training risks', () => {
+        const models = [
+            { id: 'training', mayTrainOnYourPrompts: true },
+            { id: 'private', mayTrainOnYourPrompts: false },
+            { id: 'unknown' },
+        ];
+
+        expect(isPromptTrainingModel(models[0])).toBe(true);
+        expect(isPromptTrainingModel(models[1])).toBe(false);
+        expect(isPromptTrainingModel(models[2])).toBe(false);
+        expect(filterPromptTrainingModelsForStealth(models, false).map(model => model.id)).toEqual(['training', 'private', 'unknown']);
+        expect(filterPromptTrainingModelsForStealth(models, true).map(model => model.id)).toEqual(['private', 'unknown']);
     });
 });

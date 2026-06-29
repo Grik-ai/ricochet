@@ -7,7 +7,7 @@ import {
     type WorkSummary
 } from '../../hooks/useChat';
 import { ChatMessage } from './ChatMessage';
-import { ChatInput } from './ChatInput';
+import { ChatInput, type SelectedModel } from './ChatInput';
 import { useLiveMode } from '../../hooks/useLiveMode';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
 import { useSessions } from '../../hooks/useSessions';
@@ -38,8 +38,8 @@ export interface ChatViewProps {
     agentState: ReturnType<typeof useAgentStateMachine>;
     mode: 'plan' | 'act' | 'mission';
     onModeChange: (mode: 'plan' | 'act' | 'mission') => void;
-    model: { id: string; name: string; provider: string };
-    onModelChange: (model: { id: string; name: string; provider: string }) => void;
+    model: SelectedModel;
+    onModelChange: (model: SelectedModel) => void;
 }
 
 export interface ChatRow {

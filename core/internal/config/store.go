@@ -80,17 +80,18 @@ type AuthSettings struct {
 }
 
 type Settings struct {
-	Tools              ToolsSettings        `json:"tools"`
-	Provider           ProviderSettings     `json:"provider"`
-	Auth               AuthSettings         `json:"auth,omitempty"`
-	LiveMode           LiveModeSettings     `json:"live_mode"`
-	Context            ContextSettings      `json:"context"`
-	AutoApproval       AutoApprovalSettings `json:"auto_approval"`
-	ModeModels         ModeModelSettings    `json:"mode_models,omitempty"`
-	Terminal           TerminalSettings     `json:"terminal,omitempty"`
-	Skills             SkillsSettings       `json:"skills,omitempty"`
-	Theme              string               `json:"theme"`
-	CustomInstructions string               `json:"custom_instructions,omitempty"`
+	Tools                    ToolsSettings        `json:"tools"`
+	Provider                 ProviderSettings     `json:"provider"`
+	Auth                     AuthSettings         `json:"auth,omitempty"`
+	LiveMode                 LiveModeSettings     `json:"live_mode"`
+	Context                  ContextSettings      `json:"context"`
+	AutoApproval             AutoApprovalSettings `json:"auto_approval"`
+	ModeModels               ModeModelSettings    `json:"mode_models,omitempty"`
+	Terminal                 TerminalSettings     `json:"terminal,omitempty"`
+	Skills                   SkillsSettings       `json:"skills,omitempty"`
+	Theme                    string               `json:"theme"`
+	CustomInstructions       string               `json:"custom_instructions,omitempty"`
+	HidePromptTrainingModels bool                 `json:"hide_prompt_training_models,omitempty"`
 }
 
 type ProviderSettings struct {
@@ -139,11 +140,10 @@ func NewStore() (*Store, error) {
 		return nil, fmt.Errorf("failed to create config dir: %w", err)
 	}
 
-	// Default provider - user must enter their own API key in Settings.
-	// NO hardcoded keys - security first.
-	defaultProvider := "openrouter"
+	// Default provider uses an anonymous Grik free model; paid hosted models still require account access.
+	defaultProvider := "grik"
 	defaultModel := "qwen/qwen3-coder:free"
-	defaultAPIKey := "" // User enters in Settings UI
+	defaultAPIKey := ""
 
 	// Optional: Check for dev environment variables (local dev only)
 	if envKey := os.Getenv("RICOCHET_OPENROUTER_KEY"); envKey != "" {

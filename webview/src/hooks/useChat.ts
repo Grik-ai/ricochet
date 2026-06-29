@@ -2831,6 +2831,43 @@ function normalizeProgressPayload(progress: TaskProgress): TaskProgress {
     };
 }
 
+export function completeTaskProgressForRun(
+    progress: TaskProgress | null,
+    runId: string | null | undefined,
+    terminalStatus: WorkSummaryStatus = 'completed',
+    now = Date.now(),
+): TaskProgress | null {
+    if (!progress) return null;
+    if (runId && progress.run_id && progress.run_id !== runId) return progress;
+
+    const currentStatus = statusFromProgress(progress);
+    const preserveCurrentTerminal = currentStatus === 'failed' || currentStatus === 'stopped' || currentStatus === 'rejected';
+    const nextStatus = preserveCurrentTerminal ? currentStatus : terminalStatus;
+    const isAlreadyTerminal = isTerminalWorkStatus(currentStatus);
+
+    let result = progress.result;
+    let status = progress.status;
+
+    if (nextStatus === 'completed') {
+        result = 'COMPLETED';
+        status = isAlreadyTerminal && currentStatus === 'completed' ? progress.status : 'Task complete';
+    } else if (nextStatus === 'failed') {
+        result = progress.result && progress.result !== 'RUNNING' ? progress.result : 'ERROR';
+        status = progress.status && currentStatus === 'failed' ? progress.status : 'Task failed';
+    } else if (nextStatus === 'stopped') {
+        result = progress.result && progress.result !== 'RUNNING' ? progress.result : 'STOPPED';
+        status = progress.status && currentStatus === 'stopped' ? progress.status : 'Stopped';
+    }
+
+    return {
+        ...progress,
+        is_active: false,
+        result,
+        status,
+        completed_at: progress.completed_at || now,
+    };
+}
+
 /**
  * Hook for managing chat state.
  * Handles message sending, receiving, and history.
@@ -2998,6 +3035,55 @@ export function useChat(sessionId: string | null = null) {
         });
     }, []);
 
+    const completeRuntimeRun = useCallback(({
+        runId,
+        payloadSessionId,
+        status = 'completed',
+        finalizeStreaming = false,
+        promoteIntermediateDraft = false,
+    }: {
+        runId?: string | null;
+        payloadSessionId?: string;
+        status?: WorkSummaryStatus;
+        finalizeStreaming?: boolean;
+        promoteIntermediateDraft?: boolean;
+    }) => {
+        const completionRunId = runId || activeRunIdRef.current;
+        const matchesActiveRun = !runId || !activeRunIdRef.current || runId === activeRunIdRef.current;
+        const effectiveSessionId = payloadSessionId || sessionId || undefined;
+
+        if (finalizeStreaming) {
+            finalizeStreamingMessages();
+        }
+
+        if (promoteIntermediateDraft) {
+            setMessages(prev => promoteLatestIntermediateDraft(prev, completionRunId));
+        }
+
+        if (matchesActiveRun) {
+            activeRunIdRef.current = null;
+            setIsLoading(false);
+            setIsStopping(false);
+            setPendingPermissions({});
+            setPendingEdits([]);
+        }
+
+        setTaskProgress(prev => completeTaskProgressForRun(prev, completionRunId, status));
+        setWorkSummariesByTurn(prev => {
+            if (status === 'completed') {
+                return completeRuntimeWorkSummaries(prev, completionRunId, effectiveSessionId, matchesActiveRun);
+            }
+            if (completionRunId) {
+                return upsertWorkEvents(prev, completionRunId, effectiveSessionId, [], status);
+            }
+            return matchesActiveRun ? completeActiveWorkSummaries(prev, effectiveSessionId) : prev;
+        });
+        clearQueuedRun(completionRunId, effectiveSessionId);
+        markRunTerminal(completionRunId, status);
+
+        return { completionRunId, matchesActiveRun };
+    }, [clearQueuedRun, finalizeStreamingMessages, markRunTerminal, sessionId]);
+
     // Listen for chat updates from extension
     useEffect(() => {
         const unsubscribe = onMessage((message) => {
@@ -3087,11 +3173,13 @@ export function useChat(sessionId: string | null = null) {
                         if (incomingMessage.role === 'assistant') {
                             const finalRunMatches = !update.run_id || !activeRunIdRef.current || update.run_id === activeRunIdRef.current;
                             const intermediateDraft = isIntermediateAssistantDraft(incomingMessage);
+                            const terminalAssistantFinal = finalRunMatches && !intermediateDraft && (
+                                Boolean(incomingMessage.errorInfo) ||
+                                assistantRunPhase(incomingMessage) === 'final' ||
+                                !hasWorkPayload(incomingMessage)
+                            );
                             if (!intermediateDraft) {
                                 clearQueuedRun(update.run_id || incomingMessage.run_id, update.session_id || sessionId || undefined);
-                            }
-                            if (finalRunMatches && !intermediateDraft) {
-                                setIsLoading(false);
                             }
                             if (!intermediateDraft && !hasWorkPayload(incomingMessage)) {
                                 setWorkSummariesByTurn(prev => {
@@ -3107,14 +3195,12 @@ export function useChat(sessionId: string | null = null) {
                                     return upsertWorkEvents(prev, turnId, update.session_id || sessionId || undefined, [], nextStatus);
                                 });
                             }
-                            if (finalRunMatches && !intermediateDraft) {
-                                activeRunIdRef.current = null;
-                                setIsStopping(false);
-                                setPendingPermissions({});
-                                setPendingEdits([]);
-                                if (!incomingMessage.errorInfo) {
-                                    setTaskProgress(prev => prev ? { ...prev, is_active: false } : prev);
-                                }
+                            if (terminalAssistantFinal) {
+                                completeRuntimeRun({
+                                    runId: update.run_id || incomingMessage.run_id,
+                                    payloadSessionId: update.session_id || sessionId || undefined,
+                                    status: incomingMessage.errorInfo ? 'failed' : 'completed',
+                                });
                             }
                         }
                     } else {
@@ -3196,47 +3282,25 @@ export function useChat(sessionId: string | null = null) {
                         const payload = (message.payload || {}) as { session_id?: string; sessionId?: string; run_id?: string };
                         const payloadSessionId = payload.session_id || payload.sessionId;
                         if (sessionId && payloadSessionId && payloadSessionId !== sessionId) return;
-                        if (shouldIgnoreRuntimeEvent(payload.run_id)) return;
+                        const previousTerminalStatus = payload.run_id ? terminalRunStatesRef.current.get(payload.run_id) : undefined;
                         const completionRunId = payload.run_id || activeRunIdRef.current;
-                        const matchesActiveRun = !payload.run_id || !activeRunIdRef.current || payload.run_id === activeRunIdRef.current;
                         console.log('[useChat] Received ask_completion_result', {
                             session_id: payloadSessionId || sessionId,
                             run_id: payload.run_id,
                             active_run_id: activeRunIdRef.current,
-                            matches_active_run: matchesActiveRun,
+                            matches_active_run: !payload.run_id || !activeRunIdRef.current || payload.run_id === activeRunIdRef.current,
                         });
-                        markRunTerminal(completionRunId, 'completed');
-                        if (matchesActiveRun) {
-                            finalizeStreamingMessages();
-                            setMessages(prev => promoteLatestIntermediateDraft(prev, completionRunId));
-                            activeRunIdRef.current = null;
-                            setIsLoading(false);
-                            setIsStopping(false);
-                            setPendingPermissions({});
-                            setPendingEdits([]);
-                            setTaskProgress(prev => {
-                                if (!prev) return null;
-                                if (completionRunId && prev.run_id && prev.run_id !== completionRunId) return prev;
-                                return {
-                                    ...prev,
-                                    is_active: false,
-                                    result: prev.result || 'COMPLETED',
-                                    status: prev.status || 'Task complete',
-                                    completed_at: prev.completed_at || Date.now(),
-                                };
-                            });
-                        }
-                        setWorkSummariesByTurn(prev => completeRuntimeWorkSummaries(
-                            prev,
-                            completionRunId,
-                            payloadSessionId || sessionId || undefined,
-                            matchesActiveRun
-                        ));
-                        clearQueuedRun(completionRunId, payloadSessionId || sessionId || undefined);
+                        const cleanup = completeRuntimeRun({
+                            runId: completionRunId,
+                            payloadSessionId: payloadSessionId || sessionId || undefined,
+                            status: previousTerminalStatus && previousTerminalStatus !== 'completed' ? previousTerminalStatus : 'completed',
+                            finalizeStreaming: true,
+                            promoteIntermediateDraft: true,
+                        });
                         console.log('[useChat] Applied ask_completion_result cleanup', {
                             session_id: payloadSessionId || sessionId,
-                            run_id: completionRunId,
-                            active_cleanup: matchesActiveRun,
+                            run_id: cleanup.completionRunId,
+                            active_cleanup: cleanup.matchesActiveRun,
                         });
                     }
                     break;
@@ -3453,6 +3517,9 @@ export function useChat(sessionId: string | null = null) {
                     if (shouldIgnoreRuntimeEvent(progressPayload.run_id)) return;
                     const progress = normalizeProgressPayload(progressPayload);
                     if (sessionId && progress.session_id && progress.session_id !== sessionId) return;
+                    if (progress.event === 'timeout_warning' && (!activeRunIdRef.current || (progress.run_id && progress.run_id !== activeRunIdRef.current))) {
+                        return;
+                    }
                     markQueuedRunStarted(progress.run_id, progress.session_id || sessionId || undefined);
                     setTaskProgress(progress);
                     if (progress.todos?.length) {
@@ -3482,14 +3549,11 @@ export function useChat(sessionId: string | null = null) {
                             return next;
                         });
                         if (isTerminalWorkStatus(progressStatus)) {
-                            clearQueuedRun(progress.run_id, progress.session_id || sessionId || undefined);
-                            if (progressRunMatches) {
-                                activeRunIdRef.current = null;
-                                setIsLoading(false);
-                                setIsStopping(false);
-                                setPendingPermissions({});
-                                setPendingEdits([]);
-                            }
+                            completeRuntimeRun({
+                                runId: progress.run_id,
+                                payloadSessionId: progress.session_id || sessionId || undefined,
+                                status: progressStatus,
+                            });
                             break;
                         }
                     }
@@ -3583,7 +3647,8 @@ export function useChat(sessionId: string | null = null) {
         markRunTerminal,
         markQueuedRunStarted,
         clearQueuedRun,
-        failQueuedRun
+        failQueuedRun,
+        completeRuntimeRun
     ]);
 
     // Request state when sessionId changes (restores history when switching sessions)

@@ -192,8 +192,10 @@ func (p *OpenAIResponsesProvider) Embed(ctx context.Context, texts []string) ([]
 
 func (p *OpenAIResponsesProvider) headers() map[string]string {
 	headers := map[string]string{
-		"Content-Type":  "application/json",
-		"Authorization": "Bearer " + p.apiKey,
+		"Content-Type": "application/json",
+	}
+	if p.apiKey != "" {
+		headers["Authorization"] = "Bearer " + p.apiKey
 	}
 	if p.organization != "" {
 		headers["OpenAI-Organization"] = p.organization

@@ -391,8 +391,10 @@ func maxInt(a, b int) int {
 
 func (p *OpenAIProvider) headers() map[string]string {
 	headers := map[string]string{
-		"Content-Type":  "application/json",
-		"Authorization": "Bearer " + p.apiKey,
+		"Content-Type": "application/json",
+	}
+	if p.apiKey != "" {
+		headers["Authorization"] = "Bearer " + p.apiKey
 	}
 
 	if p.organization != "" {

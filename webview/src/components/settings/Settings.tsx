@@ -23,6 +23,7 @@ import {
     RefreshCw,
     Search,
     Shield,
+    ShieldAlert,
     ShieldCheck,
     SlidersHorizontal,
     Terminal,
@@ -82,11 +83,13 @@ interface ModelInfo {
     recommended?: boolean;
     accessMode?: 'free' | 'byok' | 'subscription';
     keySource?: 'server' | 'user' | 'hosted' | 'none';
+    credentialMode?: 'none' | 'grik_account' | 'provider_key';
     requiresSubscription?: boolean;
     billingSku?: string;
     limited?: boolean;
     deprecated?: boolean;
     apiType?: string;
+    mayTrainOnYourPrompts?: boolean;
 }
 
 interface ProviderInfo {
@@ -98,6 +101,8 @@ interface ProviderInfo {
     accessMode?: 'free' | 'byok' | 'subscription';
     available: boolean;
     models: ModelInfo[];
+    promptTrainingModelCount?: number;
+    hiddenPromptTrainingModelCount?: number;
 }
 
 interface AutoApprovalSettings {
@@ -177,6 +182,7 @@ interface SettingsSnapshot {
     topP: number;
     maxTokens: number;
     customInstructions: string;
+    hidePromptTrainingModels: boolean;
 }
 
 const TABS = [
@@ -207,8 +213,11 @@ const FALLBACK_MODELS: Record<string, ModelInfo[]> = {
         { id: 'codestral-latest', name: 'Codestral', contextWindow: 32_000, inputPrice: 0, outputPrice: 0, isFree: true, supportsTools: true },
         { id: 'ministral-8b-latest', name: 'Ministral 8B', contextWindow: 128_000, inputPrice: 0, outputPrice: 0, isFree: true, supportsTools: true },
     ],
-    openrouter: [{ id: 'qwen/qwen3-coder:free', name: 'Qwen 3 Coder (Free)', contextWindow: 262_000, inputPrice: 0, outputPrice: 0, isFree: true, supportsTools: true, recommended: true, accessMode: 'free' }],
-    grik: [{ id: 'openai/gpt-5.5', name: 'GPT-5.5 (Subscription)', contextWindow: 1_000_000, inputPrice: 5, outputPrice: 30, isFree: false, supportsTools: true, recommended: true, accessMode: 'subscription', keySource: 'hosted', requiresSubscription: true, apiType: 'responses' }],
+    openrouter: [{ id: 'qwen/qwen3-coder:free', name: 'Qwen 3 Coder (Free)', contextWindow: 262_000, inputPrice: 0, outputPrice: 0, isFree: true, supportsTools: true, recommended: true, accessMode: 'free', credentialMode: 'provider_key' }],
+    grik: [
+        { id: 'qwen/qwen3-coder:free', name: 'Qwen 3 Coder (Anonymous Free)', contextWindow: 262_000, inputPrice: 0, outputPrice: 0, isFree: true, supportsTools: true, recommended: true, accessMode: 'free', credentialMode: 'none' },
+        { id: 'openai/gpt-5.5', name: 'GPT-5.5 (Subscription)', contextWindow: 1_000_000, inputPrice: 5, outputPrice: 30, isFree: false, supportsTools: true, recommended: true, accessMode: 'subscription', keySource: 'hosted', credentialMode: 'grik_account', requiresSubscription: true, apiType: 'responses' },
+    ],
 };
 
 const DEFAULT_AUTO_APPROVAL: AutoApprovalSettings = {
@@ -358,6 +367,15 @@ function modelAccessTone(model: ModelInfo): string {
     if (model.isFree || model.accessMode === 'free') return 'bg-green-400/10 text-green-400';
     if (model.requiresSubscription || model.accessMode === 'subscription') return 'bg-violet-400/10 text-violet-300';
     return 'bg-white/5 text-[#999]';
+}
+
+export function isPromptTrainingModel(model: Pick<ModelInfo, 'mayTrainOnYourPrompts'>): boolean {
+    return model.mayTrainOnYourPrompts === true;
+}
+
+export function filterPromptTrainingModelsForStealth<T extends Pick<ModelInfo, 'mayTrainOnYourPrompts'>>(models: T[], hidePromptTrainingModels: boolean): T[] {
+    if (!hidePromptTrainingModels) return models;
+    return models.filter(model => !isPromptTrainingModel(model));
 }
 
 function normalizeContext(value: Partial<ContextSettings>): ContextSettings {
@@ -568,6 +586,7 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
     const [maxTokens, setMaxTokens] = useState(4096);
     const [customInstructions, setCustomInstructions] = useState('');
     const [providers, setProviders] = useState<ProviderInfo[]>([]);
+    const [hidePromptTrainingModels, setHidePromptTrainingModels] = useState(false);
 
     const [telegramToken, setTelegramToken] = useState('');
     const [telegramChatId, setTelegramChatId] = useState('');
@@ -653,7 +672,10 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
     }, [providers]);
 
     const currentProvider = providerOptions.find(p => p.id === provider);
-    const availableModels = currentProvider?.models?.length ? currentProvider.models : (FALLBACK_MODELS[provider] || []);
+    const availableModels = useMemo(() => filterPromptTrainingModelsForStealth(
+        currentProvider?.models?.length ? currentProvider.models : (FALLBACK_MODELS[provider] || []),
+        hidePromptTrainingModels
+    ), [currentProvider, hidePromptTrainingModels, provider]);
 
     const catalogGroups = useMemo(() => {
         const query = modelSearch.trim().toLowerCase();
@@ -661,11 +683,15 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
             const providerMatches = query
                 ? p.name.toLowerCase().includes(query) || p.id.toLowerCase().includes(query)
                 : false;
-            const models = p.models
-                .map(m => ({
-                    ...m,
-                    recommended: Boolean(m.recommended || (m.supportsTools && (p.available || m.isFree))),
-                }))
+            const rawModels = p.models.map(m => ({
+                ...m,
+                recommended: Boolean(m.recommended || (m.supportsTools && (p.available || m.isFree))),
+            }));
+            const rawPromptTrainingCount = rawModels.filter(isPromptTrainingModel).length;
+            const serverHiddenPromptTrainingCount = p.hiddenPromptTrainingModelCount || 0;
+            const hiddenPromptTrainingCount = serverHiddenPromptTrainingCount + (hidePromptTrainingModels ? rawPromptTrainingCount : 0);
+            const visibleModels = filterPromptTrainingModelsForStealth(rawModels, hidePromptTrainingModels);
+            const models = visibleModels
                 .filter(item => {
                     if (modelFilter === 'free' && !item.isFree) return false;
                     if (modelFilter === 'recommended' && !item.recommended) return false;
@@ -676,17 +702,19 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
             return {
                 provider: p,
                 models,
-                totalCount: p.models.length,
-                freeCount: p.models.filter(item => item.isFree).length,
-                subscriptionCount: p.models.filter(item => item.requiresSubscription || item.accessMode === 'subscription').length,
-                limitedCount: p.models.filter(item => item.limited).length,
-                deprecatedCount: p.models.filter(item => item.deprecated).length,
-                paidCount: p.models.filter(item => !item.isFree && item.accessMode !== 'subscription').length,
+                totalCount: p.models.length + serverHiddenPromptTrainingCount,
+                freeCount: visibleModels.filter(item => item.isFree).length,
+                subscriptionCount: visibleModels.filter(item => item.requiresSubscription || item.accessMode === 'subscription').length,
+                limitedCount: visibleModels.filter(item => item.limited).length,
+                deprecatedCount: visibleModels.filter(item => item.deprecated).length,
+                paidCount: visibleModels.filter(item => !item.isFree && item.accessMode !== 'subscription').length,
+                promptTrainingCount: p.promptTrainingModelCount || rawPromptTrainingCount + serverHiddenPromptTrainingCount,
+                hiddenPromptTrainingCount,
             };
         });
 
         const visibleGroups = query
-            ? groups.filter(group => group.models.length > 0)
+            ? groups.filter(group => group.models.length > 0 || (group.hiddenPromptTrainingCount > 0 && (group.provider.name.toLowerCase().includes(query) || group.provider.id.toLowerCase().includes(query))))
             : groups;
 
         return visibleGroups.sort((a, b) => {
@@ -694,7 +722,7 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
             if (b.provider.id === provider) return 1;
             return a.provider.name.localeCompare(b.provider.name);
         });
-    }, [modelFilter, modelSearch, provider, providerOptions]);
+    }, [hidePromptTrainingModels, modelFilter, modelSearch, provider, providerOptions]);
 
     const visibleTabs = useMemo(() => {
         const query = settingsSearch.trim().toLowerCase();
@@ -725,6 +753,7 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
         topP,
         maxTokens,
         customInstructions,
+        hidePromptTrainingModels,
     });
 
     const currentSnapshot = buildSnapshot();
@@ -787,11 +816,10 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
     }, [activeTab, visibleTabs]);
 
     useEffect(() => {
-        const models = currentProvider?.models?.length ? currentProvider.models : (FALLBACK_MODELS[provider] || []);
-        if (models.length > 0 && (!model || !models.find(m => m.id === model))) {
-            setModel(models[0].id);
+        if (availableModels.length > 0 && (!model || !availableModels.find(m => m.id === model))) {
+            setModel(availableModels[0].id);
         }
-    }, [currentProvider, model, provider]);
+    }, [availableModels, model]);
 
     useEffect(() => {
         const unsubscribe = onMessage((message) => {
@@ -831,6 +859,7 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                     topP: Number(s.topP ?? 1),
                     maxTokens: Number(s.maxTokens ?? 4096),
                     customInstructions: (s.custom_instructions as string) || '',
+                    hidePromptTrainingModels: Boolean(s.hide_prompt_training_models ?? false),
                 };
                 setApiKeys(snapshot.apiKeys);
                 setProvider(snapshot.provider);
@@ -854,12 +883,16 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                 setTopP(snapshot.topP);
                 setMaxTokens(snapshot.maxTokens);
                 setCustomInstructions(snapshot.customInstructions);
+                setHidePromptTrainingModels(snapshot.hidePromptTrainingModels);
                 initialSnapshotRef.current = snapshot;
                 setSavedNotice(null);
             }
             if (message.type === 'models') {
-                const result = message.payload as { providers: ProviderInfo[] };
+                const result = message.payload as { providers: ProviderInfo[]; hide_prompt_training_models?: boolean };
                 setProviders(result.providers || []);
+                if (typeof result.hide_prompt_training_models === 'boolean') {
+                    setHidePromptTrainingModels(result.hide_prompt_training_models);
+                }
             }
             if (message.type === 'bot_verification_result') {
                 setBotInfo(message.payload as BotInfo);
@@ -958,8 +991,10 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                 topP: snapshot.topP,
                 maxTokens: snapshot.maxTokens,
                 customInstructions: snapshot.customInstructions,
+                hide_prompt_training_models: snapshot.hidePromptTrainingModels,
             },
         });
+        postMessage({ type: 'get_models' });
         initialSnapshotRef.current = snapshot;
         setSavedNotice('Saved');
     };
@@ -987,6 +1022,7 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
         setTopP(snapshot.topP);
         setMaxTokens(snapshot.maxTokens);
         setCustomInstructions(snapshot.customInstructions);
+        setHidePromptTrainingModels(snapshot.hidePromptTrainingModels);
         setSavedNotice(null);
     };
 
@@ -1176,11 +1212,31 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                 </div>
                             </section>
 
+                            <section className="rounded border border-white/10 bg-white/[0.03] p-4">
+                                <label className="flex cursor-pointer items-start gap-3">
+                                    <input
+                                        type="checkbox"
+                                        checked={hidePromptTrainingModels}
+                                        onChange={(event) => setHidePromptTrainingModels(event.target.checked)}
+                                        className="mt-0.5 h-4 w-4 accent-[#0e639c]"
+                                    />
+                                    <span className="min-w-0">
+                                        <span className="flex items-center gap-2 text-sm font-medium text-[#ddd]">
+                                            <ShieldAlert className="h-4 w-4 text-amber-300" />
+                                            Stealth Mode
+                                        </span>
+                                        <span className="mt-1 block text-[11px] text-[#888]">Hide models that may use prompts for training.</span>
+                                    </span>
+                                </label>
+                            </section>
+
                             <section className="space-y-4 border-t border-[#333] pt-5">
                                 <div className="flex flex-wrap items-center justify-between gap-3">
                                     <div>
                                         <h3 className="text-xs font-medium uppercase tracking-wide text-[#888]">Available Models</h3>
-                                        <p className="mt-1 text-[11px] text-[#777]">Models are grouped by provider. The active provider opens first.</p>
+                                        <p className="mt-1 text-[11px] text-[#777]">
+                                            {hidePromptTrainingModels ? 'Stealth Mode hides explicitly flagged prompt-training models.' : 'Models are grouped by provider. The active provider opens first.'}
+                                        </p>
                                     </div>
                                     <div className="flex items-center gap-1 rounded border border-white/10 bg-white/[0.03] p-1">
                                         {(['recommended', 'free', 'all'] as ModelFilter[]).map(filter => (
@@ -1237,6 +1293,8 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                                     </span>
                                                     <span className="flex shrink-0 flex-wrap justify-end gap-1.5 text-[10px]">
                                                         <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">{group.models.length}/{group.totalCount} models</span>
+                                                        {hidePromptTrainingModels && group.hiddenPromptTrainingCount > 0 && <span className="rounded bg-amber-400/10 px-1.5 py-0.5 text-amber-300">{group.hiddenPromptTrainingCount} hidden</span>}
+                                                        {!hidePromptTrainingModels && group.promptTrainingCount > 0 && <span className="rounded bg-amber-400/10 px-1.5 py-0.5 text-amber-300">{group.promptTrainingCount} may train</span>}
                                                         {group.freeCount > 0 && <span className="rounded bg-green-400/10 px-1.5 py-0.5 text-green-400">{group.freeCount} free</span>}
                                                         {group.subscriptionCount > 0 && <span className="rounded bg-violet-400/10 px-1.5 py-0.5 text-violet-300">{group.subscriptionCount} sub</span>}
                                                         {group.limitedCount > 0 && <span className="rounded bg-amber-400/10 px-1.5 py-0.5 text-amber-300">{group.limitedCount} limited</span>}
@@ -1280,6 +1338,12 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                                                                         {item.apiType}
                                                                                     </span>
                                                                                 )}
+                                                                                {item.mayTrainOnYourPrompts && (
+                                                                                    <span className="inline-flex items-center gap-1 rounded bg-amber-400/10 px-1.5 py-0.5 text-amber-300" title="This model may use prompts for training">
+                                                                                        <ShieldAlert className="h-3 w-3" />
+                                                                                        May train
+                                                                                    </span>
+                                                                                )}
                                                                                 {item.deprecated && (
                                                                                     <span className="rounded bg-red-400/10 px-1.5 py-0.5 text-red-300">
                                                                                         deprecated
@@ -1298,7 +1362,9 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                                             </div>
                                                         ) : (
                                                             <div className="rounded border border-dashed border-white/10 px-3 py-4 text-sm text-[#888]">
-                                                                No models from this provider match the current filters.
+                                                                {hidePromptTrainingModels && group.hiddenPromptTrainingCount > 0
+                                                                    ? `Stealth Mode is hiding ${group.hiddenPromptTrainingCount} prompt-training ${group.hiddenPromptTrainingCount === 1 ? 'model' : 'models'} from this provider.`
+                                                                    : 'No models from this provider match the current filters.'}
                                                             </div>
                                                         )}
                                                     </div>

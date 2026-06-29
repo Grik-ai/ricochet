@@ -91,6 +91,7 @@ type ProviderConfig struct {
 	APIKey           string  `json:"api_key"`
 	Model            string  `json:"model"`
 	BaseURL          string  `json:"base_url,omitempty"` // For custom endpoints
+	CredentialMode   string  `json:"credential_mode,omitempty"`
 	Organization     string  `json:"organization,omitempty"`
 	Project          string  `json:"project,omitempty"`
 	Temperature      float64 `json:"temperature,omitempty"`
@@ -251,7 +252,7 @@ func NewProvider(cfg ProviderConfig) (Provider, error) {
 			baseURL = cfg.BaseURL
 		}
 		apiKey := cfg.APIKey
-		if apiKey == "" {
+		if apiKey == "" && cfg.CredentialMode != "none" {
 			apiKey = os.Getenv("GRIKAI_ACCESS_TOKEN")
 		}
 		return NewOpenAIProvider(apiKey, cfg.Model, baseURL, "", "", cfg.AttemptTimeoutMs), nil

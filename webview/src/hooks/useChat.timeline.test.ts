@@ -6,6 +6,7 @@ import {
     buildTaskRunViewModel,
     buildTaskTokenUsage,
     classifyTool,
+    completeTaskProgressForRun,
     completeActiveWorkSummaries,
     completeRuntimeWorkSummaries,
     completeWorkSummaryForTurn,
@@ -1762,6 +1763,89 @@ describe('chat timeline normalization', () => {
 
         expect(taskRun?.status).toBe('stopped');
         expect(taskRun?.statusText).toBe('Run stopped after budget limit');
+    });
+
+    it('marks matching active task progress inactive on terminal cleanup', () => {
+        const progress = completeTaskProgressForRun({
+            task_name: 'Agent work',
+            status: 'Still working. The agent has not sent a final completion yet.',
+            result: 'RUNNING',
+            event: 'timeout_warning',
+            is_active: true,
+            run_id: 'run-active',
+            timestamp: 100,
+        }, 'run-active', 'completed', 200);
+
+        expect(progress).toMatchObject({
+            run_id: 'run-active',
+            is_active: false,
+            result: 'COMPLETED',
+            status: 'Task complete',
+            completed_at: 200,
+        });
+    });
+
+    it('clears unscoped active task progress when no active run remains', () => {
+        const progress = completeTaskProgressForRun({
+            task_name: 'Agent work',
+            status: 'Working',
+            result: 'RUNNING',
+            is_active: true,
+            timestamp: 100,
+        }, null, 'completed', 200);
+
+        expect(progress).toMatchObject({
+            is_active: false,
+            result: 'COMPLETED',
+            status: 'Task complete',
+            completed_at: 200,
+        });
+    });
+
+    it('preserves stopped and failed task progress when completion cleanup arrives later', () => {
+        const stopped = completeTaskProgressForRun({
+            task_name: 'Hub Task creation',
+            status: 'Run stopped after budget limit',
+            result: 'BUDGET_EXCEEDED',
+            event: 'stopped',
+            is_active: false,
+            run_id: 'run-stopped',
+            timestamp: 100,
+        }, 'run-stopped', 'completed', 200);
+
+        const failed = completeTaskProgressForRun({
+            task_name: 'Agent work',
+            status: 'Provider request failed',
+            result: 'ERROR',
+            event: 'error',
+            is_active: true,
+            run_id: 'run-failed',
+            timestamp: 100,
+        }, 'run-failed', 'completed', 200);
+
+        expect(stopped).toMatchObject({
+            is_active: false,
+            result: 'BUDGET_EXCEEDED',
+            status: 'Run stopped after budget limit',
+        });
+        expect(failed).toMatchObject({
+            is_active: false,
+            result: 'ERROR',
+            status: 'Provider request failed',
+        });
+    });
+
+    it('preserves unrelated active task progress during terminal cleanup for another run', () => {
+        const progress: TaskProgress = {
+            task_name: 'Agent work',
+            status: 'Still working',
+            result: 'RUNNING',
+            is_active: true,
+            run_id: 'run-other',
+            timestamp: 100,
+        };
+
+        expect(completeTaskProgressForRun(progress, 'run-completed', 'completed', 200)).toBe(progress);
     });
 
     it('rebuilds persisted work summaries from saved assistant tool metadata', () => {

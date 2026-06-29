@@ -495,7 +495,30 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 		json.Unmarshal(msg.Payload, &payload)
 		log.Printf("Received chat message: %s", payload.Content)
 
-		if h.Config.Provider.APIKey == "" && h.Providers != nil {
+		credentialMode := h.Config.Provider.CredentialMode
+		modelKnown := true
+		if h.Providers != nil {
+			if mode, ok := h.Providers.ModelCredentialMode(h.Config.Provider.Provider, h.Config.Provider.Model); ok {
+				credentialMode = mode
+				h.Config.Provider.CredentialMode = mode
+			} else {
+				modelKnown = false
+			}
+		}
+		if credentialMode == "none" {
+			h.Config.Provider.APIKey = ""
+		}
+
+		if !modelKnown {
+			writer.Send(protocol.RPCMessage{
+				ID:    msg.ID,
+				Type:  "response",
+				Error: fmt.Sprintf("Selected model %s/%s is not available. Choose another model in Settings.", h.Config.Provider.Provider, h.Config.Provider.Model),
+			})
+			return
+		}
+
+		if h.Config.Provider.APIKey == "" && h.Providers != nil && credentialMode != "none" {
 			// Fallback: try to resolve from ProvidersManager if missing in Config
 			resolved := h.Providers.GetAPIKey(h.Config.Provider.Provider)
 			if resolved != "" {
@@ -504,11 +527,15 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 			}
 		}
 
-		if h.Config.Provider.APIKey == "" {
+		if h.Config.Provider.APIKey == "" && credentialMode != "none" {
+			errorMessage := fmt.Sprintf("API key required for %s. Open Settings → Models and add a provider API key.", h.Config.Provider.Provider)
+			if credentialMode == "grik_account" || h.Providers != nil && h.Providers.ModelRequiresGrikAccount(h.Config.Provider.Provider, h.Config.Provider.Model) {
+				errorMessage = "Sign in to Grik or upgrade your account to use this hosted Ricochet model."
+			}
 			writer.Send(protocol.RPCMessage{
 				ID:    msg.ID,
 				Type:  "response",
-				Error: "⚠️ API key not configured. Please go to Settings and add your API key.",
+				Error: errorMessage,
 			})
 			return
 		}
@@ -786,14 +813,17 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 				ID:   msg.ID,
 				Type: "response",
 				Payload: protocol.EncodeRPC(map[string]interface{}{
-					"providers": []interface{}{},
+					"providers":                   []interface{}{},
+					"hide_prompt_training_models": false,
 				}),
 			})
 			return
 		}
 
+		hidePromptTrainingModels := false
 		if h.Settings != nil {
 			s := h.Settings.Get()
+			hidePromptTrainingModels = s.HidePromptTrainingModels
 			for providerID, key := range s.Provider.APIKeys {
 				h.Providers.SetUserKey(providerID, key)
 			}
@@ -811,11 +841,13 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 		}
 
 		providers := h.Providers.GetAvailableProviders()
+		providers = config.FilterPromptTrainingModels(providers, hidePromptTrainingModels)
 		writer.Send(protocol.RPCMessage{
 			ID:   msg.ID,
 			Type: "response",
 			Payload: protocol.EncodeRPC(map[string]interface{}{
-				"providers": providers,
+				"providers":                   providers,
+				"hide_prompt_training_models": hidePromptTrainingModels,
 			}),
 		})
 
@@ -1144,31 +1176,32 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 		}
 		s := h.Settings.Get()
 		settings := map[string]interface{}{
-			"provider":                 s.Provider.Provider,
-			"model":                    s.Provider.Model,
-			"apiKeys":                  s.Provider.APIKeys,
-			"embeddingProvider":        s.Provider.EmbeddingProvider,
-			"embeddingModel":           s.Provider.EmbeddingModel,
-			"temperature":              s.Provider.Temperature,
-			"topP":                     s.Provider.TopP,
-			"maxTokens":                s.Provider.MaxTokens,
-			"telegramToken":            s.LiveMode.TelegramToken,
-			"telegramChatId":           s.LiveMode.TelegramChatID,
-			"discordToken":             s.LiveMode.DiscordToken,
-			"discordApplicationId":     s.LiveMode.DiscordApplicationID,
-			"discordGuildId":           s.LiveMode.DiscordGuildID,
-			"discordAllowedUserIds":    s.LiveMode.DiscordAllowedUserIDs,
-			"discordAllowedChannelIds": s.LiveMode.DiscordAllowedChannelIDs,
-			"discordRequireMention":    s.LiveMode.DiscordRequireMention,
-			"discordTextMode":          s.LiveMode.DiscordTextMode,
-			"allowRemoteSessionStart":  s.LiveMode.AllowRemoteSessionStart,
-			"context":                  s.Context,
-			"auto_approval":            s.AutoApproval,
-			"mode_models":              s.ModeModels,
-			"terminal":                 s.Terminal,
-			"theme":                    s.Theme,
-			"custom_instructions":      s.CustomInstructions,
-			"customInstructions":       s.CustomInstructions,
+			"provider":                    s.Provider.Provider,
+			"model":                       s.Provider.Model,
+			"apiKeys":                     s.Provider.APIKeys,
+			"embeddingProvider":           s.Provider.EmbeddingProvider,
+			"embeddingModel":              s.Provider.EmbeddingModel,
+			"temperature":                 s.Provider.Temperature,
+			"topP":                        s.Provider.TopP,
+			"maxTokens":                   s.Provider.MaxTokens,
+			"telegramToken":               s.LiveMode.TelegramToken,
+			"telegramChatId":              s.LiveMode.TelegramChatID,
+			"discordToken":                s.LiveMode.DiscordToken,
+			"discordApplicationId":        s.LiveMode.DiscordApplicationID,
+			"discordGuildId":              s.LiveMode.DiscordGuildID,
+			"discordAllowedUserIds":       s.LiveMode.DiscordAllowedUserIDs,
+			"discordAllowedChannelIds":    s.LiveMode.DiscordAllowedChannelIDs,
+			"discordRequireMention":       s.LiveMode.DiscordRequireMention,
+			"discordTextMode":             s.LiveMode.DiscordTextMode,
+			"allowRemoteSessionStart":     s.LiveMode.AllowRemoteSessionStart,
+			"context":                     s.Context,
+			"auto_approval":               s.AutoApproval,
+			"mode_models":                 s.ModeModels,
+			"terminal":                    s.Terminal,
+			"theme":                       s.Theme,
+			"custom_instructions":         s.CustomInstructions,
+			"customInstructions":          s.CustomInstructions,
+			"hide_prompt_training_models": s.HidePromptTrainingModels,
 		}
 		writer.Send(protocol.RPCMessage{ID: msg.ID, Type: "settings_loaded", Payload: protocol.EncodeRPC(settings)})
 
@@ -1899,31 +1932,33 @@ func trimText(value string, limit int) string {
 
 func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWriter) {
 	var payload struct {
-		APIKeys                  *map[string]string           `json:"apiKeys"`
-		Provider                 *string                      `json:"provider"`
-		Model                    *string                      `json:"model"`
-		EmbeddingProvider        *string                      `json:"embeddingProvider"`
-		EmbeddingModel           *string                      `json:"embeddingModel"`
-		TelegramToken            *string                      `json:"telegramToken"`
-		TelegramChatID           *int64                       `json:"telegramChatId"`
-		DiscordToken             *string                      `json:"discordToken"`
-		DiscordApplicationID     *string                      `json:"discordApplicationId"`
-		DiscordGuildID           *string                      `json:"discordGuildId"`
-		DiscordAllowedUserIDs    *[]string                    `json:"discordAllowedUserIds"`
-		DiscordAllowedChannelIDs *[]string                    `json:"discordAllowedChannelIds"`
-		DiscordRequireMention    *bool                        `json:"discordRequireMention"`
-		DiscordTextMode          *bool                        `json:"discordTextMode"`
-		AllowRemoteSessionStart  *bool                        `json:"allowRemoteSessionStart"`
-		Context                  *config.ContextSettings      `json:"context,omitempty"`
-		AutoApproval             *config.AutoApprovalSettings `json:"auto_approval,omitempty"`
-		ModeModels               *config.ModeModelSettings    `json:"mode_models,omitempty"`
-		Terminal                 *config.TerminalSettings     `json:"terminal,omitempty"`
-		Temperature              *float64                     `json:"temperature"`
-		TopP                     *float64                     `json:"topP"`
-		TopPSnake                *float64                     `json:"top_p"`
-		MaxTokens                *int                         `json:"maxTokens"`
-		CustomInstructions       *string                      `json:"customInstructions"`
-		CustomInstructionsSnake  *string                      `json:"custom_instructions"`
+		APIKeys                       *map[string]string           `json:"apiKeys"`
+		Provider                      *string                      `json:"provider"`
+		Model                         *string                      `json:"model"`
+		EmbeddingProvider             *string                      `json:"embeddingProvider"`
+		EmbeddingModel                *string                      `json:"embeddingModel"`
+		TelegramToken                 *string                      `json:"telegramToken"`
+		TelegramChatID                *int64                       `json:"telegramChatId"`
+		DiscordToken                  *string                      `json:"discordToken"`
+		DiscordApplicationID          *string                      `json:"discordApplicationId"`
+		DiscordGuildID                *string                      `json:"discordGuildId"`
+		DiscordAllowedUserIDs         *[]string                    `json:"discordAllowedUserIds"`
+		DiscordAllowedChannelIDs      *[]string                    `json:"discordAllowedChannelIds"`
+		DiscordRequireMention         *bool                        `json:"discordRequireMention"`
+		DiscordTextMode               *bool                        `json:"discordTextMode"`
+		AllowRemoteSessionStart       *bool                        `json:"allowRemoteSessionStart"`
+		Context                       *config.ContextSettings      `json:"context,omitempty"`
+		AutoApproval                  *config.AutoApprovalSettings `json:"auto_approval,omitempty"`
+		ModeModels                    *config.ModeModelSettings    `json:"mode_models,omitempty"`
+		Terminal                      *config.TerminalSettings     `json:"terminal,omitempty"`
+		Temperature                   *float64                     `json:"temperature"`
+		TopP                          *float64                     `json:"topP"`
+		TopPSnake                     *float64                     `json:"top_p"`
+		MaxTokens                     *int                         `json:"maxTokens"`
+		CustomInstructions            *string                      `json:"customInstructions"`
+		CustomInstructionsSnake       *string                      `json:"custom_instructions"`
+		HidePromptTrainingModels      *bool                        `json:"hide_prompt_training_models"`
+		HidePromptTrainingModelsCamel *bool                        `json:"hidePromptTrainingModels"`
 	}
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
@@ -1936,6 +1971,10 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 	customInstructions := payload.CustomInstructions
 	if customInstructions == nil {
 		customInstructions = payload.CustomInstructionsSnake
+	}
+	hidePromptTrainingModels := payload.HidePromptTrainingModels
+	if hidePromptTrainingModels == nil {
+		hidePromptTrainingModels = payload.HidePromptTrainingModelsCamel
 	}
 
 	// Do not destroy h.LiveMode here. It is running in the background (managed by main.go/Handler).
@@ -2081,13 +2120,25 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 			if payload.MaxTokens != nil {
 				s.Provider.MaxTokens = *payload.MaxTokens
 			}
+			if hidePromptTrainingModels != nil {
+				s.HidePromptTrainingModels = *hidePromptTrainingModels
+			}
 
-			var apiKey string
 			targetProvider := s.Provider.Provider
-			if key, ok := s.Provider.APIKeys[targetProvider]; ok && key != "" {
-				apiKey = key
-			} else if h.Providers != nil {
-				apiKey = h.Providers.GetAPIKey(targetProvider)
+			targetModel := s.Provider.Model
+			credentialMode := ""
+			if h.Providers != nil {
+				if mode, ok := h.Providers.ModelCredentialMode(targetProvider, targetModel); ok {
+					credentialMode = mode
+				}
+			}
+			var apiKey string
+			if credentialMode != "none" {
+				if key, ok := s.Provider.APIKeys[targetProvider]; ok && key != "" {
+					apiKey = key
+				} else if h.Providers != nil {
+					apiKey = h.Providers.GetAPIKey(targetProvider)
+				}
 			}
 			s.Provider.APIKey = apiKey
 
@@ -2095,6 +2146,10 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 				h.Config.Provider.Provider = s.Provider.Provider
 				h.Config.Provider.Model = s.Provider.Model
 				h.Config.Provider.APIKey = apiKey
+				h.Config.Provider.CredentialMode = credentialMode
+				if h.Providers != nil {
+					h.Config.Provider.BaseURL = h.Providers.GetBaseURL(targetProvider)
+				}
 				h.Config.Provider.Temperature = s.Provider.Temperature
 				h.Config.Provider.TopP = s.Provider.TopP
 				h.Config.Provider.MaxTokens = s.Provider.MaxTokens

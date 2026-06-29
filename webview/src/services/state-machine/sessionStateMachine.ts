@@ -443,6 +443,54 @@ function clearActiveRuntimeCalls(): SessionContext['activeToolCalls'] {
     return {};
 }
 
+function completionContextUpdate(context: SessionContext, timestamp = Date.now()): Partial<SessionContext> {
+    return {
+        activeToolCalls: clearActiveRuntimeCalls(),
+        pendingChoice: undefined,
+        pendingTool: undefined,
+        workers: completeRuntimeWorkers(context.workers, timestamp),
+        missionStatus: 'completed',
+        parentTurnStatus: 'completed',
+        lastEventAt: timestamp,
+        logs: [{
+            id: `mission-completed-${timestamp}`,
+            timestamp,
+            type: 'mission_completed',
+            content: 'Mission completed.',
+        }],
+    };
+}
+
+function waitingForBlockingWorkersContextUpdate(timestamp = Date.now()): Partial<SessionContext> {
+    return {
+        activeToolCalls: clearActiveRuntimeCalls(),
+        pendingChoice: undefined,
+        pendingTool: undefined,
+        parentTurnStatus: 'completed',
+        missionStatus: 'running',
+        lastEventAt: timestamp,
+        logs: [{
+            id: 'parent-turn-completed-waiting-workers',
+            timestamp,
+            type: 'info',
+            content: 'Parent turn finished; waiting for active workers.',
+        }],
+    };
+}
+
+function completionTransition(context: SessionContext, timestamp = Date.now()): TransitionResult {
+    if (hasBlockingActiveWorkers(context)) {
+        return {
+            nextState: SessionState.streaming,
+            contextUpdate: waitingForBlockingWorkersContextUpdate(timestamp),
+        };
+    }
+    return {
+        nextState: SessionState.completed,
+        contextUpdate: completionContextUpdate(context, timestamp),
+    };
+}
+
 function upsertWorkerState(
     workers: Record<string, WorkerState>,
     worker: Partial<WorkerState> & { id: string },
@@ -602,41 +650,7 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
 
         // Completion
         case "ask_completion_result":
-            if (hasBlockingActiveWorkers(context)) {
-                return {
-                    nextState: SessionState.streaming,
-                    contextUpdate: {
-                        activeToolCalls: clearActiveRuntimeCalls(),
-                        parentTurnStatus: 'completed',
-                        missionStatus: 'running',
-                        lastEventAt: timestamp,
-                        logs: [{
-                            id: 'parent-turn-completed-waiting-workers',
-                            timestamp,
-                            type: 'info',
-                            content: 'Parent turn finished; waiting for active workers.'
-                        }]
-                    }
-                }
-            }
-            return {
-                nextState: SessionState.completed,
-                contextUpdate: {
-                    activeToolCalls: clearActiveRuntimeCalls(),
-                    pendingChoice: undefined,
-                    pendingTool: undefined,
-                    workers: completeRuntimeWorkers(context.workers, timestamp),
-                    missionStatus: 'completed',
-                    parentTurnStatus: 'completed',
-                    lastEventAt: timestamp,
-                    logs: [{
-                        id: `log-${timestamp}`,
-                        timestamp,
-                        type: 'mission_completed',
-                        content: "Mission completed."
-                    }]
-                }
-            }
+            return completionTransition(context, timestamp)
 
         // Errors
         case "ask_api_req_failed":
@@ -983,6 +997,9 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
 
 function transitionFromWaitingApproval(event: SessionEvent, context?: SessionContext): TransitionResult {
     switch (event.type) {
+        case "ask_completion_result":
+            return completionTransition(context || createInitialContext())
+
         case "approve_action":
         case "reject_action":
         case "api_req_started": // Auto-approved
@@ -1016,6 +1033,9 @@ function transitionFromWaitingApproval(event: SessionEvent, context?: SessionCon
 
 function transitionFromWaitingInput(event: SessionEvent, context?: SessionContext): TransitionResult {
     switch (event.type) {
+        case "ask_completion_result":
+            return completionTransition(context || createInitialContext())
+
         case "api_req_started":
         case "send_message":
         case "submit_input":
@@ -1052,6 +1072,9 @@ function transitionFromCompleted(event: SessionEvent, context?: SessionContext):
         case "api_req_started":
             return { nextState: SessionState.streaming }
 
+        case "ask_completion_result":
+            return completionTransition(context || createInitialContext())
+
         case "chat_update": {
             const ctx = context || createInitialContext();
             const msg = event.message;
@@ -1060,13 +1083,7 @@ function transitionFromCompleted(event: SessionEvent, context?: SessionContext):
             if (msg?.isStreaming === false && !hasRunningToolCalls && !hasBlockingActiveWorkers(ctx)) {
                 return {
                     nextState: SessionState.completed,
-                    contextUpdate: {
-                        activeToolCalls: clearActiveRuntimeCalls(),
-                        workers: completeRuntimeWorkers(ctx.workers, msg.timestamp || Date.now()),
-                        missionStatus: 'completed',
-                        parentTurnStatus: 'completed',
-                        lastEventAt: msg.timestamp || Date.now(),
-                    }
+                    contextUpdate: completionContextUpdate(ctx, msg.timestamp || Date.now())
                 }
             }
             return transitionFromStreaming(event, ctx, SessionState.completed)
@@ -1074,17 +1091,10 @@ function transitionFromCompleted(event: SessionEvent, context?: SessionContext):
 
         case "task_progress": {
             const ctx = context || createInitialContext();
-            const p = event.payload;
-            if (!p?.is_active && !hasBlockingActiveWorkers(ctx)) {
+            if (!hasBlockingActiveWorkers(ctx)) {
                 return {
                     nextState: SessionState.completed,
-                    contextUpdate: {
-                        activeToolCalls: clearActiveRuntimeCalls(),
-                        workers: completeRuntimeWorkers(ctx.workers, Date.now()),
-                        missionStatus: 'completed',
-                        parentTurnStatus: 'completed',
-                        lastEventAt: Date.now(),
-                    }
+                    contextUpdate: completionContextUpdate(ctx, Date.now())
                 }
             }
             return transitionFromStreaming(event, ctx, SessionState.completed)
@@ -1108,6 +1118,9 @@ function transitionFromPaused(event: SessionEvent, context?: SessionContext): Tr
     switch (event.type) {
         case "api_req_started":
             return { nextState: SessionState.streaming }
+
+        case "ask_completion_result":
+            return completionTransition(context || createInitialContext())
 
         case "chat_update":
         case "task_progress":

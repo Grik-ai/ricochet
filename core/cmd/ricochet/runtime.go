@@ -50,7 +50,17 @@ func initRuntime(cwd string) (*config.ProvidersManager, error) {
 		CustomInstructions: settings.CustomInstructions,
 	}
 
-	if cfg.Provider.APIKey == "" && pm != nil {
+	if pm != nil {
+		if mode, ok := pm.ModelCredentialMode(cfg.Provider.Provider, cfg.Provider.Model); ok {
+			cfg.Provider.CredentialMode = mode
+		}
+		cfg.Provider.BaseURL = pm.GetBaseURL(cfg.Provider.Provider)
+	}
+	if cfg.Provider.CredentialMode == "none" {
+		cfg.Provider.APIKey = ""
+	}
+
+	if cfg.Provider.APIKey == "" && pm != nil && cfg.Provider.CredentialMode != "none" {
 		if resolvedKey := pm.GetAPIKey(cfg.Provider.Provider); resolvedKey != "" {
 			log.Printf("Resolved initial API Key for %s from ProvidersManager", cfg.Provider.Provider)
 			cfg.Provider.APIKey = resolvedKey

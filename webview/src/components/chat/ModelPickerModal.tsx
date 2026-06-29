@@ -1,7 +1,9 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
-import { Search, Check, Cpu, X, Loader2, Key, UserCircle } from 'lucide-react';
+import { useState, useRef, useEffect, useMemo, type CSSProperties, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
+import { Search, Check, Cpu, X, Loader2, Key, UserCircle, ShieldAlert } from 'lucide-react';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
 import { isHostedSubscriptionAccess, type GrikAccountController } from '../../hooks/useGrikAccount';
+import { deriveModelAccess, modelAccessBadgeClass, type ModelCredentialMode } from './modelAccess';
 
 interface ModelInfo {
     id: string;
@@ -15,10 +17,12 @@ interface ModelInfo {
     recommended?: boolean;
     accessMode?: 'free' | 'byok' | 'subscription';
     keySource?: 'server' | 'user' | 'hosted' | 'none';
+    credentialMode?: ModelCredentialMode;
     requiresSubscription?: boolean;
     limited?: boolean;
     deprecated?: boolean;
     apiType?: string;
+    mayTrainOnYourPrompts?: boolean;
 }
 
 interface ProviderInfo {
@@ -30,15 +34,64 @@ interface ProviderInfo {
     accessMode?: 'free' | 'byok' | 'subscription';
     available: boolean; // Changed from isAvailable to match Go backend
     models: ModelInfo[];
+    hiddenPromptTrainingModelCount?: number;
 }
 
 interface ModelPickerModalProps {
     isOpen: boolean;
     onClose: () => void;
-    currentModel: { id: string; name: string; provider: string };
-    onSelectModel: (model: { id: string; name: string; provider: string }) => void;
+    currentModel: { id: string; name: string; provider: string; mayTrainOnYourPrompts?: boolean };
+    onSelectModel: (model: { id: string; name: string; provider: string; mayTrainOnYourPrompts?: boolean; credentialMode?: ModelCredentialMode }) => void;
+    anchorRef?: RefObject<HTMLElement>;
+    containerRef?: RefObject<HTMLElement>;
     grikAccount?: GrikAccountController;
     onOpenAccount?: () => void;
+    onOpenSettings?: (tab?: string) => void;
+}
+
+export interface PickerViewport {
+    width: number;
+    height: number;
+}
+
+export function modelMayTrainOnPrompts(model: Pick<ModelInfo, 'mayTrainOnYourPrompts'>): boolean {
+    return model.mayTrainOnYourPrompts === true;
+}
+
+export function modelPrivacyBadgeLabel(model: Pick<ModelInfo, 'mayTrainOnYourPrompts'>): string | null {
+    return modelMayTrainOnPrompts(model) ? 'May train' : null;
+}
+
+export function computeModelPickerPosition(
+    anchorRect: Pick<DOMRect, 'top' | 'bottom' | 'left' | 'right' | 'width'>,
+    containerRect: Pick<DOMRect, 'left' | 'right' | 'width'> | null,
+    viewport: PickerViewport,
+): CSSProperties {
+    const margin = 12;
+    const gap = 8;
+    const safeTop = 12;
+    const preferredHeight = 460;
+    const minUsefulHeight = 260;
+    const availableWidth = Math.max(240, viewport.width - margin * 2);
+    const rawWidth = containerRect?.width || Math.max(320, anchorRect.width);
+    const width = Math.min(Math.max(320, rawWidth), availableWidth);
+    const anchorCenter = (containerRect ? containerRect.left + containerRect.width / 2 : anchorRect.left + anchorRect.width / 2);
+    const left = Math.max(margin, Math.min(anchorCenter - width / 2, viewport.width - width - margin));
+    const spaceAbove = Math.max(0, anchorRect.top - safeTop - gap);
+    const spaceBelow = Math.max(0, viewport.height - anchorRect.bottom - margin - gap);
+    const placeBelow = spaceAbove < preferredHeight && spaceBelow >= Math.min(minUsefulHeight, spaceAbove);
+    const maxHeight = Math.max(180, Math.min(preferredHeight, placeBelow ? spaceBelow : spaceAbove));
+    const top = placeBelow
+        ? Math.min(anchorRect.bottom + gap, viewport.height - maxHeight - margin)
+        : Math.max(safeTop, anchorRect.top - gap - maxHeight);
+
+    return {
+        position: 'fixed',
+        left,
+        top,
+        width,
+        maxHeight,
+    };
 }
 
 /**
@@ -49,14 +102,19 @@ export function ModelPickerModal({
     onClose,
     currentModel,
     onSelectModel,
+    anchorRef,
+    containerRef,
     grikAccount,
     onOpenAccount,
+    onOpenSettings,
 }: ModelPickerModalProps) {
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedIndex, setSelectedIndex] = useState(-1);
     const [providers, setProviders] = useState<ProviderInfo[]>([]);
     const [selectedProvider, setSelectedProvider] = useState<string>('');
     const [isLoading, setIsLoading] = useState(true);
+    const [hidePromptTrainingModels, setHidePromptTrainingModels] = useState(false);
+    const [popoverStyle, setPopoverStyle] = useState<CSSProperties>({});
 
     const searchInputRef = useRef<HTMLInputElement>(null);
     const modalRef = useRef<HTMLDivElement>(null);
@@ -74,7 +132,7 @@ export function ModelPickerModal({
     useEffect(() => {
         const unsubscribe = onMessage((message) => {
             if (message.type === 'models') {
-                const result = message.payload as { providers: ProviderInfo[] };
+                const result = message.payload as { providers: ProviderInfo[]; hide_prompt_training_models?: boolean; hidePromptTrainingModels?: boolean };
                 if (!result || !result.providers) {
                     setIsLoading(false);
                     return;
@@ -82,6 +140,7 @@ export function ModelPickerModal({
 
                 // Rely on backend - no hardcoded filters
                 setProviders(result.providers);
+                setHidePromptTrainingModels(Boolean(result.hide_prompt_training_models ?? result.hidePromptTrainingModels ?? false));
                 setIsLoading(false);
 
                 // If current model is selected, try to match provider
@@ -108,6 +167,7 @@ export function ModelPickerModal({
                 providerId: p.id,
                 hasKey: p.hasKey,
                 hasUserKey: p.hasUserKey,
+                providerAvailable: p.available,
                 isFree: m.isFree,
                 description: m.description,
                 contextWindow: m.contextWindow,
@@ -116,10 +176,12 @@ export function ModelPickerModal({
                 providerKeySource: p.keySource,
                 accessMode: m.accessMode,
                 keySource: m.keySource || p.keySource,
+                credentialMode: m.credentialMode,
                 requiresSubscription: m.requiresSubscription,
                 limited: m.limited,
                 deprecated: m.deprecated,
-                apiType: m.apiType
+                apiType: m.apiType,
+                mayTrainOnYourPrompts: m.mayTrainOnYourPrompts
             }))
         );
     }, [providers]);
@@ -150,10 +212,17 @@ export function ModelPickerModal({
     const selectedProviderAccountLabel = grikAccount?.summary.label || (currentProviderInfo?.available ? 'Subscription' : 'Sign in required');
     const selectedProviderAccessLabel = grikAccount?.summary.accessLabel || (currentProviderInfo?.available ? 'Available' : 'Sign in required');
 
-    const isModelLockedByAccount = (model: { accessMode?: string; keySource?: string; requiresSubscription?: boolean; hasKey?: boolean }) => {
-        const usesGrikAccount = isHostedSubscriptionAccess(model.accessMode, model.keySource) || Boolean(model.requiresSubscription);
-        if (!usesGrikAccount) return false;
-        return grikAccount ? !grikAccount.summary.hostedAccess : !model.hasKey;
+    const accessForModel = (model: typeof allModels[number]) => {
+        const provider = providers.find(p => p.id === model.providerId);
+        return deriveModelAccess(provider, model, grikAccount);
+    };
+
+    const openAccessAction = (access: ReturnType<typeof accessForModel>) => {
+        if (access.action === 'account') {
+            onOpenAccount?.();
+        } else if (access.action === 'settings') {
+            onOpenSettings?.('models');
+        }
     };
 
     // Focus search on open
@@ -164,6 +233,28 @@ export function ModelPickerModal({
             setSelectedIndex(-1);
         }
     }, [isOpen]);
+
+    useEffect(() => {
+        if (!isOpen || typeof window === 'undefined') return;
+
+        const updatePosition = () => {
+            const anchorRect = anchorRef?.current?.getBoundingClientRect();
+            if (!anchorRect) return;
+            const containerRect = containerRef?.current?.getBoundingClientRect() || null;
+            setPopoverStyle(computeModelPickerPosition(anchorRect, containerRect, {
+                width: window.innerWidth || 0,
+                height: window.innerHeight || 0,
+            }));
+        };
+
+        updatePosition();
+        window.addEventListener('resize', updatePosition);
+        window.addEventListener('scroll', updatePosition, true);
+        return () => {
+            window.removeEventListener('resize', updatePosition);
+            window.removeEventListener('scroll', updatePosition, true);
+        };
+    }, [anchorRef, containerRef, isOpen]);
 
     // Click outside to close
     useEffect(() => {
@@ -190,12 +281,13 @@ export function ModelPickerModal({
         } else if (e.key === 'Enter' && selectedIndex >= 0) {
             e.preventDefault();
             const model = filteredModels[selectedIndex];
-            if (isModelLockedByAccount(model)) {
-                onOpenAccount?.();
+            const access = accessForModel(model);
+            if (!access.sendable) {
+                openAccessAction(access);
                 onClose();
                 return;
             }
-            onSelectModel({ id: model.id, name: model.name, provider: model.providerId });
+            onSelectModel({ id: model.id, name: model.name, provider: model.providerId, mayTrainOnYourPrompts: model.mayTrainOnYourPrompts, credentialMode: model.credentialMode });
             onClose();
         } else if (e.key === 'Escape') {
             e.preventDefault();
@@ -205,14 +297,15 @@ export function ModelPickerModal({
 
     if (!isOpen) return null;
 
-    return (
+    const modal = (
         <div
             ref={modalRef}
-            className="absolute bottom-0 left-0 right-0 rounded-md border border-vscode-border bg-vscode-input-bg shadow-lg overflow-hidden z-[9999] w-full animate-in fade-in slide-in-from-bottom-5 duration-200"
+            className="fixed rounded-md border border-vscode-border bg-vscode-input-bg shadow-lg overflow-hidden z-[9999] animate-in fade-in slide-in-from-bottom-5 duration-200"
             style={{
-                maxHeight: 'calc(100vh - 150px)',
                 display: 'flex',
                 flexDirection: 'column',
+                visibility: popoverStyle.left === undefined ? 'hidden' : undefined,
+                ...popoverStyle,
             }}
         >
             <div className="flex items-center justify-between px-4 py-3 border-b border-vscode-border bg-vscode-editor-background">
@@ -299,7 +392,7 @@ export function ModelPickerModal({
             )}
 
             {/* Model list */}
-            <div className="max-h-[300px] overflow-y-auto custom-scrollbar">
+            <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
                 {isLoading ? (
                     <div className="flex items-center justify-center py-8 text-vscode-fg/45">
                         <Loader2 className="w-4 h-4 animate-spin mr-2" />
@@ -307,26 +400,29 @@ export function ModelPickerModal({
                     </div>
                 ) : filteredModels.length === 0 ? (
                     <div className="text-center py-8 text-xs text-vscode-fg/40">
-                        No models found
+                        {hidePromptTrainingModels && currentProviderInfo?.hiddenPromptTrainingModelCount
+                            ? `Stealth Mode is hiding ${currentProviderInfo.hiddenPromptTrainingModelCount} prompt-training ${currentProviderInfo.hiddenPromptTrainingModelCount === 1 ? 'model' : 'models'} from this provider.`
+                            : 'No models found'}
                     </div>
                 ) : (
                     filteredModels.map((model, index) => {
                         const usesGrikAccount = isHostedSubscriptionAccess(model.accessMode, model.keySource) || model.requiresSubscription;
-                        const lockedByAccount = isModelLockedByAccount(model);
+                        const access = accessForModel(model);
+                        const locked = !access.sendable;
                         return (
                         <button
                             key={`${model.providerId}-${model.id}`}
                             onClick={() => {
-                                if (lockedByAccount) {
-                                    onOpenAccount?.();
+                                if (locked) {
+                                    openAccessAction(access);
                                     onClose();
                                     return;
                                 }
-                                onSelectModel({ id: model.id, name: model.name, provider: model.providerId });
+                                onSelectModel({ id: model.id, name: model.name, provider: model.providerId, mayTrainOnYourPrompts: model.mayTrainOnYourPrompts, credentialMode: model.credentialMode });
                                 onClose();
                             }}
-                            aria-disabled={lockedByAccount}
-                            className={`w-full flex items-center justify-between px-3 py-2.5 transition-colors ${lockedByAccount ? 'opacity-70' : ''} ${index === selectedIndex ? 'bg-vscode-list-hoverBackground' :
+                            aria-disabled={locked}
+                            className={`w-full flex items-center justify-between px-3 py-2.5 transition-colors ${locked ? 'opacity-70' : ''} ${index === selectedIndex ? 'bg-vscode-list-hoverBackground' :
                                 model.id === currentModel.id ? 'bg-vscode-list-hoverBackground' : 'hover:bg-vscode-list-hoverBackground'
                                 }`}
                         >
@@ -336,6 +432,9 @@ export function ModelPickerModal({
                                     {model.isFree && (
                                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">FREE</span>
                                     )}
+                                    <span className={`text-[9px] px-1.5 py-0.5 rounded ${modelAccessBadgeClass(access)}`} title={access.detail}>
+                                        {access.label}
+                                    </span>
                                     {(model.requiresSubscription || model.accessMode === 'subscription') && (
                                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300">SUB</span>
                                     )}
@@ -345,7 +444,13 @@ export function ModelPickerModal({
                                     {model.deprecated && (
                                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-500/20 text-red-300">OLD</span>
                                     )}
-                                    {lockedByAccount && (
+                                    {modelMayTrainOnPrompts(model) && (
+                                        <span className="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300" title="This model may use prompts for training">
+                                            <ShieldAlert className="w-3 h-3" />
+                                            {modelPrivacyBadgeLabel(model)}
+                                        </span>
+                                    )}
+                                    {locked && usesGrikAccount && (
                                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-200">{selectedProviderAccessLabel.toUpperCase()}</span>
                                     )}
                                     {!usesGrikAccount && (model.hasUserKey || model.hasKey) && (
@@ -372,6 +477,8 @@ export function ModelPickerModal({
             </div>
         </div>
     );
+
+    return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal;
 }
 
 function modelPickerAccountActionLabel(account?: GrikAccountController): string {

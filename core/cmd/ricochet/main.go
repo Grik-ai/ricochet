@@ -934,11 +934,29 @@ func runInteractiveMode(_ context.Context, cwd string) {
 
 	settingsStore, _ := config.NewStore()
 	settings := settingsStore.Get()
+	pm, _ := config.NewProvidersManager(config.FindConfigFile())
+	credentialMode := ""
+	baseURL := ""
+	if pm != nil {
+		for providerID, key := range settings.Provider.APIKeys {
+			pm.SetUserKey(providerID, key)
+		}
+		if mode, ok := pm.ModelCredentialMode(settings.Provider.Provider, settings.Provider.Model); ok {
+			credentialMode = mode
+		}
+		baseURL = pm.GetBaseURL(settings.Provider.Provider)
+	}
+	apiKey := settings.Provider.APIKey
+	if credentialMode == "none" {
+		apiKey = ""
+	}
 	cfg := &agent.Config{
 		Provider: agent.ProviderConfig{
-			Provider: settings.Provider.Provider,
-			Model:    settings.Provider.Model,
-			APIKey:   settings.Provider.APIKey,
+			Provider:       settings.Provider.Provider,
+			Model:          settings.Provider.Model,
+			APIKey:         apiKey,
+			BaseURL:        baseURL,
+			CredentialMode: credentialMode,
 		},
 		SystemPrompt:  prompts.BuildSystemPrompt(cwd), // Updated to use prompts package
 		MaxTokens:     4096,

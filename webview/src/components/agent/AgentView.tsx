@@ -10,13 +10,14 @@ import { ModelPickerModal } from '../chat/ModelPickerModal';
 import { BatchDashboard } from './BatchDashboard';
 import { deriveMissionRuntime } from '../../utils/missionRuntime';
 import { KanbanBoard } from '../kanban/KanbanBoard';
+import type { SelectedModel } from '../chat/ChatInput';
 
 export interface AgentViewProps {
     agentState: ReturnType<typeof useAgentStateMachine>;
     mode: 'plan' | 'act' | 'mission';
     onModeChange: (mode: 'plan' | 'act' | 'mission') => void;
-    model: { id: string; name: string; provider: string };
-    onModelChange: (model: { id: string; name: string; provider: string }) => void;
+    model: SelectedModel;
+    onModelChange: (model: SelectedModel) => void;
     pendingEdits?: any[];
     initialTab?: MissionDashboardTab;
     onBack: () => void;

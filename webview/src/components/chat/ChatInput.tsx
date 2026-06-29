@@ -13,6 +13,22 @@ import { NetworkStatusPill } from './NetworkStatusPill';
 import { DiscordIcon, TelegramIcon } from './MessengerIcon';
 import { EtherIcon } from './EtherIcon';
 import type { GrikAccountController } from '../../hooks/useGrikAccount';
+import {
+    deriveModelAccess,
+    findModelProvider,
+    modelAccessBadgeClass,
+    selectBestModel,
+    type ModelAccessProvider,
+    type SelectedModelLike,
+} from './modelAccess';
+
+export interface SelectedModel {
+    id: string;
+    name: string;
+    provider: string;
+    mayTrainOnYourPrompts?: boolean;
+    credentialMode?: 'none' | 'grik_account' | 'provider_key';
+}
 
 interface ChatInputProps {
     value: string;
@@ -31,8 +47,8 @@ interface ChatInputProps {
     searchFiles?: (query: string) => void;
     liveStatus?: EtherStatus;
     onToggleLiveMode?: () => void;
-    currentModel: { id: string; name: string; provider: string };
-    onModelChange: (model: { id: string; name: string; provider: string }) => void;
+    currentModel: SelectedModel;
+    onModelChange: (model: SelectedModel) => void;
     recentlyEditedFiles?: { path: string, name: string }[];
     pendingEdits?: any[];
     pendingChoice?: ChoiceRequest | null;
@@ -140,7 +156,17 @@ function revokeAttachmentPreview(file?: Pick<ContextFilePayload, 'previewUrl'>) 
     }
 }
 
-export const DEFAULT_MODEL = { id: '', name: 'Loading...', provider: '' };
+export const DEFAULT_MODEL: SelectedModel = { id: '', name: 'Loading...', provider: '' };
+
+function selectedModelFromAccess(model: SelectedModelLike): SelectedModel {
+    return {
+        id: model.id,
+        name: model.name || model.id,
+        provider: model.provider,
+        mayTrainOnYourPrompts: model.mayTrainOnYourPrompts === true,
+        credentialMode: model.credentialMode,
+    };
+}
 
 export function shouldRenderInputStatusStrip(
     networkStatus?: NetworkDisplayStatus,
@@ -677,6 +703,8 @@ export function ChatInput(props: ChatInputProps) {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const etherMenuRef = useRef<HTMLDivElement>(null);
+    const rootRef = useRef<HTMLDivElement>(null);
+    const modelButtonRef = useRef<HTMLButtonElement>(null);
     const { isRecording, toggleRecording } = useAudioRecorder();
 
     const [showModelMenu, setShowModelMenu] = useState(false);
@@ -687,6 +715,7 @@ export function ChatInput(props: ChatInputProps) {
     const [showApprovalMenu, setShowApprovalMenu] = useState(false);
     const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
     const [currentModel, setCurrentModel] = useState(propCurrentModel ?? DEFAULT_MODEL);
+    const [modelProviders, setModelProviders] = useState<ModelAccessProvider[]>([]);
     const [agentDraftEnabled, setAgentDraftEnabled] = useState(false);
     const [dragActive, setDragActive] = useState(false);
 
@@ -742,11 +771,13 @@ export function ChatInput(props: ChatInputProps) {
         if (
             propCurrentModel?.id !== currentModel.id ||
             propCurrentModel?.provider !== currentModel.provider ||
-            propCurrentModel?.name !== currentModel.name
+            propCurrentModel?.name !== currentModel.name ||
+            propCurrentModel?.mayTrainOnYourPrompts !== currentModel.mayTrainOnYourPrompts ||
+            propCurrentModel?.credentialMode !== currentModel.credentialMode
         ) {
             setCurrentModel(propCurrentModel ?? DEFAULT_MODEL);
         }
-    }, [propCurrentModel, currentModel.id, currentModel.name, currentModel.provider]);
+    }, [propCurrentModel, currentModel.credentialMode, currentModel.id, currentModel.mayTrainOnYourPrompts, currentModel.name, currentModel.provider]);
 
     useEffect(() => {
         postMessage({ type: 'get_models' });
@@ -761,27 +792,41 @@ export function ChatInput(props: ChatInputProps) {
                     const nextModel = { id: settings.model, name: settings.model, provider: settings.provider };
                     setCurrentModel(nextModel);
                     onModelChange(nextModel);
+                    postMessage({ type: 'get_models' });
                 }
                 setApprovalMode(approvalModeFromSettings(settings?.auto_approval));
             }
             if (msg.type === 'models') {
-                const providers = msg.payload?.providers || [];
+                const providers = (msg.payload?.providers || []) as ModelAccessProvider[];
+                setModelProviders(providers);
+                const bestModel = () => {
+                    const selected = selectBestModel(providers, currentModel.id ? currentModel : null, grikAccount);
+                    return selected ? selectedModelFromAccess(selected) : null;
+                };
                 if (currentModel.id && currentModel.provider) {
                     const provider = providers.find((p: any) => p.id === currentModel.provider);
                     const model = provider?.models?.find((m: any) => m.id === currentModel.id);
-                    if (model) {
-                        const nextModel = { ...currentModel, name: model.name };
+                    const currentAccess = deriveModelAccess(provider, model, grikAccount);
+                    if (model && currentAccess.sendable) {
+                        const nextModel = { ...currentModel, name: model.name, mayTrainOnYourPrompts: model.mayTrainOnYourPrompts === true, credentialMode: model.credentialMode };
                         setCurrentModel(nextModel);
                         onModelChange(nextModel);
-                    }
-                } else if (currentModel.id === '') {
-                    for (const provider of providers) {
-                        if (provider.models?.length > 0) {
-                            const nextModel = { id: provider.models[0].id, name: provider.models[0].name, provider: provider.id };
+                    } else {
+                        const nextModel = bestModel();
+                        if (nextModel) {
                             setCurrentModel(nextModel);
                             onModelChange(nextModel);
-                            break;
+                            if (nextModel.provider !== currentModel.provider || nextModel.id !== currentModel.id) {
+                                postMessage({ type: 'save_settings', payload: { provider: nextModel.provider, model: nextModel.id } });
+                            }
                         }
+                    }
+                } else if (currentModel.id === '') {
+                    const nextModel = bestModel();
+                    if (nextModel) {
+                        setCurrentModel(nextModel);
+                        onModelChange(nextModel);
+                        postMessage({ type: 'save_settings', payload: { provider: nextModel.provider, model: nextModel.id } });
                     }
                 }
             }
@@ -817,7 +862,7 @@ export function ChatInput(props: ChatInputProps) {
             }
         });
         return () => { unsubscribe(); };
-    }, [onMessage, currentModel.id, currentModel.name, currentModel.provider, onModelChange]);
+    }, [onMessage, currentModel, grikAccount, onModelChange, postMessage]);
 
     useEffect(() => {
         const textarea = textareaRef.current;
@@ -1052,9 +1097,28 @@ export function ChatInput(props: ChatInputProps) {
     };
 
     const sendableContextFiles = contextFiles.filter(isReadyContextFile);
-    const canSubmit = Boolean(value.trim() || sendableContextFiles.length > 0);
+    const modelCatalogLoaded = modelProviders.length > 0;
+    const { provider: selectedModelProvider, model: selectedModelInfo } = findModelProvider(modelProviders, currentModel);
+    const selectedModelAccess = deriveModelAccess(selectedModelProvider, selectedModelInfo, grikAccount);
+    const showModelAccessWarning = modelCatalogLoaded && currentModel.id !== '' && !selectedModelAccess.sendable;
+    const hasDraftContent = Boolean(value.trim() || sendableContextFiles.length > 0);
+    const canSubmit = hasDraftContent && selectedModelAccess.sendable;
+
+    const openModelAccessAction = () => {
+        if (selectedModelAccess.action === 'account') {
+            onOpenAccount?.();
+            return;
+        }
+        if (selectedModelAccess.action === 'settings') {
+            onOpenSettings?.('models');
+        }
+    };
 
     const handleSend = () => {
+        if (!isLoading && hasDraftContent && !selectedModelAccess.sendable) {
+            openModelAccessAction();
+            return;
+        }
         if (!isLoading && canSubmit) {
             const messageToSend = buildMessageToSend();
             onSend(messageToSend, sendableContextFiles);
@@ -1064,6 +1128,10 @@ export function ChatInput(props: ChatInputProps) {
     };
 
     const handleStartAgent = () => {
+        if (!isLoading && hasDraftContent && !selectedModelAccess.sendable) {
+            openModelAccessAction();
+            return;
+        }
         if (!isLoading && canSubmit && onStartAgent) {
             const messageToSend = buildMessageToSend();
             onStartAgent(messageToSend, sendableContextFiles);
@@ -1156,7 +1224,7 @@ export function ChatInput(props: ChatInputProps) {
     };
 
     return (
-        <div className="w-full relative">
+        <div ref={rootRef} className="w-full relative">
             {(showModelMenu || showContextMenu || showApprovalMenu || showCommandMenu || showFileMenu) && (
                 <div className="fixed inset-0 z-[9998]" onClick={closeAllMenus} />
             )}
@@ -1166,8 +1234,11 @@ export function ChatInput(props: ChatInputProps) {
                     isOpen={showModelMenu}
                     onClose={() => setShowModelMenu(false)}
                     currentModel={currentModel}
+                    anchorRef={modelButtonRef}
+                    containerRef={rootRef}
                     grikAccount={grikAccount}
                     onOpenAccount={onOpenAccount}
+                    onOpenSettings={onOpenSettings}
                     onSelectModel={(model) => {
                         setCurrentModel(model);
                         onModelChange(model);
@@ -1379,6 +1450,27 @@ export function ChatInput(props: ChatInputProps) {
                 </div>
             )}
 
+            {showModelAccessWarning && (
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2 rounded-md border border-vscode-border bg-vscode-editor-background px-2.5 py-2 text-[11px] text-vscode-fg/75">
+                    <span className="inline-flex min-w-0 items-center gap-2">
+                        <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-amber-300" />
+                        <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] ${modelAccessBadgeClass(selectedModelAccess)}`}>
+                            {selectedModelAccess.label}
+                        </span>
+                        <span className="truncate">{selectedModelAccess.detail}</span>
+                    </span>
+                    {selectedModelAccess.action && (
+                        <button
+                            type="button"
+                            onClick={openModelAccessAction}
+                            className="ml-auto shrink-0 rounded border border-vscode-border px-2 py-1 text-[10px] font-medium text-vscode-fg/72 transition-colors hover:bg-vscode-list-hoverBackground hover:text-vscode-fg"
+                        >
+                            {selectedModelAccess.actionLabel || 'Open'}
+                        </button>
+                    )}
+                </div>
+            )}
+
             {/* Input Frame */}
             <div className={`
                 relative flex flex-col rounded-md transition-colors duration-200 overflow-visible
@@ -1531,6 +1623,7 @@ export function ChatInput(props: ChatInputProps) {
                         </div>
 
                         <button
+                            ref={modelButtonRef}
                             onClick={() => {
                                 setShowModelMenu(true);
                                 setShowContextMenu(false);
@@ -1541,6 +1634,17 @@ export function ChatInput(props: ChatInputProps) {
                             className="flex min-w-0 max-w-full items-center gap-2 px-2 py-1.5 rounded hover:bg-vscode-list-hoverBackground transition-colors text-vscode-fg/55 hover:text-vscode-fg/85"
                         >
                             <span className="truncate text-[10px] font-medium max-w-[min(36vw,120px)]">{currentModel.name}</span>
+                            {(selectedModelAccess.state === 'anonymous_free' || !selectedModelAccess.sendable) && (
+                                <span className={`inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[9px] ${modelAccessBadgeClass(selectedModelAccess)}`} title={selectedModelAccess.detail}>
+                                    {selectedModelAccess.label}
+                                </span>
+                            )}
+                            {currentModel.mayTrainOnYourPrompts && (
+                                <span className="inline-flex shrink-0 items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] text-amber-300" title="This model may use prompts for training">
+                                    <ShieldAlert className="h-3 w-3" />
+                                    <span className="hidden min-[420px]:inline">May train</span>
+                                </span>
+                            )}
                             <ChevronDown className="w-3 h-3 shrink-0 opacity-30" />
                         </button>
 

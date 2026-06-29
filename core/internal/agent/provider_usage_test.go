@@ -25,6 +25,14 @@ data: [DONE]
 	}
 }
 
+func TestOpenAIHeadersOmitAuthorizationWhenAPIKeyEmpty(t *testing.T) {
+	provider := NewOpenAIProvider("", "qwen/qwen3-coder:free", "https://grik.io/api/v1/ricochet/openai/v1", "", "", 0)
+	headers := provider.headers()
+	if _, ok := headers["Authorization"]; ok {
+		t.Fatalf("Authorization header should be omitted when API key is empty: %#v", headers)
+	}
+}
+
 func TestGeminiStreamParsesUsageMetadata(t *testing.T) {
 	provider := &GeminiProvider{apiKey: "test", model: "gemini-test"}
 	stream := `data: {"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":30,"totalTokenCount":150},"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}
