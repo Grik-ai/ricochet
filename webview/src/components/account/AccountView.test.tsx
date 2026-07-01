@@ -52,12 +52,14 @@ function renderAccount(controller: GrikAccountController): string {
 }
 
 describe('AccountView', () => {
-    it('renders a clean pro account dashboard without the old heavy account cards', () => {
+    it('renders a clean pro account view without the old heavy account cards', () => {
         const html = renderAccount(account());
 
         expect(html).toContain('Grik account');
         expect(html).toContain('Pro plan');
         expect(html).toContain('Subscription');
+        expect(html).toContain('Account settings');
+        expect(html).toContain('Open account settings');
         expect(html).toContain('Local Ricochet estimate');
         expect(html).toContain('No local usage recorded yet');
         expect(html).not.toContain('border border-vscode-border bg-vscode-input-bg');
@@ -91,7 +93,7 @@ describe('AccountView', () => {
         expect(html).toContain('Grik account connected');
         expect(html).toContain('billing details need refresh');
         expect(html).toContain('Retry');
-        expect(html).toContain('Open dashboard');
+        expect(html).toContain('Open account settings');
     });
 
     it('renders logged out sign-in without a bordered setup card', () => {
@@ -112,7 +114,7 @@ describe('AccountView', () => {
 
         expect(html).toContain('Sign in to Grik');
         expect(html).toContain('Hosted Ricochet models use your Grik subscription');
-        expect(html).toContain('Continue with Google in the browser');
+        expect(html).toContain('choose Google or email');
         expect(html).not.toContain('border border-vscode-border bg-vscode-input-bg');
     });
 
@@ -140,7 +142,8 @@ describe('AccountView', () => {
         expect(html).toContain('GRIK-TEST');
         expect(html).toContain('Expires in');
         expect(html).toContain('Never share this code');
-        expect(html).toContain('Continue with Google');
+        expect(html).toContain('Open Grik login');
+        expect(html).toContain('Copy link');
         expect(html).toContain('Grik browser sign in');
     });
 

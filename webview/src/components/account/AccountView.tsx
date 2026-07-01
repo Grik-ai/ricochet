@@ -2,6 +2,7 @@ import {
     AlertTriangle,
     ArrowLeft,
     CalendarClock,
+    Copy,
     ExternalLink,
     Gauge,
     LogOut,
@@ -212,7 +213,7 @@ export function AccountView({ onBack, account }: AccountViewProps) {
                                     body={authState.error || billingState.error || 'Grik account connected, billing details need refresh.'}
                                     isBusy={isBusy}
                                     onRetry={refresh}
-                                    onOpenDashboard={() => openBilling({ target: 'dashboard' })}
+                                    onOpenAccountSettings={() => openBilling({ target: 'dashboard' })}
                                 />
                             )}
 
@@ -249,10 +250,10 @@ export function AccountView({ onBack, account }: AccountViewProps) {
                                 usageSummary={usageSummary}
                             />
 
-                            <SoftSection title="Dashboard" caption="Invoices, payment details and account settings stay in the Grik web dashboard.">
+                            <SoftSection title="Account settings" caption="Ricochet sessions, API keys, invoices, and payment details stay in Grik.">
                                 <div className="mt-4 flex flex-wrap items-center gap-2">
                                     <ActionButton onClick={() => openBilling({ target: 'dashboard' })} icon={<ExternalLink className="h-3.5 w-3.5" />}>
-                                        Open Grik dashboard
+                                        Open account settings
                                     </ActionButton>
                                     <ActionButton primary onClick={() => openBilling({ target: 'subscription', product: 'ricochet_code' })}>
                                         Manage subscription
@@ -278,7 +279,7 @@ function SignedOutState({ isBusy, onSignIn }: { isBusy: boolean; onSignIn: () =>
             </div>
             <h1 className="mt-5 text-[28px] font-semibold tracking-normal text-vscode-fg/94">Sign in to Grik</h1>
             <p className="mt-3 max-w-lg text-[13px] leading-6 text-vscode-fg/56">
-                Hosted Ricochet models use your Grik subscription and credits. Continue with Google in the browser; BYOK providers stay separate in Provider Access.
+                Hosted Ricochet models use your Grik subscription and credits. Sign in on Grik in the browser, then choose Google or email. BYOK providers stay separate in Provider Access.
             </p>
             <button
                 onClick={onSignIn}
@@ -306,12 +307,23 @@ function DeviceLoginState({
     onCancel: () => void;
 }) {
     const remaining = useDeviceLoginCountdown(expiresAt);
+    const [copied, setCopied] = useState(false);
+    const copyVerificationUrl = async () => {
+        try {
+            await navigator.clipboard?.writeText(verificationUrl);
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1800);
+        } catch {
+            setCopied(false);
+        }
+    };
+
     return (
         <section className="mx-auto flex min-h-[56vh] w-full max-w-xl flex-col justify-center py-8">
             <div className="text-[11px] font-medium uppercase tracking-wide text-vscode-fg/45">Grik browser sign in</div>
             <h1 className="mt-3 text-[24px] font-semibold tracking-normal text-vscode-fg/92">Finish sign in in your browser</h1>
             <p className="mt-2 text-[13px] leading-6 text-vscode-fg/56">
-                Continue with Google on Grik, then approve this code. Ricochet will connect automatically after approval.
+                Open Grik login, then approve this code. Ricochet will connect automatically after approval.
             </p>
             <div className="mt-5 rounded-lg bg-white/[0.04] px-4 py-4 text-center font-mono text-[24px] tracking-[0.2em] text-vscode-fg/92">
                 {userCode}
@@ -328,7 +340,10 @@ function DeviceLoginState({
             </div>
             <div className="mt-5 flex flex-wrap items-center gap-2">
                 <ActionButton primary onClick={() => onOpenExternal(verificationUrl)} icon={<ExternalLink className="h-3.5 w-3.5" />}>
-                    Continue with Google
+                    Open Grik login
+                </ActionButton>
+                <ActionButton onClick={copyVerificationUrl} icon={<Copy className="h-3.5 w-3.5" />}>
+                    {copied ? 'Copied' : 'Copy link'}
                 </ActionButton>
                 <ActionButton onClick={onCancel}>
                     Cancel
@@ -357,12 +372,12 @@ function SyncIssueNotice({
     body,
     isBusy,
     onRetry,
-    onOpenDashboard,
+    onOpenAccountSettings,
 }: {
     body: string;
     isBusy: boolean;
     onRetry: () => void;
-    onOpenDashboard: () => void;
+    onOpenAccountSettings: () => void;
 }) {
     return (
         <section className="mb-2 rounded-lg bg-amber-400/10 px-3 py-3 text-amber-100/90">
@@ -380,11 +395,11 @@ function SyncIssueNotice({
                     Retry
                 </button>
                 <button
-                    onClick={onOpenDashboard}
+                    onClick={onOpenAccountSettings}
                     className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-amber-100 hover:bg-white/10 transition-colors"
                 >
                     <ExternalLink className="h-3.5 w-3.5" />
-                    Open dashboard
+                    Open account settings
                 </button>
             </div>
         </section>

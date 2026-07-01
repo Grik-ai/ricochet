@@ -84,8 +84,12 @@ export class AuthService {
                 },
             });
 
-            await vscode.env.openExternal(vscode.Uri.parse(verificationUrl));
             this.schedulePoll(deviceCode, interval, Date.now() + expiresIn * 1000);
+            try {
+                await vscode.env.openExternal(vscode.Uri.parse(verificationUrl));
+            } catch (error) {
+                console.warn('[AuthService] Failed to open Grik verification URL:', error);
+            }
         } catch (error: any) {
             this.failDeviceAuth(error);
         }
@@ -168,7 +172,7 @@ export class AuthService {
         const product = rawProduct === 'ricochet_code' && payload?.target !== 'subscription' ? 'ricochet-code' : rawProduct;
         const target = payload?.target === 'subscription'
             ? '/en/me/subscription'
-            : product === 'ricochet-code' || payload?.target === 'credits' ? '/en/pricing' : '/dashboard';
+            : product === 'ricochet-code' || payload?.target === 'credits' ? '/en/pricing' : '/en/me/settings';
         const url = new URL(target, baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
         const productParam = payload?.target === 'subscription' ? rawProduct || product : product;
         if (productParam) {

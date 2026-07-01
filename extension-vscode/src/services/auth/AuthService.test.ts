@@ -58,6 +58,50 @@ describe('AuthService account sync', () => {
         });
     });
 
+    it('keeps device login pending when the external browser prompt is cancelled', async () => {
+        const messages: Array<{ type: string; payload?: any }> = [];
+        const vscodeModule = await import('vscode');
+        const openExternal = vi.mocked(vscodeModule.env.openExternal);
+        openExternal.mockRejectedValueOnce(new Error('User cancelled external website prompt.'));
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+            const url = String(input);
+            if (url.includes('/auth/device/code')) {
+                return jsonResponse({
+                    device_code: 'device-code',
+                    user_code: 'GRIK-TEST',
+                    verification_url: 'https://grik.io/en/ricochet/device?user_code=GRIK-TEST',
+                    expires_in: 900,
+                    interval: 30,
+                });
+            }
+            throw new Error(`Unexpected fetch: ${url}`);
+        });
+        vi.stubGlobal('fetch', fetchMock);
+
+        const service = new AuthService(createContext(), (message) => messages.push(message));
+        await service.startLogin();
+        service.cancelLogin();
+
+        expect(latestPayload(messages, 'device_auth_started')).toMatchObject({
+            userCode: 'GRIK-TEST',
+            verificationUrl: 'https://grik.io/en/ricochet/device?user_code=GRIK-TEST',
+        });
+        expect(messages.some((message) => message.type === 'device_auth_failed')).toBe(false);
+        expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('opens account settings for dashboard account actions', async () => {
+        const vscodeModule = await import('vscode');
+        const openExternal = vi.mocked(vscodeModule.env.openExternal);
+        openExternal.mockClear();
+
+        const service = new AuthService(createContext(), () => undefined);
+        await service.openBilling({ target: 'dashboard' });
+
+        expect(String(openExternal.mock.calls[0][0])).toBe('https://grik.io/en/me/settings');
+    });
+
     it('keeps device login connected when /users/me temporarily fails', async () => {
         const messages: Array<{ type: string; payload?: any }> = [];
         const coreSync = vi.fn(async () => undefined);
