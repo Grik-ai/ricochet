@@ -1,0 +1,78 @@
+name: Publish NPM Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SemVer version to publish, without v prefix"
+        required: true
+        default: "0.2.5"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish installer package
+    runs-on: ubuntu-24.04
+    env:
+      NODE_VERSION: "24"
+      PACKAGE_NAME: "@grik-ai/ricochet-installer"
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Validate Version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${VERSION}" == v* ]]; then
+            echo "::error::Use a bare SemVer version like 0.2.5, not ${VERSION}."
+            exit 1
+          fi
+
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Version ${VERSION} is not valid SemVer."
+            exit 1
+          fi
+
+      - name: Check Existing Package Version
+        id: existing
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "${PACKAGE_NAME}@${VERSION} is already published."
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Test Installer
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd installer
+          npm test
+
+      - name: Publish NPM Installer
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd installer
+          npm version "${VERSION}" --no-git-tag-version --allow-same-version
+          npm publish --access public
