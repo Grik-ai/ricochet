@@ -1519,6 +1519,54 @@ export function ChatInput(props: ChatInputProps) {
             : isTranscribing
                 ? 'Transcribing voice input'
             : 'Record voice input';
+    const micStatusText = isRecording
+        ? 'Recording microphone audio'
+        : isRequesting
+            ? 'Waiting for microphone permission'
+            : isTranscribing
+                ? 'Transcribing voice input'
+                : audioErrorMessage
+                    ? audioErrorOpensSettings
+                        ? 'Voice input setup is required: ffmpeg, Whisper binary, and Whisper model.'
+                        : audioErrorMessage
+                    : '';
+    const micStatusActionLabel = audioErrorOpensSettings
+        ? 'Voice input settings'
+        : audioErrorOpensMicrophonePermissions
+            ? 'Microphone permissions'
+            : showMicRetry
+                ? 'Retry'
+                : '';
+    const micStatusBannerClass = audioError
+        ? 'border-amber-400/25 bg-amber-400/10 text-amber-100/85'
+        : isRecording
+            ? 'border-red-400/25 bg-red-500/10 text-red-100/85'
+            : 'border-vscode-border bg-vscode-editor-background text-vscode-fg/70';
+    const showMicStatusBanner = Boolean(micStatusText);
+    const handleMicButtonClick = () => {
+        clearEtherCloseTimer();
+        setShowEtherMenu(false);
+        setShowContextMenu(false);
+        setShowApprovalMenu(false);
+        setShowModelMenu(false);
+        setShowUsageMenu(false);
+        toggleRecording();
+    };
+    const handleMicErrorAction = () => {
+        clearEtherCloseTimer();
+        setShowEtherMenu(false);
+        if (audioErrorOpensSettings) {
+            onOpenSettings?.('integrations');
+            return;
+        }
+        if (audioErrorOpensMicrophonePermissions) {
+            postMessage({ type: 'open_microphone_permissions' });
+            return;
+        }
+        if (showMicRetry) {
+            toggleRecording();
+        }
+    };
     const showRemoteStartChip = hasConfiguredEtherAdapter && liveStatus?.allowRemoteSessionStart === false;
     const handleEtherToggleClick = () => {
         setShowEtherMenu(false);
@@ -1932,6 +1980,25 @@ export function ChatInput(props: ChatInputProps) {
                 </div>
             )}
 
+            {showMicStatusBanner && (
+                <div className={`mb-1.5 flex flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-[11px] ${micStatusBannerClass}`}>
+                    <span className="inline-flex min-w-0 items-center gap-2">
+                        {isRecording ? <Square className="h-3.5 w-3.5 shrink-0" /> : <Mic className="h-3.5 w-3.5 shrink-0" />}
+                        <span className="truncate">{micStatusText}</span>
+                    </span>
+                    {micStatusActionLabel && (
+                        <button
+                            type="button"
+                            onClick={handleMicErrorAction}
+                            className="ml-auto shrink-0 rounded border border-current/20 px-2 py-1 text-[10px] font-medium transition-colors hover:bg-current/10"
+                            title={micErrorTitle}
+                        >
+                            {micStatusActionLabel}
+                        </button>
+                    )}
+                </div>
+            )}
+
             {/* Input Frame */}
             <div className={`
                 relative flex flex-col rounded-md transition-colors duration-200 overflow-visible
@@ -2062,7 +2129,8 @@ export function ChatInput(props: ChatInputProps) {
                             {etherMenu && (typeof document !== 'undefined' ? createPortal(etherMenu, document.body) : etherMenu)}
                         </div>
                         <button
-                            onClick={toggleRecording}
+                            type="button"
+                            onClick={handleMicButtonClick}
                             disabled={isRequesting || isTranscribing}
                             className={`relative p-2 rounded transition-colors disabled:cursor-wait disabled:opacity-65 ${
                                 isRecording
@@ -2086,19 +2154,7 @@ export function ChatInput(props: ChatInputProps) {
                             <div className="group relative flex h-5 w-5 items-center justify-center">
                                 <button
                                     type="button"
-                                    onClick={() => {
-                                        if (audioErrorOpensSettings) {
-                                            onOpenSettings?.('integrations');
-                                            return;
-                                        }
-                                        if (audioErrorOpensMicrophonePermissions) {
-                                            postMessage({ type: 'open_microphone_permissions' });
-                                            return;
-                                        }
-                                        if (showMicRetry) {
-                                            toggleRecording();
-                                        }
-                                    }}
+                                    onClick={handleMicErrorAction}
                                     className={`flex h-5 w-5 items-center justify-center rounded transition-colors ${
                                         audioErrorOpensSettings || audioErrorOpensMicrophonePermissions
                                             ? 'text-amber-200/78 hover:bg-amber-300/10 hover:text-amber-100'

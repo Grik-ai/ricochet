@@ -342,6 +342,12 @@ describe('ChatInput layout helpers', () => {
 
         expect(source).toContain('RotateCcw');
         expect(source).toContain('Recording. Click to stop.');
+        expect(source).toContain('handleMicButtonClick');
+        expect(source).toContain('onClick={handleMicButtonClick}');
+        expect(source).toContain('Voice input setup is required: ffmpeg, Whisper binary, and Whisper model.');
+        expect(source).toContain('Voice input settings');
+        expect(source).toContain('showMicStatusBanner');
+        expect(source).toContain('Recording microphone audio');
         expect(source).toContain('disabled={isRequesting || isTranscribing}');
         expect(source).toContain("audioError.phase === 'transcription'");
         expect(source).toContain('audioErrorOpensMicrophonePermissions');

@@ -4,6 +4,7 @@ import { NetworkHealthState, NetworkStatusPayload } from '../types/protocol';
 import { sanitizeNetworkStatusPayload } from '../utils/chatErrors';
 
 const STALE_ACTIVITY_MS = 20_000;
+const BROWSER_STATUS_INTERVAL_MS = 60_000;
 
 export interface NetworkHealthOptions {
     runtimeActive: boolean;
@@ -111,9 +112,11 @@ export function useNetworkHealth(options: NetworkHealthOptions): NetworkDisplayS
         };
 
         emitBrowserStatus();
+        const timer = window.setInterval(emitBrowserStatus, BROWSER_STATUS_INTERVAL_MS);
         window.addEventListener('online', emitBrowserStatus);
         window.addEventListener('offline', emitBrowserStatus);
         return () => {
+            window.clearInterval(timer);
             window.removeEventListener('online', emitBrowserStatus);
             window.removeEventListener('offline', emitBrowserStatus);
         };

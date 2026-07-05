@@ -125,6 +125,9 @@ describe('Settings context helpers', () => {
         expect(source).toContain('Check key');
         expect(source).toContain('validate_provider_key');
         expect(source).toContain('Voice input');
+        expect(source).toContain('voice-input-settings');
+        expect(source).toContain('Keep ffmpeg on PATH');
+        expect(source).toContain('Ether handles remote Telegram/Discord voice messages separately');
         expect(source).toContain('whisperBinary');
         expect(source).toContain('whisperModel');
         for (const legacy of ['ko' + '-fi.com', 'pay' + 'pal.com', 'Cof' + 'fee']) {

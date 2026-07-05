@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { computeNetworkPopoverStyle, NetworkStatusPill } from './NetworkStatusPill';
+import { computeNetworkPopoverStyle, formatNetworkDetailState, formatNetworkDetailTime, NetworkStatusPill } from './NetworkStatusPill';
 import type { NetworkDisplayStatus } from '../../hooks/useNetworkHealth';
 import { readFileSync } from 'node:fs';
 
@@ -51,5 +51,28 @@ describe('NetworkStatusPill', () => {
         expect(source).toContain("transformOrigin: 'top right'");
         expect(source).not.toContain('absolute bottom-full');
         expect(source).not.toContain('origin-bottom-right');
+    });
+
+    it('formats browser internet detail without the old unknown online state', () => {
+        expect(formatNetworkDetailState({
+            state: 'online',
+            message: 'Browser network available',
+            lastCheckedAt: 1_000,
+        })).toBe('online');
+        expect(formatNetworkDetailState({
+            state: 'offline',
+            message: 'Browser is offline',
+            lastCheckedAt: 1_000,
+        })).toBe('offline');
+    });
+
+    it('uses the latest browser check time for internet detail rows', () => {
+        const now = Date.now();
+
+        expect(formatNetworkDetailTime('internet', {
+            state: 'offline',
+            lastCheckedAt: now,
+            lastSuccessAt: now - 600_000,
+        })).toBe('now');
     });
 });

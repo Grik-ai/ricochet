@@ -2311,12 +2311,12 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                         </span>
                                     </label>
                                 </div>
-                                <div className="space-y-3 rounded border border-white/10 bg-white/[0.03] p-3">
+                                <div id="voice-input-settings" className="space-y-3 rounded border border-white/10 bg-white/[0.03] p-3">
                                     <div className="flex items-start gap-2">
                                         <Mic className="mt-0.5 h-4 w-4 shrink-0 text-[#888]" />
                                         <div>
                                             <h4 className="text-xs font-medium text-[#ddd]">Voice input</h4>
-                                            <p className="mt-1 text-[11px] leading-relaxed text-[#888]">Microphone transcription runs locally through ffmpeg and Whisper. Audio is not uploaded to model providers.</p>
+                                            <p className="mt-1 text-[11px] leading-relaxed text-[#888]">Microphone transcription runs locally through ffmpeg and Whisper. Keep ffmpeg on PATH, then set the Whisper binary and ggml model below. The mic button records local webview audio; Ether handles remote Telegram/Discord voice messages separately. Audio is not uploaded to model providers.</p>
                                         </div>
                                     </div>
                                     <div className="grid gap-3 sm:grid-cols-2">

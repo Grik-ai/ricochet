@@ -72,6 +72,18 @@ function formatPing(value?: number): string {
     return value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${Math.round(value)} ms`;
 }
 
+export function formatNetworkDetailState(detail: NetworkScopeStatus): string {
+    const ping = formatPing(detail.pingMs);
+    return `${detail.state}${ping ? ` · ${ping}` : ''}`;
+}
+
+export function formatNetworkDetailTime(scope: NetworkHealthScope, detail: NetworkScopeStatus): string {
+    const timestamp = scope === 'internet'
+        ? detail.lastCheckedAt || detail.lastSuccessAt || detail.lastActivityAt
+        : detail.lastSuccessAt || detail.lastCheckedAt || detail.lastActivityAt;
+    return formatTime(timestamp);
+}
+
 function statusToneClass(_tone: NetworkDisplayStatus['tone']) {
     return 'text-vscode-fg/58 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg/84';
 }
@@ -119,7 +131,6 @@ function DiagnosticsCopyButton({ text }: { text: string }) {
 
 function DetailRow({ scope, detail }: { scope: NetworkHealthScope; detail?: NetworkScopeStatus }) {
     if (!detail) return null;
-    const ping = formatPing(detail.pingMs);
     return (
         <div className="flex items-start justify-between gap-3 rounded px-2 py-1.5 hover:bg-vscode-list-hoverBackground/60 transition-colors">
             <div className="min-w-0">
@@ -127,8 +138,8 @@ function DetailRow({ scope, detail }: { scope: NetworkHealthScope; detail?: Netw
                 <div className="truncate text-[9px] text-vscode-fg/40">{detail.message || detail.errorCode || detail.state}</div>
             </div>
             <div className="shrink-0 text-right text-[9px] text-vscode-fg/45">
-                <div className="capitalize">{detail.state}{ping ? ` · ${ping}` : ''}</div>
-                <div>{formatTime(detail.lastSuccessAt || detail.lastCheckedAt || detail.lastActivityAt)}</div>
+                <div className="capitalize">{formatNetworkDetailState(detail)}</div>
+                <div>{formatNetworkDetailTime(scope, detail)}</div>
             </div>
         </div>
     );

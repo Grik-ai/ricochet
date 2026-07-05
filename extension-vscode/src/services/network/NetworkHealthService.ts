@@ -161,18 +161,39 @@ export function aggregateNetworkHealth(state: NetworkHealthServiceState): Networ
         }
     }
 
-    const providerPing = state.details.provider?.pingMs;
-    const corePing = state.details.core?.pingMs;
+    const provider = classifyNetworkState('provider', state.details.provider);
+    const core = classifyNetworkState('core', state.details.core);
+    const webview = classifyNetworkState('webview', state.details.webview);
+    const verified = [provider, core, webview].find(candidate => candidate.state === 'online');
+    if (!verified) {
+        return {
+            state: 'unknown',
+            scope: 'core',
+            provider: state.provider,
+            model: state.model,
+            lastCheckedAt: Date.now(),
+            lastActivityAt: state.details.agent?.lastActivityAt,
+            message: 'Checking connection',
+            details: state.details,
+        };
+    }
+
     return {
         state: 'online',
-        scope: 'provider',
+        scope: verified.scope,
         provider: state.provider,
         model: state.model,
-        pingMs: providerPing ?? corePing,
+        pingMs: verified.pingMs,
         lastCheckedAt: Date.now(),
-        lastSuccessAt: state.details.provider?.lastSuccessAt ?? state.details.core?.lastSuccessAt,
+        lastSuccessAt: state.details[verified.scope]?.lastSuccessAt,
         lastActivityAt: state.details.agent?.lastActivityAt,
-        message: providerPing !== undefined ? 'Provider reachable' : 'Core reachable',
+        message: verified.message || (
+            verified.scope === 'provider'
+                ? 'Provider reachable'
+                : verified.scope === 'core'
+                    ? 'Core reachable'
+                    : 'Webview bridge reachable'
+        ),
         details: state.details,
     };
 }
@@ -233,9 +254,10 @@ export class NetworkHealthService {
         const online = payload?.online !== false;
         this.state.details.internet = {
             ...this.state.details.internet,
-            state: online ? 'unknown' : 'offline',
+            state: online ? 'online' : 'offline',
             lastCheckedAt: Date.now(),
-            message: online ? 'Browser reports online' : 'Browser reports offline',
+            lastSuccessAt: online ? Date.now() : this.state.details.internet?.lastSuccessAt,
+            message: online ? 'Browser network available' : 'Browser is offline',
             errorCode: online ? undefined : 'browser_offline',
             consecutiveFailures: online ? 0 : MAX_RECONNECT_ATTEMPTS,
         };
