@@ -210,7 +210,7 @@ export function ChatView({
         restoreCheckpoint
     } = useChat(currentSessionId);
 
-    const { status: liveStatus, toggleLiveMode } = useLiveMode();
+    const { status: liveStatus, isLoading: isLiveModeLoading, toggleLiveMode } = useLiveMode();
     const scrollViewportRef = useRef<HTMLDivElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
     const { onMessage, postMessage } = useVSCodeApi();
@@ -441,6 +441,7 @@ export function ChatView({
             fileResults={fileResults}
             searchFiles={searchFiles}
             liveStatus={liveStatus}
+            isLiveModeLoading={isLiveModeLoading}
             onToggleLiveMode={toggleLiveMode}
             onOpenSettings={onOpenSettings}
             onOpenAccount={onOpenAccount}

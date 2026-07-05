@@ -3091,6 +3091,16 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 						Content:   err.Error(),
 						IsError:   true,
 					})
+					continue
+				}
+				category := tools.GetToolCategory(tc.Name)
+				if c.persistentPermissionDecision(session, tc, category) == safeguard.PermissionDeny {
+					blockedResults = append(blockedResults, protocol.ToolResultBlock{
+						ToolUseID: tc.ID,
+						Content:   fmt.Sprintf("Action denied by persistent permission rule: %s", c.formatToolCall(tc)),
+						IsError:   true,
+					})
+					c.auditPermissionDecision(session, tc, category, "deny", "permission_rule", "matched deny rule at approval gate")
 				}
 			}
 			// If any tools were blocked, send errors back to LLM and continue to next turn
@@ -4692,21 +4702,36 @@ func (c *Controller) isToolAutoApproved(session *Session, tc ToolCallInfo, planM
 		return c.isBatchWorkerToolAutoApproved(session, tc, category)
 	}
 
+	switch c.persistentPermissionDecision(session, tc, category) {
+	case safeguard.PermissionDeny:
+		return false
+	case safeguard.PermissionAllow:
+		return true
+	}
+
 	// ─── META TOOLS: ALWAYS ALLOW (Silent) ───
 	// These tools have no side effects on the project files or system.
 	if category == tools.CategoryMeta {
 		return true
 	}
 
-	// ─── READ TOOLS: ALWAYS ALLOW (Silent) ───
-	// Read-only operations should NEVER interrupt the user's flow.
-	// This is unconditional - reading files is always safe.
-	if category == tools.CategoryRead {
-		return true
+	var autoApproval *config.AutoApprovalSettings
+	if c.config != nil {
+		autoApproval = c.config.AutoApproval
 	}
-
-	autoApproval := c.config.AutoApproval
 	autoApprovalEnabled := autoApproval != nil && autoApproval.Enabled
+
+	// ─── READ TOOLS: Workspace reads are silent; external reads are settings-driven ───
+	if category == tools.CategoryRead {
+		if !c.toolTargetsExternal(tc.Arguments) {
+			return true
+		}
+		if autoApprovalEnabled && autoApproval.ReadFilesExternal && c.autoApprovalBudgetAllows(session) {
+			c.recordAutoApproval(session)
+			return true
+		}
+		return false
+	}
 
 	// ─── WRITE TOOLS: Plan Mode = BLOCKED, Act Mode = SETTINGS-DRIVEN ───
 	if category == tools.CategoryWrite {
@@ -4780,6 +4805,127 @@ func (c *Controller) isToolAutoApproved(session *Session, tc ToolCallInfo, planM
 		return true
 	}
 	return false
+}
+
+func (c *Controller) persistentPermissionDecision(session *Session, tc ToolCallInfo, category tools.ToolCategory) safeguard.PermissionDecision {
+	if c == nil || c.safeguard == nil || c.safeguard.PermissionStore == nil {
+		return safeguard.PermissionUnknown
+	}
+	groups := c.permissionCheckGroups(session, tc, category)
+	if len(groups) == 0 {
+		return safeguard.PermissionUnknown
+	}
+
+	allGroupsAllowed := true
+	for _, group := range groups {
+		groupAllowed := false
+		for _, check := range group {
+			switch c.safeguard.PermissionStore.Decide(check) {
+			case safeguard.PermissionDeny:
+				return safeguard.PermissionDeny
+			case safeguard.PermissionAllow:
+				groupAllowed = true
+			}
+		}
+		if !groupAllowed {
+			allGroupsAllowed = false
+		}
+	}
+	if allGroupsAllowed {
+		return safeguard.PermissionAllow
+	}
+	return safeguard.PermissionUnknown
+}
+
+func (c *Controller) permissionCheckGroups(session *Session, tc ToolCallInfo, category tools.ToolCategory) [][]safeguard.PermissionCheck {
+	targets := c.permissionTargetsForTool(tc, category)
+	if len(targets) == 0 {
+		targets = []string{"*"}
+	}
+
+	sessionID := ""
+	if session != nil {
+		sessionID = session.ID
+	}
+	groups := make([][]safeguard.PermissionCheck, 0, len(targets))
+	for _, target := range targets {
+		group := []safeguard.PermissionCheck{{
+			Tool:      tc.Name,
+			Target:    target,
+			Project:   c.cwd,
+			SessionID: sessionID,
+		}}
+		if category == tools.CategoryMCP && tc.Name != "mcp" {
+			group = append(group, safeguard.PermissionCheck{
+				Tool:      "mcp",
+				Target:    target,
+				Project:   c.cwd,
+				SessionID: sessionID,
+			})
+		}
+		groups = append(groups, group)
+	}
+	return groups
+}
+
+func (c *Controller) permissionTargetsForTool(tc ToolCallInfo, category tools.ToolCategory) []string {
+	switch category {
+	case tools.CategoryRead, tools.CategoryWrite:
+		return batchWorkerAffectedFiles(tc.Arguments)
+	case tools.CategoryExecute:
+		if command := firstStringArgument(tc.Arguments, "command", "CommandLine", "cmd", "script", "code"); command != "" {
+			return []string{command}
+		}
+	case tools.CategoryBrowser:
+		if target := firstStringArgument(tc.Arguments, "url", "URL", "selector", "text"); target != "" {
+			return []string{target}
+		}
+	case tools.CategoryMCP:
+		if target := firstStringArgument(tc.Arguments, "name", "tool", "server", "uri"); target != "" {
+			return []string{target}
+		}
+		return []string{tc.Name}
+	}
+	return nil
+}
+
+func firstStringArgument(arguments string, keys ...string) string {
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(arguments), &payload); err != nil {
+		return ""
+	}
+	for _, key := range keys {
+		if val, ok := payload[key]; ok {
+			if out := strings.TrimSpace(toString(val)); out != "" {
+				return out
+			}
+		}
+	}
+	return ""
+}
+
+func (c *Controller) auditPermissionDecision(session *Session, tc ToolCallInfo, category tools.ToolCategory, decision, source, reason string) {
+	if c == nil || c.safeguard == nil || c.safeguard.PermissionStore == nil {
+		return
+	}
+	targets := c.permissionTargetsForTool(tc, category)
+	target := "*"
+	if len(targets) > 0 {
+		target = strings.Join(targets, ", ")
+	}
+	sessionID := ""
+	if session != nil {
+		sessionID = session.ID
+	}
+	_ = c.safeguard.PermissionStore.AppendAudit(safeguard.PermissionAuditEntry{
+		Tool:      tc.Name,
+		Target:    target,
+		Project:   c.cwd,
+		SessionID: sessionID,
+		Decision:  decision,
+		Source:    source,
+		Reason:    reason,
+	})
 }
 
 func extractCommandArgument(arguments string) string {

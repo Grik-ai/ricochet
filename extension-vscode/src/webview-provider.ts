@@ -17,6 +17,7 @@ import { NetworkHealthService } from './services/network/NetworkHealthService';
 import { AuthService } from './services/auth/AuthService';
 import { syncAutoApprovalSettings } from './services/settings/autoApprovalSync';
 import { attachContextSessionId, buildEmptyUsageSnapshot, explicitSessionIdFromPayload, shouldUseCachedUsage } from './services/usage/usageScope';
+import { stageAttachmentsForWorkspace } from './services/attachments/stageAttachments';
 
 function deriveChoiceMetadata(question: string, choices: string[]) {
     const looksLikePlan = /plan|implementation|implement|approve|proceed|task|phase|план|реализ|задач/i.test(question);
@@ -480,6 +481,10 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
                         await this.authService.openExternal(message.payload?.url);
                         break;
 
+                    case 'open_microphone_permissions':
+                        await this.openMicrophonePermissionSettings();
+                        break;
+
                     case 'get_workspace_state':
                         this.postWorkspaceState();
                         break;
@@ -785,7 +790,35 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
                     case 'audio_start':
                     case 'audio_chunk':
                     case 'audio_stop':
-                        await this.core.send(message.type, message.payload || {});
+                        try {
+                            const result = await this.core.send(message.type, message.payload || {});
+                            if (message.type === 'audio_stop') {
+                                this.postMessage({ type: 'audio_transcription_result', payload: result });
+                            }
+                        } catch (error: any) {
+                            const errorMessage = error?.message || String(error);
+                            if (message.type === 'audio_stop') {
+                                this.postMessage({
+                                    type: 'audio_transcription_result',
+                                    payload: {
+                                        ok: false,
+                                        error: errorMessage,
+                                        phase: 'transcription',
+                                        retryable: true,
+                                    },
+                                });
+                            } else {
+                                this.postMessage({
+                                    type: 'audio_recording_status',
+                                    payload: {
+                                        state: 'error',
+                                        phase: 'recording',
+                                        message: errorMessage,
+                                        retryable: false,
+                                    },
+                                });
+                            }
+                        }
                         break;
                     // case 'get_state':
                     //     // Handled by ChatService which respects session_id
@@ -939,10 +972,28 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
 
                     case 'get_models':
                         try {
-                            const payload = await this.core.send('get_models', {});
+                            const payload = await this.core.send('get_models', message.payload || {});
                             this.postMessage({ type: 'models', payload });
                         } catch (e) {
                             console.error('Failed to get models:', e);
+                        }
+                        break;
+
+                    case 'validate_provider_key':
+                        try {
+                            const payload = await this.core.send('validate_provider_key', message.payload || {});
+                            this.postMessage({ type: 'provider_key_validation', payload: { ...(payload || {}), providerId: payload?.providerId || message.payload?.providerId } });
+                        } catch (e: any) {
+                            this.postMessage({
+                                type: 'provider_key_validation',
+                                payload: {
+                                    providerId: message.payload?.providerId,
+                                    ok: false,
+                                    status: 'network_error',
+                                    message: e?.message || String(e),
+                                    checkedAt: Date.now(),
+                                }
+                            });
                         }
                         break;
 
@@ -1289,6 +1340,55 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
                             this.postMessage({ type: 'mcp_registry', payload: result });
                         } catch (e) {
                             console.error('Failed to refresh MCP registry:', e);
+                        }
+                        break;
+
+                    case 'get_marketplace_catalog':
+                        try {
+                            const result = await this.core.send('get_marketplace_catalog', {});
+                            this.postMessage({ type: 'marketplace_catalog', payload: result });
+                        } catch (e: any) {
+                            this.postMessage({ type: 'marketplace_error', payload: { error: e.message || String(e) } });
+                        }
+                        break;
+
+                    case 'refresh_marketplace_catalog':
+                        try {
+                            const result = await this.core.send('refresh_marketplace_catalog', {});
+                            this.postMessage({ type: 'marketplace_catalog', payload: result });
+                        } catch (e: any) {
+                            this.postMessage({ type: 'marketplace_error', payload: { error: e.message || String(e) } });
+                        }
+                        break;
+
+                    case 'get_marketplace_installed_metadata':
+                        try {
+                            const result = await this.core.send('get_marketplace_installed_metadata', {});
+                            this.postMessage({ type: 'marketplace_installed_metadata', payload: result });
+                        } catch (e: any) {
+                            this.postMessage({ type: 'marketplace_error', payload: { error: e.message || String(e) } });
+                        }
+                        break;
+
+                    case 'install_marketplace_item':
+                        try {
+                            const result = await this.core.send('install_marketplace_item', message.payload || {});
+                            this.postMessage({ type: 'marketplace_install_result', payload: result });
+                            const metadata = await this.core.send('get_marketplace_installed_metadata', {});
+                            this.postMessage({ type: 'marketplace_installed_metadata', payload: metadata });
+                        } catch (e: any) {
+                            this.postMessage({ type: 'marketplace_error', payload: { error: e.message || String(e) } });
+                        }
+                        break;
+
+                    case 'remove_marketplace_item':
+                        try {
+                            const result = await this.core.send('remove_marketplace_item', message.payload || {});
+                            this.postMessage({ type: 'marketplace_remove_result', payload: result });
+                            const metadata = await this.core.send('get_marketplace_installed_metadata', {});
+                            this.postMessage({ type: 'marketplace_installed_metadata', payload: metadata });
+                        } catch (e: any) {
+                            this.postMessage({ type: 'marketplace_error', payload: { error: e.message || String(e) } });
                         }
                         break;
 
@@ -1722,89 +1822,12 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
     }
 
     private async stageAttachments(payload: any): Promise<void> {
-        const requestId = String(payload?.request_id || `attach-${Date.now()}`);
-        const files = Array.isArray(payload?.files) ? payload.files : [];
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        const attachments: any[] = [];
-        const errors: any[] = [];
-        const maxFiles = 8;
-        const maxBytes = 5 * 1024 * 1024;
-
-        if (!workspaceRoot) {
-            this.postMessage({
-                type: 'attachments_staged',
-                payload: {
-                    request_id: requestId,
-                    attachments,
-                    errors: files.map((file: any) => ({ id: file?.id, error: 'No workspace is open.' })),
-                },
-            });
-            return;
-        }
-
-        const safeSession = this.safeAttachmentSegment(payload?.session_id || 'default');
-        const attachmentDir = path.join(workspaceRoot, '.ricochet', 'attachments', safeSession);
-        await fs.promises.mkdir(attachmentDir, { recursive: true });
-
-        for (const [index, file] of files.slice(0, maxFiles).entries()) {
-            const id = String(file?.id || `${requestId}-${index}`);
-            try {
-                const name = this.safeAttachmentName(file?.name || `attachment-${index + 1}`);
-                const data = typeof file?.data === 'string' ? file.data : '';
-                const buffer = Buffer.from(data, 'base64');
-                if (buffer.length > maxBytes) {
-                    errors.push({ id, error: 'File is larger than 5 MB.' });
-                    continue;
-                }
-                const uniqueName = `${Date.now()}-${nodeCrypto.randomBytes(4).toString('hex')}-${name}`;
-                const targetPath = path.join(attachmentDir, uniqueName);
-                const relativePath = path.relative(workspaceRoot, targetPath);
-                if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
-                    errors.push({ id, error: 'Attachment path escaped the workspace.' });
-                    continue;
-                }
-                await fs.promises.writeFile(targetPath, buffer, { flag: 'wx' });
-                const normalizedRelativePath = relativePath.split(path.sep).join('/');
-                attachments.push({
-                    id,
-                    path: normalizedRelativePath,
-                    stagedPath: normalizedRelativePath,
-                    name,
-                    kind: 'attachment',
-                    source: 'attachment',
-                    mime: typeof file?.mime === 'string' ? file.mime : undefined,
-                    size: buffer.length,
-                });
-            } catch (error) {
-                errors.push({ id, error: error instanceof Error ? error.message : String(error) });
-            }
-        }
-
-        if (files.length > maxFiles) {
-            files.slice(maxFiles).forEach((file: any, index: number) => {
-                errors.push({ id: file?.id || `${requestId}-overflow-${index}`, error: 'Attach up to 8 files per turn.' });
-            });
-        }
-
+        const result = await stageAttachmentsForWorkspace(payload, workspaceRoot);
         this.postMessage({
             type: 'attachments_staged',
-            payload: { request_id: requestId, attachments, errors },
+            payload: result,
         });
-    }
-
-    private safeAttachmentSegment(value: string): string {
-        return String(value || 'default')
-            .replace(/[^a-zA-Z0-9._-]+/g, '_')
-            .replace(/^\.+/, '')
-            .slice(0, 80) || 'default';
-    }
-
-    private safeAttachmentName(value: string): string {
-        const base = path.basename(String(value || 'attachment'));
-        return base
-            .replace(/[^a-zA-Z0-9._ -]+/g, '_')
-            .replace(/^\.+/, '')
-            .slice(0, 120) || 'attachment';
     }
 
     private languageForPath(filePath: string): string {
@@ -1854,7 +1877,7 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data: blob:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};">
   ${styleTag}
   <title>Ricochet</title>
   <script nonce="${nonce}">
@@ -1968,6 +1991,29 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
         });
         // Also refresh editor decorations
         ReviewService.getInstance().refresh();
+    }
+
+    private async openMicrophonePermissionSettings(): Promise<void> {
+        const appName = vscode.env.appName || 'VS Code';
+        const hint = `Allow microphone access for ${appName}, then return to Ricochet and click the microphone again.`;
+
+        try {
+            if (process.platform === 'darwin') {
+                await vscode.env.openExternal(vscode.Uri.parse('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'));
+                vscode.window.showInformationMessage(hint);
+                return;
+            }
+            if (process.platform === 'win32') {
+                await vscode.env.openExternal(vscode.Uri.parse('ms-settings:privacy-microphone'));
+                vscode.window.showInformationMessage(hint);
+                return;
+            }
+
+            await vscode.commands.executeCommand('workbench.action.openSettings', 'microphone');
+            vscode.window.showInformationMessage(`Open your system privacy settings and ${hint}`);
+        } catch (error) {
+            vscode.window.showInformationMessage(`Open System Settings > Privacy & Security > Microphone. ${hint}`);
+        }
     }
 
     private getNonce(): string {

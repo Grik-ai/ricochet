@@ -19,6 +19,7 @@ import (
 	"github.com/igoryan-dao/ricochet/internal/host"
 	"github.com/igoryan-dao/ricochet/internal/keepawake"
 	"github.com/igoryan-dao/ricochet/internal/livemode"
+	"github.com/igoryan-dao/ricochet/internal/marketplace"
 	"github.com/igoryan-dao/ricochet/internal/mcp"
 	"github.com/igoryan-dao/ricochet/internal/modes"
 	"github.com/igoryan-dao/ricochet/internal/paths"
@@ -57,6 +58,8 @@ type Handler struct {
 	GlobalCtx      context.Context
 	OnEvent        func(agent.Event)         `json:"-"`
 	OnBatchEvent   func(protocol.BatchEvent) `json:"-"`
+	LiveModeEvents ResponseWriter            `json:"-"`
+	LiveModeDaemon bool                      `json:"-"`
 
 	StartedAt             time.Time `json:"-"`
 	HealthMu              sync.RWMutex
@@ -98,6 +101,124 @@ func NewHandler(
 		Providers:      pm,
 		StartedAt:      time.Now(),
 	}
+}
+
+func (h *Handler) SetLiveModeEventWriter(writer ResponseWriter) {
+	h.LiveModeEvents = writer
+	if h.LiveMode != nil {
+		h.wireLiveModeCallbacks(h.LiveMode)
+		h.LiveMode.Start(h.liveModeContext())
+	}
+}
+
+func (h *Handler) SetLiveModeDaemon(isDaemon bool) {
+	h.LiveModeDaemon = isDaemon
+	if h.LiveMode != nil {
+		h.LiveMode.SetDaemon(isDaemon)
+	}
+}
+
+func (h *Handler) liveModeContext() context.Context {
+	if h.GlobalCtx != nil {
+		return h.GlobalCtx
+	}
+	return context.Background()
+}
+
+func (h *Handler) currentLiveModeConfig() *livemode.Config {
+	if h.LiveModeConfig == nil {
+		h.LiveModeConfig = &livemode.Config{}
+	}
+	return h.LiveModeConfig
+}
+
+func (h *Handler) liveModeConfigured() bool {
+	cfg := h.currentLiveModeConfig()
+	return strings.TrimSpace(cfg.TelegramToken) != "" || strings.TrimSpace(cfg.DiscordToken) != ""
+}
+
+func (h *Handler) sendLiveModeEvent(msg protocol.RPCMessage) {
+	if h.LiveModeEvents != nil {
+		_ = h.LiveModeEvents.Send(msg)
+		return
+	}
+	if h.Host != nil {
+		h.Host.SendMessage(msg)
+	}
+}
+
+func (h *Handler) wireLiveModeCallbacks(ctrl *livemode.Controller) {
+	if ctrl == nil {
+		return
+	}
+	ctrl.SetOnStatusUpdate(func(status livemode.Status) {
+		h.sendLiveModeEvent(protocol.RPCMessage{
+			Type:    "live_mode_status",
+			Payload: protocol.EncodeRPC(status),
+		})
+	})
+	ctrl.SetOnActivity(func(activity livemode.EtherActivity) {
+		h.sendLiveModeEvent(protocol.RPCMessage{
+			Type: "ether_activity",
+			Payload: protocol.EncodeRPC(map[string]interface{}{
+				"stage":    activity.Stage,
+				"source":   activity.Source,
+				"username": activity.Username,
+				"preview":  activity.Preview,
+			}),
+		})
+	})
+	ctrl.SetOnChatUpdate(func(update agent.ChatUpdate) {
+		h.sendLiveModeEvent(protocol.RPCMessage{
+			Type: "chat_update",
+			Payload: protocol.EncodeRPC(map[string]interface{}{
+				"message": update.Message,
+			}),
+		})
+	})
+}
+
+func (h *Handler) attachLiveModeControllerLocked(ctrl *livemode.Controller) {
+	h.LiveMode = ctrl
+	ctrl.SetDaemon(h.LiveModeDaemon)
+	h.wireLiveModeCallbacks(ctrl)
+	if h.Agent != nil {
+		h.Agent.SetLiveMode(ctrl)
+		ctrl.SetAgent(h.Agent)
+	}
+	ctrl.Start(h.liveModeContext())
+}
+
+func (h *Handler) ensureLiveModeLocked() error {
+	if h.LiveMode != nil {
+		h.wireLiveModeCallbacks(h.LiveMode)
+		h.LiveMode.Start(h.liveModeContext())
+		return nil
+	}
+	ctrl, err := livemode.New(h.currentLiveModeConfig(), h.Agent)
+	if err != nil {
+		return err
+	}
+	h.attachLiveModeControllerLocked(ctrl)
+	return nil
+}
+
+func (h *Handler) recreateLiveModeLocked(wasEnabled bool) error {
+	if h.LiveMode != nil {
+		_, _ = h.LiveMode.Disable(h.liveModeContext())
+		h.LiveMode = nil
+	}
+	if !h.liveModeConfigured() {
+		return nil
+	}
+	if err := h.ensureLiveModeLocked(); err != nil {
+		return err
+	}
+	if wasEnabled {
+		_, err := h.LiveMode.Enable(h.liveModeContext())
+		return err
+	}
+	return nil
 }
 
 func (h *Handler) getLiveModeStatus() *livemode.Status {
@@ -798,6 +919,10 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 		})
 
 	case "get_models":
+		var payload struct {
+			Force bool `json:"force,omitempty"`
+		}
+		_ = json.Unmarshal(msg.Payload, &payload)
 		if h.Providers == nil {
 			// Lazy init providers if needed
 			configPath := config.FindConfigFile()
@@ -832,9 +957,17 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 			}
 		}
 
-		if !strings.EqualFold(os.Getenv("RICOCHET_DISABLE_OPENROUTER_MODEL_SYNC"), "1") {
+		if strings.EqualFold(os.Getenv("RICOCHET_DISABLE_OPENROUTER_MODEL_SYNC"), "1") {
+			h.Providers.MarkOpenRouterFreeModelSyncDisabled()
+		} else {
 			syncCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			if err := h.Providers.RefreshOpenRouterFreeModels(syncCtx); err != nil {
+			var err error
+			if payload.Force {
+				err = h.Providers.ForceRefreshOpenRouterFreeModels(syncCtx)
+			} else {
+				err = h.Providers.RefreshOpenRouterFreeModels(syncCtx)
+			}
+			if err != nil {
 				log.Printf("get_models: OpenRouter free model sync skipped: %v", err)
 			}
 			cancel()
@@ -849,6 +982,43 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 				"providers":                   providers,
 				"hide_prompt_training_models": hidePromptTrainingModels,
 			}),
+		})
+
+	case "validate_provider_key":
+		var payload struct {
+			ProviderID string `json:"providerId"`
+			APIKey     string `json:"apiKey"`
+		}
+		_ = json.Unmarshal(msg.Payload, &payload)
+		if h.Providers == nil {
+			configPath := config.FindConfigFile()
+			pm, err := config.NewProvidersManager(configPath)
+			if err != nil {
+				log.Printf("validate_provider_key: Error creating ProvidersManager: %v", err)
+			}
+			h.Providers = pm
+		}
+		if h.Providers == nil {
+			writer.Send(protocol.RPCMessage{
+				ID:   msg.ID,
+				Type: "provider_key_validation",
+				Payload: protocol.EncodeRPC(config.ProviderKeyValidationResult{
+					ProviderID: payload.ProviderID,
+					OK:         false,
+					Status:     "unsupported",
+					Message:    "Provider catalog is not available.",
+					CheckedAt:  time.Now().UnixMilli(),
+				}),
+			})
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+		result := h.Providers.ValidateProviderKey(ctx, payload.ProviderID, payload.APIKey)
+		cancel()
+		writer.Send(protocol.RPCMessage{
+			ID:      msg.ID,
+			Type:    "provider_key_validation",
+			Payload: protocol.EncodeRPC(result),
 		})
 
 	case "get_usage":
@@ -1186,6 +1356,8 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 			"maxTokens":                   s.Provider.MaxTokens,
 			"telegramToken":               s.LiveMode.TelegramToken,
 			"telegramChatId":              s.LiveMode.TelegramChatID,
+			"whisperBinary":               s.LiveMode.WhisperBinary,
+			"whisperModel":                s.LiveMode.WhisperModel,
 			"discordToken":                s.LiveMode.DiscordToken,
 			"discordApplicationId":        s.LiveMode.DiscordApplicationID,
 			"discordGuildId":              s.LiveMode.DiscordGuildID,
@@ -1255,6 +1427,12 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 			Type:    "live_mode_status",
 			Payload: protocol.EncodeRPC(h.getLiveModeStatus()),
 		})
+	case "audio_start":
+		h.handleAudioStart(msg, writer)
+	case "audio_chunk":
+		h.handleAudioChunk(msg, writer)
+	case "audio_stop":
+		h.handleAudioStop(msg, writer)
 	case "get_tasks":
 		var tasks []agent.TaskItem
 		if h.Agent != nil {
@@ -1431,6 +1609,87 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 			ID:      msg.ID,
 			Type:    "response",
 			Payload: protocol.EncodeRPC(map[string]interface{}{"success": true, "skills": h.Agent.GetSkillsManager().ListSkillManifests()}),
+		})
+
+	case "get_marketplace_catalog":
+		service := h.marketplaceService()
+		catalog, err := service.GetCatalog(h.GlobalCtx)
+		if err != nil {
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
+			return
+		}
+		writer.Send(protocol.RPCMessage{
+			ID:      msg.ID,
+			Type:    "response",
+			Payload: protocol.EncodeRPC(catalog),
+		})
+
+	case "refresh_marketplace_catalog":
+		service := h.marketplaceService()
+		catalog, err := service.RefreshCatalog(h.GlobalCtx)
+		if err != nil {
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
+			return
+		}
+		writer.Send(protocol.RPCMessage{
+			ID:      msg.ID,
+			Type:    "response",
+			Payload: protocol.EncodeRPC(catalog),
+		})
+
+	case "get_marketplace_installed_metadata":
+		service := h.marketplaceService()
+		metadata, err := service.InstalledMetadata()
+		if err != nil {
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
+			return
+		}
+		writer.Send(protocol.RPCMessage{
+			ID:      msg.ID,
+			Type:    "response",
+			Payload: protocol.EncodeRPC(metadata),
+		})
+
+	case "install_marketplace_item":
+		var payload marketplace.InstallRequest
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: "Invalid payload: " + err.Error()})
+			return
+		}
+		result, err := h.marketplaceService().Install(h.GlobalCtx, payload)
+		if err != nil {
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
+			return
+		}
+		if err := h.reloadMarketplaceCapabilities(); err != nil {
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
+			return
+		}
+		writer.Send(protocol.RPCMessage{
+			ID:      msg.ID,
+			Type:    "response",
+			Payload: protocol.EncodeRPC(result),
+		})
+
+	case "remove_marketplace_item":
+		var payload marketplace.RemoveRequest
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: "Invalid payload: " + err.Error()})
+			return
+		}
+		result, err := h.marketplaceService().Remove(h.GlobalCtx, payload)
+		if err != nil {
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
+			return
+		}
+		if err := h.reloadMarketplaceCapabilities(); err != nil {
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
+			return
+		}
+		writer.Send(protocol.RPCMessage{
+			ID:      msg.ID,
+			Type:    "response",
+			Payload: protocol.EncodeRPC(result),
 		})
 
 	case "get_index_status":
@@ -1763,6 +2022,28 @@ func (h *Handler) syncSkillSettings() {
 	h.Agent.GetSkillsManager().ApplyOverrides(h.skillOverridesFromSettings())
 }
 
+func (h *Handler) marketplaceService() *marketplace.Service {
+	cwd := ""
+	if h.Host != nil {
+		cwd = h.Host.GetCWD()
+	} else if h.Agent != nil {
+		cwd = h.Agent.GetCWD()
+	}
+	return marketplace.NewService(paths.GetGlobalDir(), cwd)
+}
+
+func (h *Handler) reloadMarketplaceCapabilities() error {
+	if h.McpHub != nil {
+		h.McpHub.Reload()
+	}
+	if h.Agent != nil && h.Agent.GetSkillsManager() != nil {
+		if err := h.Agent.GetSkillsManager().LoadSkillsWithOverrides(h.skillOverridesFromSettings()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (h *Handler) skillOverridesFromSettings() []skills.SkillOverride {
 	if h.Settings == nil {
 		return nil
@@ -1939,6 +2220,8 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 		EmbeddingModel                *string                      `json:"embeddingModel"`
 		TelegramToken                 *string                      `json:"telegramToken"`
 		TelegramChatID                *int64                       `json:"telegramChatId"`
+		WhisperBinary                 *string                      `json:"whisperBinary"`
+		WhisperModel                  *string                      `json:"whisperModel"`
 		DiscordToken                  *string                      `json:"discordToken"`
 		DiscordApplicationID          *string                      `json:"discordApplicationId"`
 		DiscordGuildID                *string                      `json:"discordGuildId"`
@@ -1976,6 +2259,7 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 	if hidePromptTrainingModels == nil {
 		hidePromptTrainingModels = payload.HidePromptTrainingModelsCamel
 	}
+	liveCfg := h.currentLiveModeConfig()
 
 	// Do not destroy h.LiveMode here. It is running in the background (managed by main.go/Handler).
 	// We will re-link the new Agent to it in lazyInitAgent.
@@ -1997,14 +2281,20 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 	previousAPIKey := ""
 	previousTelegramToken := ""
 	previousDiscordToken := ""
+	previousWhisperBinary := ""
+	previousWhisperModel := ""
+	wasLiveModeEnabled := h.LiveMode != nil && h.LiveMode.GetStatus().Enabled
 	if h.Config != nil {
 		previousProvider = h.Config.Provider.Provider
 		previousModel = h.Config.Provider.Model
 		previousAPIKey = h.Config.Provider.APIKey
 	}
 	if h.Settings != nil {
-		previousTelegramToken = h.Settings.Get().LiveMode.TelegramToken
-		previousDiscordToken = h.Settings.Get().LiveMode.DiscordToken
+		liveSettings := h.Settings.Get().LiveMode
+		previousTelegramToken = liveSettings.TelegramToken
+		previousDiscordToken = liveSettings.DiscordToken
+		previousWhisperBinary = liveSettings.WhisperBinary
+		previousWhisperModel = liveSettings.WhisperModel
 	}
 	liveModeRestartRequired := false
 
@@ -2046,49 +2336,65 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 			}
 			if payload.TelegramToken != nil {
 				s.LiveMode.TelegramToken = *payload.TelegramToken
-				h.LiveModeConfig.TelegramToken = *payload.TelegramToken
-				if h.LiveMode != nil && previousTelegramToken != *payload.TelegramToken {
+				liveCfg.TelegramToken = *payload.TelegramToken
+				if previousTelegramToken != *payload.TelegramToken {
 					liveModeRestartRequired = true
 				}
 			}
 			if payload.TelegramChatID != nil {
 				s.LiveMode.TelegramChatID = *payload.TelegramChatID
-				h.LiveModeConfig.TelegramChatID = *payload.TelegramChatID
+				liveCfg.TelegramChatID = *payload.TelegramChatID
+			}
+			if payload.WhisperBinary != nil {
+				s.LiveMode.WhisperBinary = *payload.WhisperBinary
+				liveCfg.WhisperBinary = *payload.WhisperBinary
+				if previousWhisperBinary != *payload.WhisperBinary {
+					liveModeRestartRequired = true
+					h.Transcriber = nil
+				}
+			}
+			if payload.WhisperModel != nil {
+				s.LiveMode.WhisperModel = *payload.WhisperModel
+				liveCfg.WhisperModel = *payload.WhisperModel
+				if previousWhisperModel != *payload.WhisperModel {
+					liveModeRestartRequired = true
+					h.Transcriber = nil
+				}
 			}
 			if payload.DiscordToken != nil {
 				s.LiveMode.DiscordToken = *payload.DiscordToken
-				h.LiveModeConfig.DiscordToken = *payload.DiscordToken
-				if h.LiveMode != nil && previousDiscordToken != *payload.DiscordToken {
+				liveCfg.DiscordToken = *payload.DiscordToken
+				if previousDiscordToken != *payload.DiscordToken {
 					liveModeRestartRequired = true
 				}
 			}
 			if payload.DiscordApplicationID != nil {
 				s.LiveMode.DiscordApplicationID = *payload.DiscordApplicationID
-				h.LiveModeConfig.DiscordApplicationID = *payload.DiscordApplicationID
+				liveCfg.DiscordApplicationID = *payload.DiscordApplicationID
 			}
 			if payload.DiscordGuildID != nil {
 				s.LiveMode.DiscordGuildID = *payload.DiscordGuildID
-				h.LiveModeConfig.DiscordGuildID = *payload.DiscordGuildID
+				liveCfg.DiscordGuildID = *payload.DiscordGuildID
 			}
 			if payload.DiscordAllowedUserIDs != nil {
 				s.LiveMode.DiscordAllowedUserIDs = *payload.DiscordAllowedUserIDs
-				h.LiveModeConfig.DiscordAllowedUserIDs = *payload.DiscordAllowedUserIDs
+				liveCfg.DiscordAllowedUserIDs = *payload.DiscordAllowedUserIDs
 			}
 			if payload.DiscordAllowedChannelIDs != nil {
 				s.LiveMode.DiscordAllowedChannelIDs = *payload.DiscordAllowedChannelIDs
-				h.LiveModeConfig.DiscordAllowedChannelIDs = *payload.DiscordAllowedChannelIDs
+				liveCfg.DiscordAllowedChannelIDs = *payload.DiscordAllowedChannelIDs
 			}
 			if payload.DiscordRequireMention != nil {
 				s.LiveMode.DiscordRequireMention = *payload.DiscordRequireMention
-				h.LiveModeConfig.DiscordRequireMention = *payload.DiscordRequireMention
+				liveCfg.DiscordRequireMention = *payload.DiscordRequireMention
 			}
 			if payload.DiscordTextMode != nil {
 				s.LiveMode.DiscordTextMode = *payload.DiscordTextMode
-				h.LiveModeConfig.DiscordTextMode = *payload.DiscordTextMode
+				liveCfg.DiscordTextMode = *payload.DiscordTextMode
 			}
 			if payload.AllowRemoteSessionStart != nil {
 				s.LiveMode.AllowRemoteSessionStart = *payload.AllowRemoteSessionStart
-				h.LiveModeConfig.AllowRemoteSessionStart = *payload.AllowRemoteSessionStart
+				liveCfg.AllowRemoteSessionStart = *payload.AllowRemoteSessionStart
 				if h.LiveMode != nil {
 					h.LiveMode.SetAllowRemoteSessionStart(*payload.AllowRemoteSessionStart)
 				}
@@ -2209,12 +2515,22 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 		}
 	}
 
+	if liveModeRestartRequired {
+		h.InitMu.Lock()
+		if err := h.recreateLiveModeLocked(wasLiveModeEnabled); err != nil {
+			h.InitMu.Unlock()
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: fmt.Sprintf("Failed to restart Live Mode: %v", err)})
+			return
+		}
+		h.InitMu.Unlock()
+	}
+
 	writer.Send(protocol.RPCMessage{
 		ID:   msg.ID,
 		Type: "settings_saved",
 		Payload: protocol.EncodeRPC(map[string]interface{}{
 			"success":                 true,
-			"liveModeAvailable":       h.LiveModeConfig.TelegramToken != "" || h.LiveModeConfig.DiscordToken != "",
+			"liveModeAvailable":       liveCfg.TelegramToken != "" || liveCfg.DiscordToken != "",
 			"liveModeRestartRequired": liveModeRestartRequired,
 		}),
 	})
@@ -2265,30 +2581,14 @@ func (h *Handler) handleSetLiveMode(msg protocol.RPCMessage, writer ResponseWrit
 	}
 
 	h.InitMu.Lock()
-	if h.LiveMode == nil {
-		// Should have been initialized in main.go, but if not (e.g. no token on startup but added later??)
-		// We can try to init here, but it won't have callbacks wired unless we wire them.
-		// For now, assume main.go handles it if token is present.
-		// If token was added via settings save, we might need re-init.
-		var err error
-		h.LiveMode, err = livemode.New(h.LiveModeConfig, h.Agent)
-		if err != nil {
-			h.InitMu.Unlock()
-			writer.Send(protocol.RPCMessage{
-				ID:      msg.ID,
-				Type:    "live_mode_status",
-				Payload: protocol.EncodeRPC(map[string]interface{}{"enabled": false, "error": err.Error()}),
-			})
-			return
-		}
-
-		// Note: Callbacks might be missing if created here!
-		// TODO: Ensure save_settings re-wires LiveMode properly.
-	}
-
-	if h.Agent != nil && h.LiveMode != nil {
-		h.Agent.SetLiveMode(h.LiveMode)
-		h.LiveMode.SetAgent(h.Agent)
+	if err := h.ensureLiveModeLocked(); err != nil {
+		h.InitMu.Unlock()
+		writer.Send(protocol.RPCMessage{
+			ID:      msg.ID,
+			Type:    "live_mode_status",
+			Payload: protocol.EncodeRPC(map[string]interface{}{"enabled": false, "error": err.Error()}),
+		})
+		return
 	}
 	h.InitMu.Unlock()
 

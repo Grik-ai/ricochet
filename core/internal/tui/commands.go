@@ -68,7 +68,7 @@ func (m *Model) handleSlashCommand(input string) (string, tea.Cmd) {
 		return m.handleAPIKeyCommand(parts)
 
 	case "/login":
-		return "Starting Ricochet Cloud login...", m.loginCommand()
+		return "Starting Grik Account login...", m.loginCommand()
 
 	case "/logout":
 		if err := grikauth.ClearTokens(m.SettingsStore); err != nil {
@@ -81,7 +81,7 @@ func (m *Model) handleSlashCommand(input string) (string, tea.Cmd) {
 		} else if pm := m.providersManager(); pm != nil {
 			pm.SetUserKey("grik", "")
 		}
-		return "Signed out of Ricochet Cloud/Grik.", nil
+		return "Signed out of Grik Account.", nil
 
 	case "/account", "/billing":
 		return m.handleAccountCommand(cmd, parts)
@@ -887,7 +887,7 @@ func (m *Model) handleAccountCommand(cmd string, parts []string) (string, tea.Cm
 	defer cancel()
 	status := grikauth.Status(ctx, m.SettingsStore)
 	var sb strings.Builder
-	sb.WriteString("**Ricochet Cloud Account**\n")
+	sb.WriteString("**Grik Account**\n")
 	sb.WriteString(fmt.Sprintf("- Authenticated: `%v`\n", status.Authenticated))
 	sb.WriteString(fmt.Sprintf("- Token source: `%s`\n", firstNonEmpty(status.TokenSource, "none")))
 	sb.WriteString(fmt.Sprintf("- API: `%s`\n", status.APIBaseURL))
@@ -933,7 +933,7 @@ func (m *Model) loginCommand() tea.Cmd {
 		if pm := m.providersManager(); pm != nil {
 			pm.SetUserKey("grik", tokens.AccessToken)
 		}
-		return SlashCmdResMsg{Command: "/login", Response: "Signed in to Ricochet Cloud/Grik. Subscription models are now available through `grik`."}
+		return SlashCmdResMsg{Command: "/login", Response: "Signed in to Grik Account. Hosted Ricochet models are now available through `grik` when your account has access."}
 	}
 }
 

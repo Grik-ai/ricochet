@@ -655,7 +655,7 @@ func (e *NativeExecutor) GetDefinitions() []ToolDefinition {
 		},
 	}, ToolDefinition{
 		Name:        "get_workflows",
-		Description: "Get list of available workflow commands defined in .agent/workflows. Used for autocomplete.",
+		Description: "Get list of available built-in and project workflow commands. Used for autocomplete.",
 		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	})
 

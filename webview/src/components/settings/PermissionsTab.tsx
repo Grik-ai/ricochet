@@ -5,10 +5,11 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 
-type PermissionAction = 'allow' | 'deny';
-type PermissionScope = 'project' | 'session' | 'global';
+export type PermissionAction = 'allow' | 'deny';
+export type PermissionScope = 'project' | 'session' | 'global';
+export type RuleMatchKind = 'target' | 'command_prefix';
 
-interface PermissionRule {
+export interface PermissionRule {
     id?: string;
     tool: string;
     path?: string;
@@ -45,9 +46,52 @@ const TOOL_OPTIONS = [
     { id: 'browser_open', label: 'Open browser' },
     { id: 'browser_click', label: 'Click browser' },
     { id: 'browser_type', label: 'Type in browser' },
-    { id: 'mcp', label: 'MCP tools' },
+    { id: 'mcp', label: 'MCP tools by name' },
     { id: '*', label: 'All tools' },
 ];
+
+export function buildPermissionRulePayload(input: {
+    tool: string;
+    action: PermissionAction;
+    scope: PermissionScope;
+    matchKind: RuleMatchKind;
+    target: string;
+    commandPrefix: string;
+    sessionId: string;
+}): { payload?: PermissionRule; error?: string } {
+    const trimmedTool = input.tool.trim();
+    const trimmedTarget = input.target.trim();
+    const trimmedCommandPrefix = input.commandPrefix.trim();
+    const trimmedSessionId = input.sessionId.trim();
+
+    if (!trimmedTool) {
+        return { error: 'Tool is required.' };
+    }
+    if (input.scope === 'session' && !trimmedSessionId) {
+        return { error: 'Session scope requires a session id.' };
+    }
+    if (input.matchKind === 'command_prefix' && trimmedTool !== 'execute_command') {
+        return { error: 'Command prefix rules only apply to Run commands.' };
+    }
+    if (input.matchKind === 'command_prefix' && !trimmedCommandPrefix) {
+        return { error: 'Command prefix is required.' };
+    }
+
+    const payload: PermissionRule = {
+        tool: trimmedTool,
+        action: input.action,
+        scope: input.scope,
+    };
+
+    if (input.matchKind === 'command_prefix') {
+        if (trimmedCommandPrefix) payload.command_prefix = trimmedCommandPrefix;
+    } else if (trimmedTarget) {
+        payload.path = trimmedTarget;
+    }
+    if (input.scope === 'session' && trimmedSessionId) payload.session_id = trimmedSessionId;
+
+    return { payload };
+}
 
 function toolLabel(tool: string) {
     return TOOL_OPTIONS.find(option => option.id === tool)?.label || tool;
@@ -59,7 +103,7 @@ function formatTime(timestamp?: number) {
 }
 
 function formatTarget(rule: PermissionRule) {
-    return rule.command_prefix || rule.path || '*';
+    return rule.command_prefix ? `prefix: ${rule.command_prefix}` : rule.path || '*';
 }
 
 function Badge({ children, tone }: { children: string; tone: 'green' | 'red' | 'blue' | 'muted' }) {
@@ -79,6 +123,7 @@ export function PermissionsTab() {
     const [action, setAction] = useState<PermissionAction>('deny');
     const [scope, setScope] = useState<PermissionScope>('project');
     const [tool, setTool] = useState('execute_command');
+    const [matchKind, setMatchKind] = useState<RuleMatchKind>('target');
     const [target, setTarget] = useState('');
     const [commandPrefix, setCommandPrefix] = useState('');
     const [sessionId, setSessionId] = useState('');
@@ -152,32 +197,42 @@ export function PermissionsTab() {
     const recentAudit = useMemo(() => [...filteredAudit].reverse().slice(0, 80), [filteredAudit]);
 
     const addRule = () => {
-        const trimmedTool = tool.trim();
-        const trimmedTarget = target.trim();
-        const trimmedCommandPrefix = commandPrefix.trim();
-        const trimmedSessionId = sessionId.trim();
-
-        if (!trimmedTool) {
-            setError('Tool is required.');
-            return;
-        }
-        if (scope === 'session' && !trimmedSessionId) {
-            setError('Session scope requires a session id.');
-            return;
-        }
-
-        const payload: PermissionRule = {
-            tool: trimmedTool,
+        const result = buildPermissionRulePayload({
+            tool,
             action,
             scope,
-        };
-        if (trimmedTarget) payload.path = trimmedTarget;
-        if (trimmedCommandPrefix) payload.command_prefix = trimmedCommandPrefix;
-        if (trimmedSessionId) payload.session_id = trimmedSessionId;
+            matchKind,
+            target,
+            commandPrefix,
+            sessionId,
+        });
+        if (result.error || !result.payload) {
+            setError(result.error || 'Permission rule is invalid.');
+            return;
+        }
 
         setSaving(true);
         setError(null);
-        postMessage({ type: 'add_permission_rule', payload });
+        postMessage({ type: 'add_permission_rule', payload: result.payload });
+    };
+
+    const changeMatchKind = (value: string) => {
+        const next = value as RuleMatchKind;
+        setMatchKind(next);
+        if (next === 'command_prefix') {
+            setTarget('');
+            setTool('execute_command');
+        } else {
+            setCommandPrefix('');
+        }
+    };
+
+    const changeTool = (value: string) => {
+        setTool(value);
+        if (matchKind === 'command_prefix' && value !== 'execute_command') {
+            setMatchKind('target');
+            setCommandPrefix('');
+        }
     };
 
     const removeRule = (id?: string) => {
@@ -210,7 +265,7 @@ export function PermissionsTab() {
                     </Button>
                 </div>
 
-                <div className="grid gap-2 lg:grid-cols-[1fr_1fr_1fr_auto]">
+                <div className="grid gap-2 lg:grid-cols-[1fr_1fr_1fr_1fr_auto]">
                     <Select value={action} onValueChange={(value) => setAction(value as PermissionAction)}>
                         <SelectTrigger className={action === 'deny' ? 'bg-red-500/10 text-red-200' : 'bg-emerald-500/10 text-emerald-200'}>
                             <SelectValue />
@@ -230,7 +285,7 @@ export function PermissionsTab() {
                             <SelectItem value="global">Global</SelectItem>
                         </SelectContent>
                     </Select>
-                    <Select value={tool} onValueChange={setTool}>
+                    <Select value={tool} onValueChange={changeTool}>
                         <SelectTrigger>
                             <SelectValue />
                         </SelectTrigger>
@@ -240,16 +295,32 @@ export function PermissionsTab() {
                             ))}
                         </SelectContent>
                     </Select>
+                    <Select value={matchKind} onValueChange={changeMatchKind}>
+                        <SelectTrigger>
+                            <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="target">Target</SelectItem>
+                            <SelectItem value="command_prefix">Command prefix</SelectItem>
+                        </SelectContent>
+                    </Select>
                     <Button onClick={addRule} disabled={saving} className="min-w-24">
                         {saving ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
                         Add
                     </Button>
                 </div>
 
-                <div className="grid gap-2 lg:grid-cols-3">
-                    <Input value={target} onChange={(event) => setTarget(event.target.value)} placeholder="Target path or exact command" />
-                    <Input value={commandPrefix} onChange={(event) => setCommandPrefix(event.target.value)} placeholder="Command prefix" />
+                <div className="grid gap-2 lg:grid-cols-[2fr_1fr]">
+                    {matchKind === 'command_prefix' ? (
+                        <Input value={commandPrefix} onChange={(event) => setCommandPrefix(event.target.value)} placeholder="Command prefix, e.g. git status" />
+                    ) : (
+                        <Input value={target} onChange={(event) => setTarget(event.target.value)} placeholder="Path, exact command, URL, MCP tool name, or *" />
+                    )}
                     <Input value={sessionId} onChange={(event) => setSessionId(event.target.value)} placeholder="Session id" disabled={scope !== 'session'} />
+                </div>
+
+                <div className="rounded border border-white/10 bg-white/[0.03] px-3 py-2 text-[11px] leading-5 text-white/45">
+                    Auto-Approve defines category defaults. Permission rules are persistent overrides: deny wins over allow and auto-approve, project scope follows the current workspace, and audit keeps the latest 500 decisions.
                 </div>
 
                 {error && (

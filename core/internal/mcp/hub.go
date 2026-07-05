@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/igoryan-dao/ricochet/internal/paths"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -20,7 +21,8 @@ type Hub struct {
 	connections map[string]*McpConnection
 	mu          sync.RWMutex
 	configDir   string
-	lastModTime time.Time
+	projectDir  string
+	lastModTime map[string]time.Time
 	registry    *Registry
 }
 
@@ -39,11 +41,18 @@ type McpConnection struct {
 	Cmd               *exec.Cmd              `json:"-"`
 }
 
-// NewHub creates a new MCP Hub
-func NewHub(configDir string) *Hub {
+// NewHub creates a new MCP Hub for the current workspace.
+func NewHub(projectDir string) *Hub {
+	return NewHubWithDirs(paths.GetGlobalDir(), projectDir)
+}
+
+// NewHubWithDirs creates a Hub with explicit global and project directories.
+func NewHubWithDirs(configDir, projectDir string) *Hub {
 	h := &Hub{
 		connections: make(map[string]*McpConnection),
 		configDir:   configDir,
+		projectDir:  projectDir,
+		lastModTime: make(map[string]time.Time),
 		registry:    NewRegistry(configDir),
 	}
 	h.registry.LoadCache()
@@ -60,26 +69,20 @@ func (h *Hub) StartWatcher() {
 		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
 
-		settingsPath := filepath.Join(h.configDir, "mcp_settings.json")
-
-		// Initial wait for file to exist or just load if exists
-		// We'll trust the loop to pick it up or load initially if exists
-		if _, err := os.Stat(settingsPath); err == nil {
-			h.LoadFromSettings(settingsPath)
+		if h.anySettingsFileExists() {
+			h.Reload()
 		}
 
 		for range ticker.C {
-			info, err := os.Stat(settingsPath)
-			if err != nil {
-				continue
-			}
-
-			if info.ModTime().After(h.lastModTime) {
-				// File changed, reload
-				h.LoadFromSettings(settingsPath)
+			if h.settingsChanged() {
+				h.Reload()
 			}
 		}
 	}()
+}
+
+func (h *Hub) Reload() {
+	h.LoadFromSettings("")
 }
 
 func (h *Hub) LoadFromSettings(path string) {
@@ -89,11 +92,7 @@ func (h *Hub) LoadFromSettings(path string) {
 		return
 	}
 
-	// Update lastModTime immediately to avoid double loading
-	info, _ := os.Stat(path)
-	if info != nil {
-		h.lastModTime = info.ModTime()
-	}
+	h.rememberSettingsModTimes()
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -102,18 +101,21 @@ func (h *Hub) LoadFromSettings(path string) {
 	for name, conn := range h.connections {
 		if _, exists := settings.McpServers[name]; !exists {
 			fmt.Printf("Removing MCP server: %s\n", name)
-			conn.Client.Close()
+			if conn.Client != nil {
+				conn.Client.Close()
+			}
 			delete(h.connections, name)
 		}
 	}
-
 
 	// 2. Add/Update servers
 	for name, config := range settings.McpServers {
 		if config.Disabled {
 			if conn, exists := h.connections[name]; exists {
 				fmt.Printf("Disabling MCP server: %s\n", name)
-				conn.Client.Close()
+				if conn.Client != nil {
+					conn.Client.Close()
+				}
 				delete(h.connections, name)
 			}
 			continue
@@ -475,14 +477,87 @@ func (h *Hub) Close() error {
 }
 
 func (h *Hub) loadMcpSettings() (*McpSettings, error) {
-	settingsPath := filepath.Join(h.configDir, "mcp_settings.json")
-	data, err := os.ReadFile(settingsPath)
+	merged := &McpSettings{McpServers: make(map[string]McpServerConfig)}
+	var sawFile bool
+	for _, settingsPath := range h.settingsPaths() {
+		settings, err := readMcpSettings(settingsPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		sawFile = true
+		for name, config := range settings.McpServers {
+			merged.McpServers[name] = config
+		}
+	}
+	if !sawFile {
+		return merged, nil
+	}
+	return merged, nil
+}
+
+func (h *Hub) LoadMergedSettings() (*McpSettings, error) {
+	return h.loadMcpSettings()
+}
+
+func (h *Hub) settingsPaths() []string {
+	paths := []string{filepath.Join(h.configDir, "mcp_settings.json")}
+	if strings.TrimSpace(h.projectDir) != "" {
+		paths = append(paths, filepath.Join(h.projectDir, ".ricochet", "mcp.json"))
+	}
+	return paths
+}
+
+func (h *Hub) anySettingsFileExists() bool {
+	for _, settingsPath := range h.settingsPaths() {
+		if _, err := os.Stat(settingsPath); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Hub) settingsChanged() bool {
+	for _, settingsPath := range h.settingsPaths() {
+		info, err := os.Stat(settingsPath)
+		if err != nil {
+			if _, known := h.lastModTime[settingsPath]; known {
+				delete(h.lastModTime, settingsPath)
+				return true
+			}
+			continue
+		}
+		if info.ModTime().After(h.lastModTime[settingsPath]) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Hub) rememberSettingsModTimes() {
+	for _, settingsPath := range h.settingsPaths() {
+		info, err := os.Stat(settingsPath)
+		if err != nil {
+			delete(h.lastModTime, settingsPath)
+			continue
+		}
+		h.lastModTime[settingsPath] = info.ModTime()
+	}
+}
+
+func readMcpSettings(path string) (*McpSettings, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var settings McpSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
 		return nil, err
+	}
+	if settings.McpServers == nil {
+		settings.McpServers = make(map[string]McpServerConfig)
 	}
 	return &settings, nil
 }

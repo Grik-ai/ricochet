@@ -1,7 +1,45 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import { Activity, RefreshCw, Wifi, WifiOff } from 'lucide-react';
 import { NetworkDisplayStatus } from '../../hooks/useNetworkHealth';
 import { NetworkHealthScope, NetworkScopeStatus } from '../../types/protocol';
+
+export interface NetworkPopoverRect {
+    top: number;
+    left?: number;
+    right: number;
+    bottom: number;
+}
+
+export interface NetworkPopoverViewport {
+    width: number;
+    height: number;
+}
+
+export function computeNetworkPopoverStyle(
+    anchorRect: NetworkPopoverRect,
+    viewport: NetworkPopoverViewport,
+    options = { width: 320, height: 384, gap: 6, margin: 12 }
+): CSSProperties {
+    const margin = options.margin;
+    const maxWidth = Math.max(0, viewport.width - margin * 2);
+    const width = maxWidth > 0 ? Math.min(options.width, maxWidth) : options.width;
+    const maxLeft = Math.max(margin, viewport.width - width - margin);
+    const targetLeft = anchorRect.right - width;
+    const left = Math.max(margin, Math.min(targetLeft, maxLeft));
+    const top = Math.max(margin, anchorRect.bottom + options.gap);
+    const maxHeight = Math.max(1, viewport.height - top - margin);
+
+    return {
+        position: 'fixed',
+        left,
+        top,
+        width,
+        maxHeight,
+        maxWidth: `calc(100vw - ${margin * 2}px)`,
+        transformOrigin: 'top right',
+    };
+}
 
 function scopeLabel(scope: NetworkHealthScope): string {
     switch (scope) {
@@ -98,6 +136,9 @@ function DetailRow({ scope, detail }: { scope: NetworkHealthScope; detail?: Netw
 
 export function NetworkStatusPill({ status }: { status: NetworkDisplayStatus }) {
     const [open, setOpen] = useState(false);
+    const buttonRef = useRef<HTMLButtonElement>(null);
+    const popoverRef = useRef<HTMLDivElement>(null);
+    const [popoverStyle, setPopoverStyle] = useState<CSSProperties>({});
     const detailEntries = useMemo(() => {
         const details = status.details || {};
         return (['webview', 'core', 'provider', 'internet', 'agent'] as NetworkHealthScope[])
@@ -115,13 +156,114 @@ export function NetworkStatusPill({ status }: { status: NetworkDisplayStatus }) 
             }));
     }, [detailEntries]);
 
+    const updatePopoverPosition = useCallback(() => {
+        if (typeof window === 'undefined') return;
+        const rect = buttonRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const size = popoverRef.current?.getBoundingClientRect();
+        setPopoverStyle(computeNetworkPopoverStyle(rect, {
+            width: window.innerWidth || 0,
+            height: window.innerHeight || 0,
+        }, {
+            width: 320,
+            height: size?.height || 384,
+            gap: 6,
+            margin: 12,
+        }));
+    }, []);
+
+    useEffect(() => {
+        if (!open || typeof window === 'undefined') return;
+        updatePopoverPosition();
+        window.addEventListener('resize', updatePopoverPosition);
+        window.addEventListener('scroll', updatePopoverPosition, true);
+        return () => {
+            window.removeEventListener('resize', updatePopoverPosition);
+            window.removeEventListener('scroll', updatePopoverPosition, true);
+        };
+    }, [open, updatePopoverPosition]);
+
+    useEffect(() => {
+        if (!open || typeof document === 'undefined') return;
+
+        const handlePointerDown = (event: globalThis.MouseEvent) => {
+            const target = event.target as Node | null;
+            if (target && (buttonRef.current?.contains(target) || popoverRef.current?.contains(target))) return;
+            setOpen(false);
+        };
+        const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+            if (event.key === 'Escape') setOpen(false);
+        };
+
+        document.addEventListener('mousedown', handlePointerDown);
+        document.addEventListener('keydown', handleKeyDown);
+        return () => {
+            document.removeEventListener('mousedown', handlePointerDown);
+            document.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [open]);
+
+    const popover = open ? (
+        <div
+            ref={popoverRef}
+            className="fixed z-[2147483647] w-80 max-w-[calc(100vw-24px)] origin-top-right overflow-y-auto rounded-md border border-vscode-border bg-vscode-input-bg shadow-lg animate-in fade-in slide-in-from-bottom-2"
+            style={{
+                visibility: popoverStyle.left === undefined ? 'hidden' : undefined,
+                ...popoverStyle,
+            }}
+            role="dialog"
+            aria-label="Connection details"
+        >
+            <div className="flex items-center justify-between gap-3 border-b border-vscode-border bg-vscode-editor-background px-3 py-2">
+                <div className="min-w-0">
+                    <div className="text-[11px] font-medium text-vscode-fg/80">Connection</div>
+                    <div className="truncate text-[10px] text-vscode-fg/45">{status.provider || 'Provider'}{status.model ? ` · ${status.model}` : ''}</div>
+                </div>
+                <div className="shrink-0 text-right text-[10px] text-vscode-fg/45">
+                    <div className="capitalize">{status.state}</div>
+                    <div>{formatTime(status.lastCheckedAt)}</div>
+                </div>
+            </div>
+            <div className="space-y-0.5 p-2">
+                {detailEntries.map(({ scope, detail }) => (
+                    <DetailRow key={scope} scope={scope} detail={detail} />
+                ))}
+                {status.message && (
+                    <div className="px-2 pt-1.5 text-[9px] leading-relaxed text-vscode-fg/35">
+                        {status.message}
+                    </div>
+                )}
+                {diagnosticEntries.length > 0 && (
+                    <div className="mt-1.5 space-y-1 border-t border-vscode-border/70 px-2 pt-2">
+                        <div className="text-[9px] font-medium text-vscode-fg/35">Diagnostics</div>
+                        {diagnosticEntries.map(entry => (
+                            <details key={`${entry.scope}-${entry.diagnosticCode || 'raw'}`} className="group rounded bg-vscode-editor-background/55 px-2 py-1">
+                                <summary className="flex cursor-pointer list-none items-center gap-2 text-[9px] text-vscode-fg/45">
+                                    <span className="codicon codicon-chevron-right text-[10px] transition-transform group-open:rotate-90" />
+                                    <span className="min-w-0 flex-1 truncate">{entry.label}{entry.diagnosticCode ? ` · ${entry.diagnosticCode}` : ''}</span>
+                                    <DiagnosticsCopyButton text={entry.rawMessage} />
+                                </summary>
+                                <pre className="custom-scrollbar mt-1.5 max-h-28 overflow-auto whitespace-pre-wrap break-words font-mono text-[9px] leading-relaxed text-vscode-fg/38">
+                                    {entry.rawMessage}
+                                </pre>
+                            </details>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </div>
+    ) : null;
+
     return (
         <div className="relative shrink-0">
             <button
+                ref={buttonRef}
                 type="button"
                 onClick={() => setOpen(prev => !prev)}
                 className={`inline-flex h-6 max-w-full items-center gap-1.5 rounded-md px-1.5 text-[11px] leading-none transition-colors ${statusToneClass(status.tone)}`}
                 title={status.message || 'Network status'}
+                aria-expanded={open}
+                aria-haspopup="dialog"
             >
                 <span className={statusIconToneClass(status.tone)}>
                     <StatusIcon status={status} />
@@ -129,49 +271,7 @@ export function NetworkStatusPill({ status }: { status: NetworkDisplayStatus }) 
                 <span className="truncate font-medium">{status.label}</span>
             </button>
 
-            <div
-                className={`absolute bottom-full right-0 z-[9999] mb-2 w-80 max-w-[calc(100vw-32px)] origin-bottom-right overflow-hidden rounded-md border border-vscode-border bg-vscode-input-bg shadow-lg transition-[opacity,transform,max-height] duration-200 ease-out motion-reduce:transition-none ${
-                    open ? 'max-h-96 translate-y-0 opacity-100' : 'pointer-events-none max-h-0 translate-y-1 opacity-0'
-                }`}
-            >
-                <div className="flex items-center justify-between gap-3 border-b border-vscode-border bg-vscode-editor-background px-3 py-2">
-                    <div className="min-w-0">
-                        <div className="text-[11px] font-medium text-vscode-fg/80">Connection</div>
-                        <div className="truncate text-[10px] text-vscode-fg/45">{status.provider || 'Provider'}{status.model ? ` · ${status.model}` : ''}</div>
-                    </div>
-                    <div className="shrink-0 text-right text-[10px] text-vscode-fg/45">
-                        <div className="capitalize">{status.state}</div>
-                        <div>{formatTime(status.lastCheckedAt)}</div>
-                    </div>
-                </div>
-                <div className="space-y-0.5 p-2">
-                    {detailEntries.map(({ scope, detail }) => (
-                        <DetailRow key={scope} scope={scope} detail={detail} />
-                    ))}
-                    {status.message && (
-                        <div className="px-2 pt-1.5 text-[9px] leading-relaxed text-vscode-fg/35">
-                            {status.message}
-                        </div>
-                    )}
-                    {diagnosticEntries.length > 0 && (
-                        <div className="mt-1.5 space-y-1 border-t border-vscode-border/70 px-2 pt-2">
-                            <div className="text-[9px] font-medium text-vscode-fg/35">Diagnostics</div>
-                            {diagnosticEntries.map(entry => (
-                                <details key={`${entry.scope}-${entry.diagnosticCode || 'raw'}`} className="group rounded bg-vscode-editor-background/55 px-2 py-1">
-                                    <summary className="flex cursor-pointer list-none items-center gap-2 text-[9px] text-vscode-fg/45">
-                                        <span className="codicon codicon-chevron-right text-[10px] transition-transform group-open:rotate-90" />
-                                        <span className="min-w-0 flex-1 truncate">{entry.label}{entry.diagnosticCode ? ` · ${entry.diagnosticCode}` : ''}</span>
-                                        <DiagnosticsCopyButton text={entry.rawMessage} />
-                                    </summary>
-                                    <pre className="custom-scrollbar mt-1.5 max-h-28 overflow-auto whitespace-pre-wrap break-words font-mono text-[9px] leading-relaxed text-vscode-fg/38">
-                                        {entry.rawMessage}
-                                    </pre>
-                                </details>
-                            ))}
-                        </div>
-                    )}
-                </div>
-            </div>
+            {popover && (typeof document !== 'undefined' ? createPortal(popover, document.body) : popover)}
         </div>
     );
 }

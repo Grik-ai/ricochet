@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +56,8 @@ type ModelConfig struct {
 	Deprecated            bool    `yaml:"deprecated,omitempty"`
 	APIType               string  `yaml:"api_type,omitempty"`
 	Source                string  `yaml:"source,omitempty"`
+	LaunchState           string  `yaml:"launch_state,omitempty"`
+	OwnedBy               string  `yaml:"owned_by,omitempty"`
 	MayTrainOnYourPrompts bool    `yaml:"may_train_on_your_prompts,omitempty" json:"mayTrainOnYourPrompts,omitempty"`
 }
 
@@ -72,8 +77,16 @@ type AvailableProvider struct {
 	AccessMode                     string           `json:"accessMode,omitempty"`
 	Available                      bool             `json:"available"` // User can use (server key OR BYOK)
 	Models                         []AvailableModel `json:"models"`
+	CatalogStatus                  *CatalogStatus   `json:"catalogStatus,omitempty"`
 	PromptTrainingModelCount       int              `json:"promptTrainingModelCount,omitempty"`
 	HiddenPromptTrainingModelCount int              `json:"hiddenPromptTrainingModelCount,omitempty"`
+}
+
+// CatalogStatus describes where provider model metadata came from.
+type CatalogStatus struct {
+	Source      string `json:"source,omitempty"`      // "curated", "live", or "mixed"
+	RefreshedAt string `json:"refreshedAt,omitempty"` // RFC3339 timestamp when live sync succeeded
+	Error       string `json:"error,omitempty"`       // Non-fatal live sync fallback reason
 }
 
 // AvailableModel is returned to frontend
@@ -95,15 +108,30 @@ type AvailableModel struct {
 	Deprecated            bool    `json:"deprecated,omitempty"`
 	APIType               string  `json:"apiType,omitempty"`
 	Source                string  `json:"source,omitempty"`
+	LaunchState           string  `json:"launchState,omitempty"`
+	OwnedBy               string  `json:"ownedBy,omitempty"`
 	MayTrainOnYourPrompts bool    `json:"mayTrainOnYourPrompts,omitempty"`
+}
+
+// ProviderKeyValidationResult reports a non-mutating provider key probe.
+type ProviderKeyValidationResult struct {
+	ProviderID string `json:"providerId,omitempty"`
+	OK         bool   `json:"ok"`
+	Status     string `json:"status"`
+	Message    string `json:"message"`
+	CheckedAt  int64  `json:"checkedAt"`
 }
 
 // ProvidersManager handles loading and querying providers config
 type ProvidersManager struct {
-	config                *ProvidersConfig
-	userKeys              map[string]string // User-provided keys from Settings
-	openRouterRefreshOnce sync.Once
-	openRouterRefreshErr  error
+	config                    *ProvidersConfig
+	userKeys                  map[string]string // User-provided keys from Settings
+	openRouterRefreshOnce     sync.Once
+	openRouterRefreshMu       sync.RWMutex
+	openRouterRefreshErr      error
+	openRouterRefreshDisabled bool
+	openRouterRefreshedAt     time.Time
+	openRouterCatalogError    string
 }
 
 func providersDebugEnabled() bool {
@@ -314,6 +342,8 @@ func (pm *ProvidersManager) GetAvailableProviders() []AvailableProvider {
 				Deprecated:            m.Deprecated,
 				APIType:               m.APIType,
 				Source:                m.Source,
+				LaunchState:           normalizeLaunchState(m.LaunchState),
+				OwnedBy:               m.OwnedBy,
 				MayTrainOnYourPrompts: m.MayTrainOnYourPrompts,
 			})
 		}
@@ -332,11 +362,104 @@ func (pm *ProvidersManager) GetAvailableProviders() []AvailableProvider {
 			AccessMode:               accessMode,
 			Available:                available,
 			Models:                   models,
+			CatalogStatus:            pm.catalogStatusForProvider(id, p),
 			PromptTrainingModelCount: promptTrainingModelCount,
 		})
 	}
 
+	sort.SliceStable(result, func(i, j int) bool {
+		leftRank := providerDisplayRank(result[i].ID)
+		rightRank := providerDisplayRank(result[j].ID)
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		if result[i].Name != result[j].Name {
+			return result[i].Name < result[j].Name
+		}
+		return result[i].ID < result[j].ID
+	})
+
 	return result
+}
+
+func providerDisplayRank(providerID string) int {
+	switch strings.ToLower(providerID) {
+	case "grik":
+		return 0
+	case "openrouter":
+		return 10
+	case "anthropic":
+		return 20
+	case "openai":
+		return 30
+	case "deepseek":
+		return 40
+	case "zhipu":
+		return 50
+	case "zhipu-coding":
+		return 51
+	case "gemini":
+		return 60
+	case "xai":
+		return 70
+	case "minimax":
+		return 80
+	case "mistral":
+		return 90
+	default:
+		return 1000
+	}
+}
+
+func normalizeLaunchState(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "soon":
+		return "soon"
+	case "live":
+		return "live"
+	default:
+		return ""
+	}
+}
+
+func (pm *ProvidersManager) catalogStatusForProvider(providerID string, provider ProviderConfig) *CatalogStatus {
+	source := catalogSourceForModels(provider.Models)
+	if providerID != "openrouter" {
+		return &CatalogStatus{Source: source}
+	}
+
+	status := &CatalogStatus{Source: source}
+	pm.openRouterRefreshMu.RLock()
+	defer pm.openRouterRefreshMu.RUnlock()
+
+	if !pm.openRouterRefreshedAt.IsZero() {
+		status.RefreshedAt = pm.openRouterRefreshedAt.Format(time.RFC3339)
+	}
+	if pm.openRouterCatalogError != "" {
+		status.Error = pm.openRouterCatalogError
+	} else if pm.openRouterRefreshDisabled {
+		status.Error = "Live sync disabled"
+	}
+	return status
+}
+
+func catalogSourceForModels(models []ModelConfig) string {
+	hasLive := false
+	hasCurated := false
+	for _, model := range models {
+		if strings.EqualFold(model.Source, "openrouter-live") {
+			hasLive = true
+		} else {
+			hasCurated = true
+		}
+	}
+	if hasLive && hasCurated {
+		return "mixed"
+	}
+	if hasLive {
+		return "live"
+	}
+	return "curated"
 }
 
 // FilterPromptTrainingModels hides only models explicitly marked as prompt-training risks.
@@ -433,9 +556,39 @@ type openRouterModelsResponse struct {
 // into the static curated list. Failures are non-fatal by design.
 func (pm *ProvidersManager) RefreshOpenRouterFreeModels(ctx context.Context) error {
 	pm.openRouterRefreshOnce.Do(func() {
-		pm.openRouterRefreshErr = pm.refreshOpenRouterFreeModels(ctx)
+		_ = pm.refreshOpenRouterFreeModelsAndRecord(ctx)
 	})
+	pm.openRouterRefreshMu.RLock()
+	defer pm.openRouterRefreshMu.RUnlock()
 	return pm.openRouterRefreshErr
+}
+
+// ForceRefreshOpenRouterFreeModels bypasses the once-only startup sync cache.
+func (pm *ProvidersManager) ForceRefreshOpenRouterFreeModels(ctx context.Context) error {
+	return pm.refreshOpenRouterFreeModelsAndRecord(ctx)
+}
+
+func (pm *ProvidersManager) refreshOpenRouterFreeModelsAndRecord(ctx context.Context) error {
+	err := pm.refreshOpenRouterFreeModels(ctx)
+	pm.openRouterRefreshMu.Lock()
+	defer pm.openRouterRefreshMu.Unlock()
+	pm.openRouterRefreshErr = err
+	pm.openRouterRefreshDisabled = false
+	if err != nil {
+		pm.openRouterCatalogError = err.Error()
+		return err
+	}
+	pm.openRouterCatalogError = ""
+	pm.openRouterRefreshedAt = time.Now().UTC()
+	return nil
+}
+
+// MarkOpenRouterFreeModelSyncDisabled records that live catalog sync was skipped.
+func (pm *ProvidersManager) MarkOpenRouterFreeModelSyncDisabled() {
+	pm.openRouterRefreshMu.Lock()
+	defer pm.openRouterRefreshMu.Unlock()
+	pm.openRouterRefreshDisabled = true
+	pm.openRouterCatalogError = "Live sync disabled"
 }
 
 func (pm *ProvidersManager) refreshOpenRouterFreeModels(ctx context.Context) error {
@@ -535,6 +688,157 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// ValidateProviderKey checks a BYOK provider key without saving it.
+func (pm *ProvidersManager) ValidateProviderKey(ctx context.Context, providerID, apiKey string) ProviderKeyValidationResult {
+	checkedAt := time.Now().UnixMilli()
+	providerID = strings.TrimSpace(providerID)
+	key := strings.TrimSpace(apiKey)
+	if key == "" {
+		return ProviderKeyValidationResult{ProviderID: providerID, OK: false, Status: "no_key", Message: "Enter an API key first.", CheckedAt: checkedAt}
+	}
+	if pm == nil || pm.config == nil {
+		return ProviderKeyValidationResult{ProviderID: providerID, OK: false, Status: "unsupported", Message: "Provider catalog is not available.", CheckedAt: checkedAt}
+	}
+	provider, ok := pm.config.Providers[providerID]
+	if !ok || !provider.Enabled {
+		return ProviderKeyValidationResult{ProviderID: providerID, OK: false, Status: "unsupported", Message: "Provider is not configured.", CheckedAt: checkedAt}
+	}
+	if isHostedSubscriptionAccess(provider) {
+		return ProviderKeyValidationResult{ProviderID: providerID, OK: false, Status: "unsupported", Message: "Grik Account providers do not use BYOK API keys.", CheckedAt: checkedAt}
+	}
+
+	req, err := providerKeyValidationRequest(ctx, providerID, provider, key)
+	if err != nil {
+		return ProviderKeyValidationResult{ProviderID: providerID, OK: false, Status: "unsupported", Message: err.Error(), CheckedAt: checkedAt}
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ProviderKeyValidationResult{ProviderID: providerID, OK: false, Status: "network_error", Message: "Could not reach provider endpoint.", CheckedAt: checkedAt}
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return ProviderKeyValidationResult{ProviderID: providerID, OK: true, Status: "valid", Message: "Key connected.", CheckedAt: checkedAt}
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return ProviderKeyValidationResult{ProviderID: providerID, OK: false, Status: "unauthorized", Message: "Provider rejected this API key.", CheckedAt: checkedAt}
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return ProviderKeyValidationResult{ProviderID: providerID, OK: false, Status: "unsupported", Message: "Provider key check is not supported for this endpoint.", CheckedAt: checkedAt}
+	}
+	if resp.StatusCode >= 500 {
+		return ProviderKeyValidationResult{ProviderID: providerID, OK: false, Status: "network_error", Message: fmt.Sprintf("Provider returned HTTP %d.", resp.StatusCode), CheckedAt: checkedAt}
+	}
+	return ProviderKeyValidationResult{ProviderID: providerID, OK: false, Status: "unauthorized", Message: fmt.Sprintf("Provider returned HTTP %d.", resp.StatusCode), CheckedAt: checkedAt}
+}
+
+func isHostedSubscriptionAccess(provider ProviderConfig) bool {
+	return provider.KeySource == "hosted" || provider.AccessMode == "subscription"
+}
+
+func providerKeyValidationRequest(ctx context.Context, providerID string, provider ProviderConfig, apiKey string) (*http.Request, error) {
+	target, err := providerValidationURL(providerID, provider.BaseURL, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	switch strings.ToLower(providerID) {
+	case "anthropic":
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+	case "gemini":
+		// Gemini uses the key query parameter for the models endpoint.
+	default:
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	req.Header.Set("Accept", "application/json")
+	return req, nil
+}
+
+func providerValidationURL(providerID, baseURL, apiKey string) (string, error) {
+	provider := strings.ToLower(strings.TrimSpace(providerID))
+	base := strings.TrimSpace(baseURL)
+	if base == "" {
+		base = defaultProviderValidationBaseURL(provider)
+	}
+	if base == "" {
+		return "", fmt.Errorf("Provider key check is not supported.")
+	}
+
+	switch provider {
+	case "gemini":
+		u, err := urlWithPath(base, "/v1beta/models")
+		if err != nil {
+			return "", err
+		}
+		q := u.Query()
+		q.Set("key", apiKey)
+		u.RawQuery = q.Encode()
+		return u.String(), nil
+	default:
+		u, err := urlWithPath(base, "/models")
+		if err != nil {
+			return "", err
+		}
+		return u.String(), nil
+	}
+}
+
+func defaultProviderValidationBaseURL(providerID string) string {
+	switch providerID {
+	case "openai":
+		return "https://api.openai.com/v1"
+	case "openrouter":
+		return "https://openrouter.ai/api/v1"
+	case "anthropic":
+		return "https://api.anthropic.com/v1"
+	case "gemini":
+		return "https://generativelanguage.googleapis.com"
+	case "deepseek":
+		return "https://api.deepseek.com"
+	case "zhipu", "zhipu-coding":
+		return "https://api.z.ai/api/paas/v4"
+	case "mistral":
+		return "https://api.mistral.ai/v1"
+	case "minimax":
+		return "https://api.minimax.chat/v1"
+	case "xai":
+		return "https://api.x.ai/v1"
+	default:
+		return ""
+	}
+}
+
+func urlWithPath(baseURL, suffix string) (*url.URL, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("Provider endpoint is invalid.")
+	}
+	path := strings.TrimRight(u.Path, "/")
+	if strings.HasSuffix(strings.ToLower(path), "/chat/completions") {
+		path = strings.TrimSuffix(path, "/chat/completions")
+	}
+	if strings.HasSuffix(strings.ToLower(path), "/messages") {
+		path = strings.TrimSuffix(path, "/messages")
+	}
+	if !strings.HasSuffix(strings.ToLower(path), strings.ToLower(suffix)) {
+		path = path + suffix
+	}
+	u.Path = path
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u, nil
+}
+
 // GetAPIKey returns the API key to use for a provider (server key or user key)
 func (pm *ProvidersManager) GetAPIKey(providerID string) string {
 	// User key takes priority
@@ -584,7 +888,7 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				AccessMode: "subscription",
 				Models: []ModelConfig{
 					{ID: "qwen/qwen3-coder:free", Name: "Qwen 3 Coder (Anonymous Free)", ContextWindow: 262000, IsFree: true, SupportsTools: true, AccessMode: "free", CredentialMode: "none", Recommended: true},
-					{ID: "ricochet-code", Name: "Grik Ricochet Code", ContextWindow: 200000, InputPrice: 5.0, OutputPrice: 20.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", Recommended: true},
+					{ID: "ricochet-code", Name: "Grik Ricochet Code", ContextWindow: 200000, InputPrice: 5.0, OutputPrice: 20.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", LaunchState: "soon", OwnedBy: "grik", Recommended: true},
 					{ID: "openai/gpt-5.5", Name: "GPT-5.5 (Subscription)", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 30.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses", Recommended: true},
 					{ID: "openai/gpt-5.4", Name: "GPT-5.4 (Subscription)", ContextWindow: 1000000, InputPrice: 2.5, OutputPrice: 15.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses"},
 					{ID: "openai/gpt-5.4-mini", Name: "GPT-5.4 Mini (Subscription)", ContextWindow: 400000, InputPrice: 0.75, OutputPrice: 4.5, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses"},

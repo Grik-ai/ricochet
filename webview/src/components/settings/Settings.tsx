@@ -6,7 +6,6 @@ import {
     ChevronDown,
     ChevronLeft,
     ChevronRight,
-    Coffee,
     Copy,
     CreditCard,
     Database,
@@ -20,6 +19,7 @@ import {
     LayoutGrid,
     Linkedin,
     Loader2,
+    Mic,
     RefreshCw,
     Search,
     Shield,
@@ -35,10 +35,18 @@ import { RicochetLogo } from '../icons/RicochetLogo';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
 import { Input } from '../ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
-import { McpMarketplace } from '../mcp/McpMarketplace';
+import { MarketplaceView } from '../marketplace/MarketplaceView';
 import { SkillsTab } from './SkillsTab';
 import { KnowledgeTab } from './KnowledgeTab';
 import { PermissionsTab } from './PermissionsTab';
+import {
+    deriveModelAccess,
+    modelAccessBadgeClass,
+    providerCredentialLabel,
+    settingsTabForModelAccess,
+    sortProvidersByDisplayOrder,
+    type SelectedModelAccess,
+} from '../chat/modelAccess';
 import { useUsage } from '../../hooks/useUsage';
 import { useSessions } from '../../hooks/useSessions';
 import {
@@ -71,7 +79,7 @@ interface SettingsProps {
     grikAccount?: GrikAccountController;
 }
 
-interface ModelInfo {
+export interface ModelInfo {
     id: string;
     name: string;
     contextWindow: number;
@@ -89,10 +97,19 @@ interface ModelInfo {
     limited?: boolean;
     deprecated?: boolean;
     apiType?: string;
+    source?: string;
+    launchState?: 'live' | 'soon' | string;
+    ownedBy?: string;
     mayTrainOnYourPrompts?: boolean;
 }
 
-interface ProviderInfo {
+export interface CatalogStatusInfo {
+    source?: 'curated' | 'live' | 'mixed' | string;
+    refreshedAt?: string;
+    error?: string;
+}
+
+export interface ProviderInfo {
     id: string;
     name: string;
     hasKey: boolean;
@@ -101,8 +118,17 @@ interface ProviderInfo {
     accessMode?: 'free' | 'byok' | 'subscription';
     available: boolean;
     models: ModelInfo[];
+    catalogStatus?: CatalogStatusInfo;
     promptTrainingModelCount?: number;
     hiddenPromptTrainingModelCount?: number;
+}
+
+interface ProviderKeyValidationResult {
+    providerId?: string;
+    ok: boolean;
+    status: 'valid' | 'unauthorized' | 'no_key' | 'network_error' | 'unsupported' | string;
+    message: string;
+    checkedAt: number;
 }
 
 interface AutoApprovalSettings {
@@ -167,6 +193,8 @@ interface SettingsSnapshot {
     terminal: TerminalSettings;
     telegramToken: string;
     telegramChatId: string;
+    whisperBinary: string;
+    whisperModel: string;
     discordToken: string;
     discordApplicationId: string;
     discordGuildId: string;
@@ -194,6 +222,7 @@ const TABS = [
     { id: 'indexing', label: 'Indexing', icon: SlidersHorizontal, keywords: 'knowledge semantic workspace map index reindex' },
     { id: 'terminal', label: 'Terminal', icon: Terminal, keywords: 'command output terminal limit' },
     { id: 'usage', label: 'Usage', icon: Gauge, keywords: 'tokens cost requests billing usage' },
+    { id: 'marketplace', label: 'Marketplace', icon: LayoutGrid, keywords: 'b2p marketplace mcp servers agent skills install catalog registry' },
     { id: 'skills', label: 'Skills', icon: Shield, keywords: 'skills knowledge instructions prompt' },
     { id: 'integrations', label: 'Integrations', icon: LayoutGrid, keywords: 'ether telegram discord mcp marketplace bot' },
     { id: 'about', label: 'About', icon: Info, keywords: 'version github support donate' },
@@ -216,8 +245,23 @@ const FALLBACK_MODELS: Record<string, ModelInfo[]> = {
     openrouter: [{ id: 'qwen/qwen3-coder:free', name: 'Qwen 3 Coder (Free)', contextWindow: 262_000, inputPrice: 0, outputPrice: 0, isFree: true, supportsTools: true, recommended: true, accessMode: 'free', credentialMode: 'provider_key' }],
     grik: [
         { id: 'qwen/qwen3-coder:free', name: 'Qwen 3 Coder (Anonymous Free)', contextWindow: 262_000, inputPrice: 0, outputPrice: 0, isFree: true, supportsTools: true, recommended: true, accessMode: 'free', credentialMode: 'none' },
+        { id: 'ricochet-code', name: 'Grik Ricochet Code', contextWindow: 200_000, inputPrice: 5, outputPrice: 20, isFree: false, supportsTools: true, recommended: true, accessMode: 'subscription', keySource: 'hosted', credentialMode: 'grik_account', requiresSubscription: true, launchState: 'soon', ownedBy: 'grik' },
         { id: 'openai/gpt-5.5', name: 'GPT-5.5 (Subscription)', contextWindow: 1_000_000, inputPrice: 5, outputPrice: 30, isFree: false, supportsTools: true, recommended: true, accessMode: 'subscription', keySource: 'hosted', credentialMode: 'grik_account', requiresSubscription: true, apiType: 'responses' },
     ],
+};
+
+const FALLBACK_PROVIDER_NAMES: Record<string, string> = {
+    grik: 'Grik',
+    openrouter: 'OpenRouter',
+    anthropic: 'Anthropic (Claude)',
+    openai: 'OpenAI',
+    deepseek: 'DeepSeek',
+    gemini: 'Google Gemini',
+    xai: 'xAI (Grok)',
+    zhipu: 'Zhipu AI (GLM)',
+    'zhipu-coding': 'Zhipu Coding (GLM)',
+    minimax: 'MiniMax',
+    mistral: 'Mistral AI',
 };
 
 const DEFAULT_AUTO_APPROVAL: AutoApprovalSettings = {
@@ -339,11 +383,8 @@ function formatContextWindow(tokens?: number): string {
     return `${Math.round(tokens / 1000)}k`;
 }
 
-function keyStatusLabel(p: ProviderInfo): string {
-    if (p.keySource === 'hosted' || p.accessMode === 'subscription') return 'Subscription';
-    if (p.keySource === 'user' || p.hasUserKey) return 'User key';
-    if (p.keySource === 'server' || p.hasKey) return 'Server key';
-    return 'No key';
+export function keyStatusLabel(p: ProviderInfo): string {
+    return providerCredentialLabel(p);
 }
 
 function keyStatusTone(p: ProviderInfo): string {
@@ -353,20 +394,56 @@ function keyStatusTone(p: ProviderInfo): string {
     return 'text-[#888] bg-white/5';
 }
 
-function modelAccessLabel(model: ModelInfo): string {
-    if (model.limited) return 'Limited';
-    if (model.deprecated) return 'Deprecated';
-    if (model.isFree || model.accessMode === 'free') return 'Free';
-    if (model.requiresSubscription || model.accessMode === 'subscription') return 'Subscription';
-    return 'BYOK';
+export function settingsModelAccess(provider: ProviderInfo | undefined, model: ModelInfo | undefined, grikAccount?: GrikAccountController): SelectedModelAccess {
+    return deriveModelAccess(provider, model, grikAccount);
 }
 
-function modelAccessTone(model: ModelInfo): string {
-    if (model.limited) return 'bg-amber-400/10 text-amber-300';
-    if (model.deprecated) return 'bg-red-400/10 text-red-300';
-    if (model.isFree || model.accessMode === 'free') return 'bg-green-400/10 text-green-400';
-    if (model.requiresSubscription || model.accessMode === 'subscription') return 'bg-violet-400/10 text-violet-300';
-    return 'bg-white/5 text-[#999]';
+export function settingsModelAccessLabel(provider: ProviderInfo | undefined, model: ModelInfo | undefined, grikAccount?: GrikAccountController): string {
+    return settingsModelAccess(provider, model, grikAccount).label;
+}
+
+function modelAccessTone(access: SelectedModelAccess): string {
+    return modelAccessBadgeClass(access);
+}
+
+function isComingSoonAccess(access: SelectedModelAccess): boolean {
+    return access.state === 'coming_soon';
+}
+
+function providerKeyCheckTone(result?: ProviderKeyValidationResult): string {
+    if (!result) return 'text-[#777]';
+    if (result.ok || result.status === 'valid') return 'text-green-400';
+    if (result.status === 'network_error') return 'text-amber-300';
+    return 'text-red-300';
+}
+
+function providerKeyCheckMessage(result?: ProviderKeyValidationResult): string {
+    if (!result) return '';
+    return result.message || 'Key check finished.';
+}
+
+export function catalogStatusText(provider: ProviderInfo): string | null {
+    if (provider.id !== 'openrouter') return null;
+    const status = provider.catalogStatus;
+    const error = status?.error?.trim();
+    if (error) {
+        if (error.toLowerCase().includes('disabled')) {
+            return 'Using bundled catalog; live sync disabled.';
+        }
+        return 'Using bundled catalog; refresh failed.';
+    }
+    if (status?.source === 'live' || status?.source === 'mixed') {
+        return status.refreshedAt ? 'Free models synced from OpenRouter.' : 'Free models include OpenRouter live catalog entries.';
+    }
+    return 'Using bundled catalog.';
+}
+
+export function isCatalogProviderOpen(providerId: string, openProviderIds: Set<string>, isSearchActive: boolean): boolean {
+    return isSearchActive || openProviderIds.has(providerId);
+}
+
+export function isAccessProviderOpen(providerId: string, openProviderIds: Set<string>): boolean {
+    return openProviderIds.has(providerId);
 }
 
 export function isPromptTrainingModel(model: Pick<ModelInfo, 'mayTrainOnYourPrompts'>): boolean {
@@ -434,7 +511,7 @@ export function buildDiscordSetupSteps(applicationId: string): string {
 
 function HostedProviderAccess({ provider, account }: { provider: ProviderInfo; account?: GrikAccountController }) {
     const fallbackSummary: GrikAccountSummary = {
-        label: provider.available ? 'Subscription' : 'Sign in required',
+        label: provider.available ? 'Grik Account' : 'Sign in required',
         detail: 'Hosted Ricochet models use your Grik account subscription.',
         tone: provider.available ? 'success' : 'idle',
         actionLabel: provider.available ? 'Manage' : 'Sign in',
@@ -481,7 +558,7 @@ function HostedProviderAccess({ provider, account }: { provider: ProviderInfo; a
                     <UserCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#9cc7ff]" />
                     <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-sm font-medium text-[#ddd]">Grik account</span>
+                            <span className="text-sm font-medium text-[#ddd]">Grik Account</span>
                             <span className="text-[10px] text-[#9aa]">{summary.label}</span>
                         </div>
                         <p className="mt-1 text-[11px] leading-5 text-[#888]">{summary.detail}</p>
@@ -498,8 +575,8 @@ function HostedProviderAccess({ provider, account }: { provider: ProviderInfo; a
                         onClick={account?.refresh}
                         disabled={!account || account.isBusy}
                         className="h-7 w-7 inline-flex items-center justify-center rounded text-[#888] hover:bg-white/[0.05] hover:text-[#ddd] disabled:opacity-50"
-                        title="Refresh Grik account"
-                        aria-label="Refresh Grik account"
+                        title="Refresh Grik Account"
+                        aria-label="Refresh Grik Account"
                     >
                         <RefreshCw className={`h-3.5 w-3.5 ${account?.isBusy ? 'animate-spin' : ''}`} />
                     </button>
@@ -567,7 +644,9 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
     const [settingsSearch, setSettingsSearch] = useState('');
     const [modelSearch, setModelSearch] = useState('');
     const [modelFilter, setModelFilter] = useState<ModelFilter>('recommended');
-    const [openProviderIds, setOpenProviderIds] = useState<Set<string>>(new Set());
+    const [openProviderIds, setOpenProviderIds] = useState<Set<string>>(() => new Set(['deepseek']));
+    const [openAccessProviderIds, setOpenAccessProviderIds] = useState<Set<string>>(() => new Set(['grik', 'deepseek']));
+    const [modelsRefreshing, setModelsRefreshing] = useState(false);
     const [advancedOpen, setAdvancedOpen] = useState(false);
 
     useEffect(() => {
@@ -579,6 +658,8 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     const [provider, setProvider] = useState<string>('deepseek');
     const [model, setModel] = useState('');
+    const [providerKeyChecks, setProviderKeyChecks] = useState<Record<string, ProviderKeyValidationResult>>({});
+    const [checkingProviderIds, setCheckingProviderIds] = useState<Set<string>>(() => new Set());
     const [modeModels, setModeModels] = useState<ModeModelSettings>(DEFAULT_MODE_MODELS);
     const [terminal, setTerminal] = useState<TerminalSettings>({ output_line_limit: 500 });
     const [temperature, setTemperature] = useState(0);
@@ -590,6 +671,8 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
 
     const [telegramToken, setTelegramToken] = useState('');
     const [telegramChatId, setTelegramChatId] = useState('');
+    const [whisperBinary, setWhisperBinary] = useState('');
+    const [whisperModel, setWhisperModel] = useState('');
     const [botInfo, setBotInfo] = useState<BotInfo | null>(null);
     const [isVerifying, setIsVerifying] = useState(false);
     const [testStatus, setTestStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
@@ -660,15 +743,15 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
     const discordSetupSteps = useMemo(() => buildDiscordSetupSteps(discordApplicationId), [discordApplicationId]);
 
     const providerOptions = useMemo<ProviderInfo[]>(() => {
-        if (providers.length > 0) return providers;
-        return Object.keys(FALLBACK_MODELS).map(id => ({
+        if (providers.length > 0) return sortProvidersByDisplayOrder(providers);
+        return sortProvidersByDisplayOrder(Object.keys(FALLBACK_MODELS).map(id => ({
             id,
-            name: id,
+            name: FALLBACK_PROVIDER_NAMES[id] || id,
             hasKey: false,
             keySource: 'none',
             available: false,
             models: FALLBACK_MODELS[id],
-        }));
+        })));
     }, [providers]);
 
     const currentProvider = providerOptions.find(p => p.id === provider);
@@ -676,6 +759,9 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
         currentProvider?.models?.length ? currentProvider.models : (FALLBACK_MODELS[provider] || []),
         hidePromptTrainingModels
     ), [currentProvider, hidePromptTrainingModels, provider]);
+    const currentModel = availableModels.find(item => item.id === model)
+        || currentProvider?.models?.find(item => item.id === model);
+    const currentModelAccess = settingsModelAccess(currentProvider, currentModel, grikAccount);
 
     const catalogGroups = useMemo(() => {
         const query = modelSearch.trim().toLowerCase();
@@ -718,11 +804,11 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
             : groups;
 
         return visibleGroups.sort((a, b) => {
-            if (a.provider.id === provider) return -1;
-            if (b.provider.id === provider) return 1;
-            return a.provider.name.localeCompare(b.provider.name);
+            const sorted = sortProvidersByDisplayOrder([a.provider, b.provider]);
+            if (sorted[0].id === sorted[1]?.id) return 0;
+            return sorted[0].id === a.provider.id ? -1 : 1;
         });
-    }, [hidePromptTrainingModels, modelFilter, modelSearch, provider, providerOptions]);
+    }, [hidePromptTrainingModels, modelFilter, modelSearch, providerOptions]);
 
     const visibleTabs = useMemo(() => {
         const query = settingsSearch.trim().toLowerCase();
@@ -738,6 +824,8 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
         terminal,
         telegramToken,
         telegramChatId,
+        whisperBinary,
+        whisperModel,
         discordToken,
         discordApplicationId,
         discordGuildId,
@@ -797,6 +885,39 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
         });
     };
 
+    const toggleAccessProviderGroup = (providerId: string) => {
+        setOpenAccessProviderIds(prev => {
+            const next = new Set(prev);
+            if (next.has(providerId)) {
+                next.delete(providerId);
+            } else {
+                next.add(providerId);
+            }
+            return next;
+        });
+    };
+
+    const refreshModels = () => {
+        setModelsRefreshing(true);
+        postMessage({ type: 'get_models', payload: { force: true } });
+    };
+
+    const checkProviderKey = (providerId: string) => {
+        setProviderKeyChecks(prev => {
+            const next = { ...prev };
+            delete next[providerId];
+            return next;
+        });
+        setCheckingProviderIds(prev => new Set(prev).add(providerId));
+        postMessage({
+            type: 'validate_provider_key',
+            payload: {
+                providerId,
+                apiKey: apiKeys[providerId] || '',
+            },
+        });
+    };
+
     useEffect(() => {
         postMessage({ type: 'get_settings' });
         postMessage({ type: 'get_models' });
@@ -844,6 +965,8 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                     terminal: loadedTerminal,
                     telegramToken: (s.telegramToken as string) || '',
                     telegramChatId: s.telegramChatId ? String(s.telegramChatId) : '',
+                    whisperBinary: (s.whisperBinary as string) || '',
+                    whisperModel: (s.whisperModel as string) || '',
                     discordToken: (s.discordToken as string) || '',
                     discordApplicationId: (s.discordApplicationId as string) || '',
                     discordGuildId: (s.discordGuildId as string) || '',
@@ -864,10 +987,14 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                 setApiKeys(snapshot.apiKeys);
                 setProvider(snapshot.provider);
                 setModel(snapshot.model);
+                setOpenProviderIds(prev => new Set(prev).add(snapshot.provider));
+                setOpenAccessProviderIds(prev => new Set(prev).add(snapshot.provider));
                 setModeModels(snapshot.modeModels);
                 setTerminal(snapshot.terminal);
                 setTelegramToken(snapshot.telegramToken);
                 setTelegramChatId(snapshot.telegramChatId);
+                setWhisperBinary(snapshot.whisperBinary);
+                setWhisperModel(snapshot.whisperModel);
                 setDiscordToken(snapshot.discordToken);
                 setDiscordApplicationId(snapshot.discordApplicationId);
                 setDiscordGuildId(snapshot.discordGuildId);
@@ -890,8 +1017,23 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
             if (message.type === 'models') {
                 const result = message.payload as { providers: ProviderInfo[]; hide_prompt_training_models?: boolean };
                 setProviders(result.providers || []);
+                setModelsRefreshing(false);
                 if (typeof result.hide_prompt_training_models === 'boolean') {
                     setHidePromptTrainingModels(result.hide_prompt_training_models);
+                }
+            }
+            if (message.type === 'provider_key_validation') {
+                const result = message.payload as ProviderKeyValidationResult;
+                const providerId = result.providerId || '';
+                if (providerId) {
+                    setProviderKeyChecks(prev => ({ ...prev, [providerId]: result }));
+                    setCheckingProviderIds(prev => {
+                        const next = new Set(prev);
+                        next.delete(providerId);
+                        return next;
+                    });
+                } else {
+                    setCheckingProviderIds(new Set());
                 }
             }
             if (message.type === 'bot_verification_result') {
@@ -977,6 +1119,8 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                 terminal: snapshot.terminal,
                 telegramToken: snapshot.telegramToken,
                 telegramChatId: snapshot.telegramChatId ? parseInt(snapshot.telegramChatId, 10) : 0,
+                whisperBinary: snapshot.whisperBinary,
+                whisperModel: snapshot.whisperModel,
                 discordToken: snapshot.discordToken,
                 discordApplicationId: snapshot.discordApplicationId,
                 discordGuildId: snapshot.discordGuildId,
@@ -1003,10 +1147,14 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
         setApiKeys(snapshot.apiKeys);
         setProvider(snapshot.provider);
         setModel(snapshot.model);
+        setOpenProviderIds(prev => new Set(prev).add(snapshot.provider));
+        setOpenAccessProviderIds(prev => new Set(prev).add(snapshot.provider));
         setModeModels(snapshot.modeModels);
         setTerminal(snapshot.terminal);
         setTelegramToken(snapshot.telegramToken);
         setTelegramChatId(snapshot.telegramChatId);
+        setWhisperBinary(snapshot.whisperBinary);
+        setWhisperModel(snapshot.whisperModel);
         setDiscordToken(snapshot.discordToken);
         setDiscordApplicationId(snapshot.discordApplicationId);
         setDiscordGuildId(snapshot.discordGuildId);
@@ -1082,6 +1230,20 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
         }));
     };
 
+    const modeAccessSummary = (mode: 'plan' | 'act') => {
+        const modeProviderId = modeModels[mode].provider || provider;
+        const modeModelId = modeModels[mode].model || model;
+        const selectedProvider = providerOptions.find(p => p.id === modeProviderId);
+        const selectedModel = selectedProvider?.models.find(item => item.id === modeModelId);
+        const access = settingsModelAccess(selectedProvider, selectedModel, grikAccount);
+        return {
+            providerName: selectedProvider?.name || modeProviderId || 'Default provider',
+            modelName: selectedModel?.name || modeModelId || 'Default model',
+            inherited: !modeModels[mode].provider && !modeModels[mode].model,
+            access,
+        };
+    };
+
     const renderProviderSelect = (value: string | undefined, onChange: (value: string) => void) => (
         <Select value={value || 'inherit'} onValueChange={(next) => onChange(next === 'inherit' ? '' : next)}>
             <SelectTrigger>
@@ -1105,9 +1267,15 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                 </SelectTrigger>
                 <SelectContent>
                     <SelectItem value="inherit">Inherit default model</SelectItem>
-                    {models.map(m => (
-                        <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
-                    ))}
+                    {models.map(m => {
+                        const selectedProvider = providerOptions.find(p => p.id === providerId);
+                        const access = settingsModelAccess(selectedProvider, m, grikAccount);
+                        return (
+                            <SelectItem key={m.id} value={m.id} disabled={isComingSoonAccess(access)}>
+                                {m.name}{isComingSoonAccess(access) ? ' (Soon)' : ''}
+                            </SelectItem>
+                        );
+                    })}
                 </SelectContent>
             </Select>
         );
@@ -1186,7 +1354,7 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                             <SelectContent>
                                                 {providerOptions.map(p => (
                                                     <SelectItem key={p.id} value={p.id}>
-                                                        {p.name} {p.available ? '' : isHostedSubscriptionAccess(p.accessMode, p.keySource) ? '(sign in)' : '(no key)'}
+                                                        {p.name} {p.available ? '' : isHostedSubscriptionAccess(p.accessMode, p.keySource) ? '(Grik Account)' : '(No key)'}
                                                     </SelectItem>
                                                 ))}
                                             </SelectContent>
@@ -1200,13 +1368,33 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                                     <SelectValue placeholder="Select model" />
                                                 </SelectTrigger>
                                                 <SelectContent>
-                                                    {availableModels.map(m => (
-                                                        <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
-                                                    ))}
+                                                    {availableModels.map(m => {
+                                                        const access = settingsModelAccess(currentProvider, m, grikAccount);
+                                                        return (
+                                                            <SelectItem key={m.id} value={m.id} disabled={isComingSoonAccess(access)}>
+                                                                {m.name}{isComingSoonAccess(access) ? ' (Soon)' : ''}
+                                                            </SelectItem>
+                                                        );
+                                                    })}
                                                 </SelectContent>
                                             </Select>
                                         ) : (
                                             <Input value={model} onChange={(event) => setModel(event.target.value)} placeholder="provider-model-id" />
+                                        )}
+                                    </div>
+                                </div>
+                                <div className={`rounded border px-3 py-2 text-xs ${currentModelAccess.sendable ? 'border-white/10 bg-white/[0.03]' : 'border-amber-400/20 bg-amber-400/10'}`}>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <span className={`rounded px-2 py-0.5 text-[10px] ${modelAccessTone(currentModelAccess)}`}>{currentModelAccess.label}</span>
+                                        <span className={currentModelAccess.sendable ? 'text-[#aaa]' : 'text-amber-200'}>{currentModelAccess.detail}</span>
+                                        {!currentModelAccess.sendable && currentModelAccess.action && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setActiveTab(currentModelAccess.action === 'settings' ? settingsTabForModelAccess(currentModelAccess) : 'providers')}
+                                                className="ml-auto text-[11px] text-[#9cc7ff] hover:underline"
+                                            >
+                                                Open Providers
+                                            </button>
                                         )}
                                     </div>
                                 </div>
@@ -1235,19 +1423,30 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                     <div>
                                         <h3 className="text-xs font-medium uppercase tracking-wide text-[#888]">Available Models</h3>
                                         <p className="mt-1 text-[11px] text-[#777]">
-                                            {hidePromptTrainingModels ? 'Stealth Mode hides explicitly flagged prompt-training models.' : 'Models are grouped by provider. The active provider opens first.'}
+                                            {hidePromptTrainingModels ? 'Stealth Mode hides explicitly flagged prompt-training models.' : 'Models are grouped by provider. OpenRouter free models can include live catalog entries.'}
                                         </p>
                                     </div>
-                                    <div className="flex items-center gap-1 rounded border border-white/10 bg-white/[0.03] p-1">
-                                        {(['recommended', 'free', 'all'] as ModelFilter[]).map(filter => (
-                                            <button
-                                                key={filter}
-                                                onClick={() => setModelFilter(filter)}
-                                                className={`rounded px-2 py-1 text-[11px] capitalize ${modelFilter === filter ? 'bg-[#0e639c] text-white' : 'text-[#888] hover:text-[#ddd]'}`}
-                                            >
-                                                {filter}
-                                            </button>
-                                        ))}
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={refreshModels}
+                                            disabled={modelsRefreshing}
+                                            className="inline-flex items-center gap-1 rounded border border-white/10 bg-white/[0.03] px-2 py-1 text-[11px] text-[#aaa] hover:border-white/20 hover:text-[#ddd] disabled:opacity-50"
+                                        >
+                                            {modelsRefreshing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                                            Refresh models
+                                        </button>
+                                        <div className="flex items-center gap-1 rounded border border-white/10 bg-white/[0.03] p-1">
+                                            {(['recommended', 'free', 'all'] as ModelFilter[]).map(filter => (
+                                                <button
+                                                    key={filter}
+                                                    onClick={() => setModelFilter(filter)}
+                                                    className={`rounded px-2 py-1 text-[11px] capitalize ${modelFilter === filter ? 'bg-[#0e639c] text-white' : 'text-[#888] hover:text-[#ddd]'}`}
+                                                >
+                                                    {filter}
+                                                </button>
+                                            ))}
+                                        </div>
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-2 rounded border border-white/10 bg-white/[0.03] px-3 py-2">
@@ -1267,9 +1466,10 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                     )}
                                     {catalogGroups.map(group => {
                                         const isSearchActive = modelSearch.trim().length > 0;
-                                        const isOpen = isSearchActive || group.provider.id === provider || openProviderIds.has(group.provider.id);
+                                        const isOpen = isCatalogProviderOpen(group.provider.id, openProviderIds, isSearchActive);
                                         const providerActive = group.provider.id === provider;
                                         const providerModelActive = providerActive && group.provider.models.some(item => item.id === model);
+                                        const catalogText = catalogStatusText(group.provider);
 
                                         return (
                                             <div
@@ -1301,20 +1501,29 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                                         {group.deprecatedCount > 0 && <span className="rounded bg-red-400/10 px-1.5 py-0.5 text-red-300">{group.deprecatedCount} old</span>}
                                                         {group.paidCount > 0 && <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">{group.paidCount} byok</span>}
                                                         <span className={`rounded px-1.5 py-0.5 ${keyStatusTone(group.provider)}`}>{keyStatusLabel(group.provider)}</span>
+                                                        {catalogText && <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">{group.provider.catalogStatus?.source || 'curated'}</span>}
                                                     </span>
                                                 </button>
 
                                                 {isOpen && (
                                                     <div className="border-t border-white/10 p-2">
+                                                        {catalogText && (
+                                                            <div className="mb-2 rounded border border-white/10 bg-white/[0.03] px-3 py-2 text-[11px] text-[#888]">
+                                                                {catalogText}
+                                                            </div>
+                                                        )}
                                                         {group.models.length > 0 ? (
                                                             <div className="grid gap-2 md:grid-cols-2">
                                                                 {group.models.map(item => {
                                                                     const active = group.provider.id === provider && item.id === model;
+                                                                    const itemAccess = settingsModelAccess(group.provider, item, grikAccount);
+                                                                    const comingSoon = isComingSoonAccess(itemAccess);
                                                                     return (
                                                                         <button
                                                                             key={`${group.provider.id}:${item.id}`}
-                                                                            onClick={() => handleSelectCatalogModel(group.provider.id, item.id)}
-                                                                            className={`rounded border p-3 text-left transition-colors ${active ? 'border-[#0e639c] bg-[#04395e]/30' : 'border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.05]'}`}
+                                                                            onClick={() => !comingSoon && handleSelectCatalogModel(group.provider.id, item.id)}
+                                                                            disabled={comingSoon}
+                                                                            className={`rounded border p-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-70 ${active ? 'border-[#0e639c] bg-[#04395e]/30' : 'border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.05]'}`}
                                                                         >
                                                                             <div className="flex items-start justify-between gap-3">
                                                                                 <div className="min-w-0">
@@ -1325,9 +1534,14 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                                                             </div>
                                                                             <div className="mt-3 flex flex-wrap gap-1.5 text-[10px]">
                                                                                 <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">{formatContextWindow(item.contextWindow)} ctx</span>
-                                                                                <span className={`rounded px-1.5 py-0.5 ${modelAccessTone(item)}`}>
-                                                                                    {modelAccessLabel(item)}
+                                                                                <span className={`rounded px-1.5 py-0.5 ${modelAccessTone(itemAccess)}`}>
+                                                                                    {itemAccess.label}
                                                                                 </span>
+                                                                                {(item.ownedBy === 'grik' || (group.provider.id === 'grik' && item.id === 'ricochet-code')) && (
+                                                                                    <span className="rounded bg-sky-400/10 px-1.5 py-0.5 text-sky-300">
+                                                                                        Grik model
+                                                                                    </span>
+                                                                                )}
                                                                                 {!item.isFree && item.inputPrice > 0 && (
                                                                                     <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">
                                                                                         ${item.inputPrice}/${item.outputPrice}
@@ -1352,10 +1566,11 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                                                                 <span className={`rounded px-1.5 py-0.5 ${item.supportsTools ? 'bg-blue-400/10 text-blue-400' : 'bg-white/5 text-[#999]'}`}>
                                                                                     {item.supportsTools ? 'Tools' : 'No tools'}
                                                                                 </span>
-                                                                                <span className={`rounded px-1.5 py-0.5 ${keyStatusTone(group.provider)}`}>
-                                                                                    {keyStatusLabel(group.provider)}
-                                                                                </span>
+                                                                                {item.source && <span className="rounded bg-white/5 px-1.5 py-0.5 text-[#999]">{item.source === 'openrouter-live' ? 'Live' : item.source}</span>}
                                                                             </div>
+                                                                            {!itemAccess.sendable && (
+                                                                                <div className="mt-2 text-[11px] text-amber-200">{itemAccess.detail}</div>
+                                                                            )}
                                                                         </button>
                                                                     );
                                                                 })}
@@ -1385,19 +1600,29 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                         className="mt-1 accent-[#0e639c]"
                                     />
                                     <div>
-                                        <label htmlFor="mode-models" className="cursor-pointer text-sm font-medium">Use different models for Plan and Act</label>
-                                        <p className="mt-0.5 text-xs text-[#888]">Unset values inherit the default provider and model.</p>
+                                        <label htmlFor="mode-models" className="cursor-pointer text-sm font-medium">Advanced model routing</label>
+                                        <p className="mt-0.5 text-xs text-[#888]">Plan and Act overrides inherit the active provider and model when unset.</p>
                                     </div>
                                 </div>
                                 {modeModels.enabled && (
                                     <div className="grid gap-4 md:grid-cols-2">
-                                        {(['plan', 'act'] as const).map(mode => (
-                                            <div key={mode} className="space-y-3 rounded border border-white/10 bg-white/[0.03] p-3">
-                                                <h4 className="text-xs font-medium uppercase tracking-wide text-[#888]">{mode} model</h4>
-                                                {renderProviderSelect(modeModels[mode].provider, (next) => updateModeProvider(mode, next))}
-                                                {renderModelSelect(modeModels[mode].provider, modeModels[mode].model, (next) => setModeModels(prev => ({ ...prev, [mode]: { ...prev[mode], model: next } })))}
-                                            </div>
-                                        ))}
+                                        {(['plan', 'act'] as const).map(mode => {
+                                            const summary = modeAccessSummary(mode);
+                                            return (
+                                                <div key={mode} className="space-y-3 rounded border border-white/10 bg-white/[0.03] p-3">
+                                                    <h4 className="text-xs font-medium uppercase tracking-wide text-[#888]">{mode} model</h4>
+                                                    {renderProviderSelect(modeModels[mode].provider, (next) => updateModeProvider(mode, next))}
+                                                    {renderModelSelect(modeModels[mode].provider, modeModels[mode].model, (next) => setModeModels(prev => ({ ...prev, [mode]: { ...prev[mode], model: next } })))}
+                                                    <div className={`rounded border px-2.5 py-2 text-[11px] ${summary.access.sendable ? 'border-white/10 bg-white/[0.03] text-[#888]' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>
+                                                        <div className="flex flex-wrap items-center gap-1.5">
+                                                            <span>{summary.inherited ? 'Inherited' : 'Resolved'}: {summary.providerName} / {summary.modelName}</span>
+                                                            <span className={`rounded px-1.5 py-0.5 text-[10px] ${modelAccessTone(summary.access)}`}>{summary.access.label}</span>
+                                                        </div>
+                                                        {!summary.access.sendable && <div className="mt-1">{summary.access.detail}</div>}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
                                     </div>
                                 )}
                             </section>
@@ -1435,37 +1660,69 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                         <div className="mx-auto max-w-3xl space-y-5">
                             <section>
                                 <h3 className="text-xs font-medium uppercase tracking-wide text-[#888]">Provider Access</h3>
-                                <p className="mt-1 text-[11px] text-[#777]">Hosted subscription providers use account sign in. BYOK providers still use local API keys.</p>
+                                <p className="mt-1 text-[11px] text-[#777]">Grik Account unlocks hosted models. BYOK providers use your local API keys.</p>
                             </section>
                             <div className="space-y-3">
                                 {providerOptions.map(p => {
                                     const usesAccount = isHostedSubscriptionAccess(p.accessMode, p.keySource);
+                                    const isOpen = isAccessProviderOpen(p.id, openAccessProviderIds);
                                     return (
-                                        <details key={p.id} className="rounded border border-white/10 bg-white/[0.03] p-3" open={p.id === provider || usesAccount}>
-                                            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                                        <div key={p.id} className="rounded border border-white/10 bg-white/[0.03] p-3">
+                                            <button
+                                                type="button"
+                                                onClick={() => toggleAccessProviderGroup(p.id)}
+                                                className="flex w-full cursor-pointer items-center justify-between gap-3 text-left"
+                                            >
                                                 <span className="flex min-w-0 items-center gap-2">
+                                                    {isOpen ? <ChevronDown className="h-4 w-4 shrink-0 text-[#888]" /> : <ChevronRight className="h-4 w-4 shrink-0 text-[#888]" />}
                                                     <span className={`h-2 w-2 rounded-full ${p.available ? 'bg-green-500' : 'bg-[#555]'}`} />
                                                     <span className="truncate text-sm font-medium text-[#ddd]">{p.name}</span>
                                                 </span>
                                                 <span className={`shrink-0 rounded px-2 py-0.5 text-[10px] ${keyStatusTone(p)}`}>{keyStatusLabel(p)}</span>
-                                            </summary>
-                                            <div className="mt-3 space-y-2">
-                                                {usesAccount ? (
-                                                    <HostedProviderAccess provider={p} account={grikAccount} />
-                                                ) : (
-                                                    <>
-                                                        <Input
-                                                            type="password"
-                                                            value={apiKeys[p.id] || ''}
-                                                            onChange={(event) => setApiKeys(prev => ({ ...prev, [p.id]: event.target.value }))}
-                                                            placeholder={`Enter ${p.name} API key`}
-                                                            className="text-xs"
-                                                        />
-                                                        <p className="text-[10px] text-[#777]">{p.models.length} models listed. Empty user key falls back to server key when available.</p>
-                                                    </>
-                                                )}
-                                            </div>
-                                        </details>
+                                            </button>
+                                            {isOpen && (
+                                                <div className="mt-3 space-y-2">
+                                                    {usesAccount ? (
+                                                        <HostedProviderAccess provider={p} account={grikAccount} />
+                                                    ) : (
+                                                        <>
+                                                            <div className="flex gap-2">
+                                                                <Input
+                                                                    type="password"
+                                                                    value={apiKeys[p.id] || ''}
+                                                                    onChange={(event) => {
+                                                                        setApiKeys(prev => ({ ...prev, [p.id]: event.target.value }));
+                                                                        setProviderKeyChecks(prev => {
+                                                                            if (!prev[p.id]) return prev;
+                                                                            const next = { ...prev };
+                                                                            delete next[p.id];
+                                                                            return next;
+                                                                        });
+                                                                    }}
+                                                                    placeholder={`Enter ${p.name} API key`}
+                                                                    className="min-w-0 flex-1 text-xs"
+                                                                />
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => checkProviderKey(p.id)}
+                                                                    disabled={checkingProviderIds.has(p.id)}
+                                                                    className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded border border-white/10 bg-white/[0.04] px-2.5 text-[11px] text-[#ddd] hover:bg-white/[0.07] disabled:opacity-50"
+                                                                >
+                                                                    {checkingProviderIds.has(p.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Key className="h-3.5 w-3.5" />}
+                                                                    Check key
+                                                                </button>
+                                                            </div>
+                                                            {providerKeyChecks[p.id] && (
+                                                                <p className={`text-[10px] ${providerKeyCheckTone(providerKeyChecks[p.id])}`}>
+                                                                    {providerKeyCheckMessage(providerKeyChecks[p.id])}
+                                                                </p>
+                                                            )}
+                                                            <p className="text-[10px] text-[#777]">{p.models.length} models listed. Empty user key uses included access when available.</p>
+                                                        </>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
                                     );
                                 })}
                             </div>
@@ -2011,9 +2268,17 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                         </div>
                     )}
 
+                    {activeTab === 'marketplace' && (
+                        <MarketplaceView />
+                    )}
+
                     {activeTab === 'skills' && (
                         <div className="mx-auto max-w-3xl">
-                            <SkillsTab customInstructions={customInstructions} setCustomInstructions={setCustomInstructions} />
+                            <SkillsTab
+                                customInstructions={customInstructions}
+                                setCustomInstructions={setCustomInstructions}
+                                onOpenMarketplace={() => setActiveTab('marketplace')}
+                            />
                         </div>
                     )}
 
@@ -2045,6 +2310,25 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                             <span className="mt-1 block text-[11px] leading-relaxed text-[#888]">Keep this off until Telegram chat IDs or Discord user/channel allowlists are set. Remote start uses sent messages only, never draft text or typing activity.</span>
                                         </span>
                                     </label>
+                                </div>
+                                <div className="space-y-3 rounded border border-white/10 bg-white/[0.03] p-3">
+                                    <div className="flex items-start gap-2">
+                                        <Mic className="mt-0.5 h-4 w-4 shrink-0 text-[#888]" />
+                                        <div>
+                                            <h4 className="text-xs font-medium text-[#ddd]">Voice input</h4>
+                                            <p className="mt-1 text-[11px] leading-relaxed text-[#888]">Microphone transcription runs locally through ffmpeg and Whisper. Audio is not uploaded to model providers.</p>
+                                        </div>
+                                    </div>
+                                    <div className="grid gap-3 sm:grid-cols-2">
+                                        <div className="space-y-2">
+                                            <label className="text-xs text-[#888]">Whisper binary</label>
+                                            <Input value={whisperBinary} onChange={(event) => setWhisperBinary(event.target.value)} placeholder="/path/to/main or whisper-cli" />
+                                        </div>
+                                        <div className="space-y-2">
+                                            <label className="text-xs text-[#888]">Whisper model</label>
+                                            <Input value={whisperModel} onChange={(event) => setWhisperModel(event.target.value)} placeholder="/path/to/ggml-model.bin" />
+                                        </div>
+                                    </div>
                                 </div>
                                 <div className="space-y-2">
                                     <label className="text-xs text-[#888]">Telegram Bot Token</label>
@@ -2203,8 +2487,37 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                 </div>
                             </section>
                             <section className="space-y-4 border-t border-[#333] pt-6">
-                                <h3 className="text-xs font-medium uppercase tracking-wide text-[#888]">MCP Marketplace</h3>
-                                <McpMarketplace installedServers={mcpServers} />
+                                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                        <h3 className="text-xs font-medium uppercase tracking-wide text-[#888]">MCP Servers</h3>
+                                        <p className="mt-1 text-[11px] text-[#888]">Configured MCP runtime status. Discovery and install now live in Marketplace.</p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setActiveTab('marketplace')}
+                                        className="inline-flex h-8 items-center justify-center gap-1.5 rounded border border-white/10 bg-white/[0.04] px-3 text-xs font-medium text-[#ddd] transition-colors hover:bg-white/[0.07]"
+                                    >
+                                        <LayoutGrid className="h-3.5 w-3.5" />
+                                        Open Marketplace
+                                    </button>
+                                </div>
+                                <div className="space-y-2 rounded border border-white/10 bg-white/[0.03] p-3">
+                                    {mcpServers.length === 0 ? (
+                                        <p className="text-[11px] text-[#888]">No MCP servers are currently connected.</p>
+                                    ) : (
+                                        mcpServers.map((server) => (
+                                            <div key={server.name || server.id} className="flex items-center justify-between gap-3 rounded bg-white/[0.03] px-3 py-2">
+                                                <div className="min-w-0">
+                                                    <div className="truncate text-xs font-medium text-[#ddd]">{server.name || server.id}</div>
+                                                    {server.error && <div className="mt-0.5 truncate text-[10.5px] text-red-300">{server.error}</div>}
+                                                </div>
+                                                <span className={`rounded px-2 py-0.5 text-[10px] ${server.status === 'connected' ? 'bg-emerald-400/10 text-emerald-200' : server.status === 'error' ? 'bg-red-400/10 text-red-200' : 'bg-white/[0.06] text-[#888]'}`}>
+                                                    {server.status || 'configured'}
+                                                </span>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
                             </section>
                         </div>
                     )}
@@ -2230,10 +2543,6 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                             </section>
                             <section className="space-y-3 border-t border-[#333] pt-4">
                                 <h3 className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-[#888]"><Heart className="h-3 w-3 text-red-400" /> Support the Project</h3>
-                                <div className="grid grid-cols-2 gap-3">
-                                    <a href="https://ko-fi.com/igoryan34" target="_blank" rel="noreferrer" className="flex items-center justify-center gap-2 rounded border border-[#29abe0]/20 bg-[#29abe0]/10 p-3 text-[#29abe0] transition-colors hover:bg-[#29abe0]/20"><Coffee className="h-4 w-4" /><span className="text-sm font-medium">Ko-fi</span></a>
-                                    <a href="https://www.paypal.com/ncp/payment/PPMFBMFVAB8QN" target="_blank" rel="noreferrer" className="flex items-center justify-center gap-2 rounded border border-[#0070ba]/20 bg-[#0070ba]/10 p-3 text-[#0070ba] transition-colors hover:bg-[#0070ba]/20"><CreditCard className="h-4 w-4" /><span className="text-sm font-medium">PayPal</span></a>
-                                </div>
                                 <div className="space-y-2">
                                     <p className="text-xs text-[#666]">Crypto wallets</p>
                                     {[

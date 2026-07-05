@@ -5,6 +5,7 @@ export type GrikAuthUser = {
     id?: string;
     email?: string;
     name?: string;
+    plan?: string;
 };
 
 export type GrikAuthState = {
@@ -237,6 +238,9 @@ export function deriveQuotaWarning(budget: GrikBudgetState | null | undefined): 
 }
 
 export function deriveGrikAccountSummary(authState: GrikAuthState, billingState: GrikBillingState): GrikAccountSummary {
+    authState = normalizeAuthState(authState);
+    billingState = normalizeBillingState(billingState);
+
     if (!authState.authenticated) {
         return {
             label: 'Free account',
@@ -253,24 +257,27 @@ export function deriveGrikAccountSummary(authState: GrikAuthState, billingState:
     const entitlement = getPrimaryGrikEntitlement(billingState);
     const budget = billingState.budget || null;
     const rawStatus = String(entitlement?.status || '').toLowerCase();
-    const rawPlan = budget?.plan || entitlement?.plan || '';
+    const rawPlan = normalizeDisplayText(budget?.plan) || normalizeDisplayText(entitlement?.plan) || normalizeDisplayText(authState.user?.plan);
     const planLabel = rawPlan ? planName(rawPlan) : '';
+    const ricochetCredits = getRicochetCreditBalance(billingState);
+    const hasRicochetCredits = typeof ricochetCredits?.balance === 'number' && ricochetCredits.balance > 0;
     const budgetAllowsHosted = budget?.allowed === true;
     const activeEntitlement = ['active', 'trialing', 'paid'].includes(rawStatus);
-    const hasKnownHostedAccess = activeEntitlement || budgetAllowsHosted;
+    const hasKnownHostedAccess = activeEntitlement || budgetAllowsHosted || hasRicochetCredits;
     const quotaWarning = deriveQuotaWarning(budget);
+    const fallbackPlanLabel = planLabel || (!hasKnownHostedAccess ? 'BYOK Free' : '');
 
     const accountDegraded = authState.syncStatus === 'degraded' || billingState.syncStatus === 'degraded';
     if (accountDegraded) {
         return {
             label: 'Sync issue',
-            detail: authState.error || billingState.error || 'Grik account is connected, but billing details are temporarily unavailable',
+            detail: normalizeDisplayText(authState.error) || normalizeDisplayText(billingState.error) || 'Grik account is connected, but billing details are temporarily unavailable',
             tone: 'warning',
             actionLabel: 'Retry',
             authenticated: true,
             hostedAccess: hasKnownHostedAccess,
-            plan: planLabel || rawPlan || undefined,
-            status: rawStatus || undefined,
+            plan: fallbackPlanLabel || rawPlan || undefined,
+            status: rawStatus || rawPlan || (!hasKnownHostedAccess ? 'free' : undefined),
             accessState: 'sync_issue',
             accessLabel: 'Sync issue',
             quotaWarning,
@@ -285,7 +292,7 @@ export function deriveGrikAccountSummary(authState: GrikAuthState, billingState:
             actionLabel: 'Manage',
             authenticated: true,
             hostedAccess: false,
-            plan: planLabel || rawPlan,
+            plan: planLabel || rawPlan || 'BYOK Free',
             status: rawStatus,
             accessState: 'expired',
             accessLabel: 'Expired',
@@ -301,7 +308,7 @@ export function deriveGrikAccountSummary(authState: GrikAuthState, billingState:
             actionLabel: 'Manage',
             authenticated: true,
             hostedAccess: false,
-            plan: planLabel || rawPlan || undefined,
+            plan: planLabel || rawPlan || 'BYOK Free',
             status: rawStatus || 'limited',
             accessState: 'limit_reached',
             accessLabel: 'Limit reached',
@@ -317,7 +324,7 @@ export function deriveGrikAccountSummary(authState: GrikAuthState, billingState:
             actionLabel: 'Manage',
             authenticated: true,
             hostedAccess: false,
-            plan: planLabel || rawPlan || undefined,
+            plan: planLabel || rawPlan || 'BYOK Free',
             status: rawStatus || 'approval_required',
             accessState: 'approval_required',
             accessLabel: 'Approval required',
@@ -346,15 +353,31 @@ export function deriveGrikAccountSummary(authState: GrikAuthState, billingState:
         };
     }
 
+    if (hasRicochetCredits) {
+        return {
+            label: planLabel ? `${planLabel} plan` : 'Credits available',
+            detail: 'Ricochet Code credits are available',
+            tone: 'success',
+            actionLabel: 'Manage',
+            authenticated: true,
+            hostedAccess: true,
+            plan: planLabel || rawPlan || undefined,
+            status: rawStatus || 'credits',
+            accessState: 'available',
+            accessLabel: 'Available',
+            quotaWarning,
+        };
+    }
+
     return {
-        label: 'Free account',
+        label: 'BYOK Free',
         detail: 'Signed in without an active Ricochet subscription',
         tone: 'info',
         actionLabel: 'Upgrade',
         authenticated: true,
         hostedAccess: false,
-        plan: planLabel || rawPlan || undefined,
-        status: rawStatus || undefined,
+        plan: 'BYOK Free',
+        status: rawStatus || rawPlan || 'free',
         accessState: 'upgrade_required',
         accessLabel: 'Upgrade required',
         quotaWarning,
@@ -374,10 +397,12 @@ export function formatGrikDate(value?: string): string {
 }
 
 function planName(plan: string): string {
+    if (isFreePlan(plan)) return 'BYOK Free';
     const cleaned = plan
         .replace(/^ricochet[_-]?/i, '')
         .replace(/[_-]+/g, ' ')
         .trim();
+    if (isFreePlan(cleaned)) return 'BYOK Free';
     if (!cleaned) return '';
     return cleaned
         .split(/\s+/)
@@ -397,7 +422,7 @@ export function useGrikAccount(): GrikAccountController {
         const unsubscribe = onMessage((message) => {
             switch (message.type) {
                 case 'auth_state': {
-                    const next = (message.payload || LOGGED_OUT_AUTH_STATE) as GrikAuthState;
+                    const next = normalizeAuthState((message.payload || LOGGED_OUT_AUTH_STATE) as GrikAuthState);
                     setAuthState(next);
                     setIsBusy(false);
                     postMessage({ type: 'get_models' });
@@ -410,7 +435,7 @@ export function useGrikAccount(): GrikAccountController {
                 case 'billing_subscription_action_result':
                     setIsBusy(false);
                     if (!(message.payload as { ok?: boolean })?.ok) {
-                        setError(((message.payload as { error?: string })?.error) || 'Failed to update subscription.');
+                        setError(normalizeDisplayText((message.payload as { error?: unknown })?.error, 'Failed to update subscription.'));
                     } else {
                         setError(null);
                     }
@@ -428,7 +453,7 @@ export function useGrikAccount(): GrikAccountController {
                     break;
                 case 'device_auth_failed':
                     setDeviceAuth(null);
-                    setError(((message.payload as { error?: string })?.error) || 'Sign in failed.');
+                    setError(normalizeDisplayText((message.payload as { error?: unknown })?.error, 'Sign in failed.'));
                     setIsBusy(false);
                     break;
             }
@@ -501,15 +526,158 @@ export function useGrikAccount(): GrikAccountController {
     };
 }
 
-function normalizeBillingState(state: GrikBillingState): GrikBillingState {
+export function normalizeAuthState(state: GrikAuthState | null | undefined): GrikAuthState {
+    const source = isRecord(state) ? state : LOGGED_OUT_AUTH_STATE;
+    const error = normalizeDisplayText(source.error);
     return {
-        ...state,
-        entitlements: state.entitlements?.map((entitlement) => ({
-            ...entitlement,
-            currentPeriodEnd: entitlement.currentPeriodEnd || entitlement.current_period_end,
-            cancelAtPeriodEnd: entitlement.cancelAtPeriodEnd ?? entitlement.cancel_at_period_end,
-            canceledAt: entitlement.canceledAt || entitlement.canceled_at,
-            cancellationEffectiveAt: entitlement.cancellationEffectiveAt || entitlement.cancellation_effective_at,
-        })),
+        ...source,
+        authenticated: Boolean(source.authenticated),
+        user: normalizeAuthUser(source.user),
+        syncStatus: source.syncStatus === 'degraded' ? 'degraded' : 'ready',
+        ...(error ? { error } : { error: undefined }),
     };
+}
+
+export function normalizeBillingState(state: GrikBillingState | null | undefined): GrikBillingState {
+    const source = isRecord(state) ? state : EMPTY_BILLING_STATE;
+    const error = normalizeDisplayText(source.error);
+    return {
+        ...source,
+        credits: Array.isArray(source.credits) ? source.credits.map(normalizeCreditBalance).filter(Boolean) as GrikCreditBalance[] : [],
+        entitlements: Array.isArray(source.entitlements) ? source.entitlements.map(normalizeEntitlement).filter(Boolean) as GrikEntitlement[] : [],
+        budget: normalizeBudget(source.budget),
+        syncStatus: source.syncStatus === 'degraded' ? 'degraded' : 'ready',
+        ...(error ? { error } : { error: undefined }),
+    };
+}
+
+export function normalizeDisplayText(value: unknown, fallback = ''): string {
+    if (value instanceof Error) {
+        return normalizeDisplayText(value.message, fallback);
+    }
+    if (typeof value === 'string') {
+        return value.trim() || fallback;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+        return String(value);
+    }
+    if (!value) {
+        return fallback;
+    }
+    if (typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        const nestedError = isRecord(record.error) ? record.error : null;
+        const candidates = [
+            nestedError?.message,
+            record.message,
+            typeof record.error === 'string' ? record.error : undefined,
+            nestedError?.code,
+            record.code,
+        ];
+        for (const candidate of candidates) {
+            const normalized = normalizeDisplayText(candidate);
+            if (normalized) return normalized;
+        }
+        try {
+            const serialized = JSON.stringify(value);
+            return serialized && serialized !== '{}' ? serialized : fallback;
+        } catch {
+            return fallback;
+        }
+    }
+    return fallback;
+}
+
+function normalizeAuthUser(user: unknown): GrikAuthUser | null {
+    if (!isRecord(user)) return null;
+    return {
+        ...user,
+        id: optionalText(user.id),
+        email: optionalText(user.email),
+        name: optionalText(user.name),
+        plan: optionalText(user.plan),
+    };
+}
+
+function normalizeCreditBalance(value: unknown): GrikCreditBalance | null {
+    if (!isRecord(value)) return null;
+    const balance = typeof value.balance === 'number'
+        ? value.balance
+        : Number(value.balance);
+    return {
+        product: normalizeDisplayText(value.product),
+        balance: Number.isFinite(balance) ? balance : 0,
+        updatedAt: optionalText(value.updatedAt),
+    };
+}
+
+function normalizeEntitlement(value: unknown): GrikEntitlement | null {
+    if (!isRecord(value)) return null;
+    return {
+        id: optionalText(value.id),
+        product: normalizeDisplayText(value.product),
+        plan: optionalText(value.plan),
+        status: optionalText(value.status),
+        currentPeriodEnd: optionalText(value.currentPeriodEnd) || optionalText(value.current_period_end),
+        current_period_end: optionalText(value.current_period_end),
+        cancelAtPeriodEnd: optionalBoolean(value.cancelAtPeriodEnd) ?? optionalBoolean(value.cancel_at_period_end),
+        cancel_at_period_end: optionalBoolean(value.cancel_at_period_end),
+        canceledAt: optionalText(value.canceledAt) || optionalText(value.canceled_at),
+        canceled_at: optionalText(value.canceled_at),
+        cancellationEffectiveAt: optionalText(value.cancellationEffectiveAt) || optionalText(value.cancellation_effective_at),
+        cancellation_effective_at: optionalText(value.cancellation_effective_at),
+    };
+}
+
+function normalizeBudget(value: unknown): GrikBudgetState | null {
+    const candidate = isRecord(value) && isRecord(value.budget) ? value.budget : value;
+    if (!isRecord(candidate)) return null;
+    return {
+        allowed: optionalBoolean(candidate.allowed),
+        product: optionalText(candidate.product),
+        plan: optionalText(candidate.plan),
+        hosted_ai: optionalBoolean(candidate.hosted_ai),
+        hostedAI: optionalBoolean(candidate.hostedAI),
+        balance: optionalNumber(candidate.balance),
+        monthly_credits: optionalNumber(candidate.monthly_credits),
+        monthlyCredits: optionalNumber(candidate.monthlyCredits),
+        window_used: optionalNumber(candidate.window_used),
+        windowUsed: optionalNumber(candidate.windowUsed),
+        window_limit: optionalNumber(candidate.window_limit),
+        windowLimit: optionalNumber(candidate.windowLimit),
+        window_remaining: optionalNumber(candidate.window_remaining),
+        windowRemaining: optionalNumber(candidate.windowRemaining),
+        task_used: optionalNumber(candidate.task_used),
+        taskUsed: optionalNumber(candidate.taskUsed),
+        task_limit: optionalNumber(candidate.task_limit),
+        taskLimit: optionalNumber(candidate.taskLimit),
+        task_remaining: optionalNumber(candidate.task_remaining),
+        taskRemaining: optionalNumber(candidate.taskRemaining),
+        premium_approval_required: optionalBoolean(candidate.premium_approval_required),
+        premiumApprovalRequired: optionalBoolean(candidate.premiumApprovalRequired),
+        upgrade_url: optionalText(candidate.upgrade_url),
+        upgradeUrl: optionalText(candidate.upgradeUrl),
+    };
+}
+
+function optionalText(value: unknown): string | undefined {
+    return normalizeDisplayText(value) || undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+    const number = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(number) ? number : undefined;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+    return typeof value === 'boolean' ? value : undefined;
+}
+
+function isFreePlan(plan: string): boolean {
+    const normalized = String(plan || '').toLowerCase().replace(/^ricochet[_-]?/i, '').replace(/[-\s]+/g, '_').trim();
+    return normalized === 'free' || normalized === 'byok_free';
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

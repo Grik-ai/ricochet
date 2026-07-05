@@ -45,8 +45,9 @@ export function usageSourceLabel(snapshot?: UsageSnapshot | null): string {
 }
 
 export function keySourceLabel(keySource?: string): string {
-    if (keySource === 'user') return 'User key';
-    if (keySource === 'server') return 'Server key';
+    if (keySource === 'user') return 'Key connected';
+    if (keySource === 'server') return 'Included';
+    if (keySource === 'hosted') return 'Grik Account';
     if (keySource === 'none') return 'No key';
     return keySource || 'Unknown key';
 }

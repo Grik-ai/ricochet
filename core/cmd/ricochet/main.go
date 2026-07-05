@@ -660,8 +660,9 @@ func runStdioMode(ctx context.Context, cwd string, pm *config.ProvidersManager) 
 			Payload: protocol.EncodeRPC(e),
 		})
 	}
-	startCloudBridgeClient(ctx, cwd, handler)
 	writer := &StdioWriter{}
+	handler.SetLiveModeEventWriter(writer)
+	startCloudBridgeClient(ctx, cwd, handler)
 
 	// Send ready message with enough diagnostics to catch stale extension binaries.
 	ready := version.Get()
@@ -833,6 +834,9 @@ func runServerMode(ctx context.Context, cwd, port string, isDaemon bool, pm *con
 			Payload: protocol.EncodeRPC(e),
 		})
 	}
+	broadcastWriter := &BroadcastWriter{hub: wsHub}
+	handler.SetLiveModeDaemon(isDaemon)
+	handler.SetLiveModeEventWriter(broadcastWriter)
 	startCloudBridgeClient(ctx, cwd, handler)
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {

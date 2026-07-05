@@ -308,12 +308,12 @@ func newConfigCommand(opts *cliOptions) *cobra.Command {
 }
 
 func newAuthCommand(ctx context.Context, opts *cliOptions) *cobra.Command {
-	cmd := &cobra.Command{Use: "auth", Short: "Manage Ricochet Cloud/Grik authentication"}
+	cmd := &cobra.Command{Use: "auth", Short: "Manage Grik Account authentication"}
 	cmd.AddCommand(newLoginCommand(ctx, opts))
 	cmd.AddCommand(newLogoutCommand(opts))
 	cmd.AddCommand(&cobra.Command{
 		Use:   "status",
-		Short: "Show Ricochet Cloud authentication status",
+		Short: "Show Grik Account authentication status",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return printAuthStatus(ctx, opts)
 		},
@@ -352,7 +352,7 @@ func newAuthCommand(ctx context.Context, opts *cliOptions) *cobra.Command {
 func newLoginCommand(ctx context.Context, opts *cliOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:   "login",
-		Short: "Sign in to Ricochet Cloud/Grik",
+		Short: "Sign in to Grik Account",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := config.NewStore()
 			if err != nil {
@@ -385,7 +385,7 @@ func newLoginCommand(ctx context.Context, opts *cliOptions) *cobra.Command {
 				writeJSON(os.Stdout, map[string]interface{}{"ok": true, "expiresAt": tokens.ExpiresAt.UnixMilli()})
 				return nil
 			}
-			fmt.Println("Signed in to Ricochet Cloud/Grik.")
+			fmt.Println("Signed in to Grik Account.")
 			return nil
 		},
 	}
@@ -394,7 +394,7 @@ func newLoginCommand(ctx context.Context, opts *cliOptions) *cobra.Command {
 func newLogoutCommand(opts *cliOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Sign out from Ricochet Cloud/Grik",
+		Short: "Sign out from Grik Account",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := config.NewStore()
 			if err != nil {
@@ -416,7 +416,7 @@ func newLogoutCommand(opts *cliOptions) *cobra.Command {
 func newAccountCommand(ctx context.Context, opts *cliOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "account",
-		Short: "Show Ricochet Cloud account, billing, and subscription models",
+		Short: "Show Grik Account billing and hosted Ricochet models",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return printAuthStatus(ctx, opts)
 		},

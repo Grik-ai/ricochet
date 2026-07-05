@@ -21,6 +21,7 @@ import {
     formatGrikDate,
     getPrimaryGrikEntitlement,
     getRicochetCreditBalance,
+    normalizeDisplayText,
     type GrikAccountController,
     type GrikAccountTone,
 } from '../../hooks/useGrikAccount';
@@ -98,12 +99,13 @@ export function AccountView({ onBack, account }: AccountViewProps) {
     const monthlyCredits = budgetNumber(billingState.budget, 'monthly_credits', 'monthlyCredits');
     const balance = budgetNumber(billingState.budget, 'balance', 'balance');
     const premiumApprovalRequired = budgetBoolean(billingState.budget, 'premium_approval_required', 'premiumApprovalRequired');
+    const syncIssueBody = normalizeDisplayText(authState.error) || normalizeDisplayText(billingState.error) || 'Grik account connected, billing details need refresh.';
     const statusValue = hasSyncIssue
         ? 'Needs refresh'
         : (summary.status || primaryEntitlement?.status || (summary.hostedAccess ? 'active' : 'free'));
 
     const subscriptionRows: DetailRow[] = [
-        { label: 'Plan', value: summary.plan || (summary.label === 'Sync issue' ? 'Unavailable' : summary.label) },
+        { label: 'Plan', value: summary.plan || summary.label || 'BYOK Free' },
         { label: 'Status', value: statusValue },
         primaryEntitlementPeriodEnd ? { label: primaryEntitlementCanceling ? 'Ends' : 'Renews / ends', value: formatGrikDate(primaryEntitlementPeriodEnd) } : null,
         monthlyCredits !== undefined ? { label: 'Monthly credits', value: formatGrikCredits(monthlyCredits) } : null,
@@ -210,7 +212,7 @@ export function AccountView({ onBack, account }: AccountViewProps) {
 
                             {hasSyncIssue && (
                                 <SyncIssueNotice
-                                    body={authState.error || billingState.error || 'Grik account connected, billing details need refresh.'}
+                                    body={syncIssueBody}
                                     isBusy={isBusy}
                                     onRetry={refresh}
                                     onOpenAccountSettings={() => openBilling({ target: 'dashboard' })}

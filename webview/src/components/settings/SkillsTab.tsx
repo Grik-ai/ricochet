@@ -57,7 +57,7 @@ export interface SkillManifest {
 }
 
 type StatusFilter = 'all' | 'enabled' | 'disabled' | 'problems';
-type SourceFilter = 'all' | 'bundled' | 'project' | 'legacy' | 'root_rule';
+type SourceFilter = 'all' | 'bundled' | 'project' | 'global' | 'legacy' | 'root_rule';
 type SortMode = 'source' | 'name' | 'status';
 
 interface SkillGroup {
@@ -70,6 +70,7 @@ interface SkillGroup {
 interface SkillsTabProps {
     customInstructions: string;
     setCustomInstructions: (val: string) => void;
+    onOpenMarketplace?: () => void;
 }
 
 interface SkillFilters {
@@ -93,6 +94,7 @@ export function skillScope(skill: SkillManifest): string {
     if (skill.type === 'root_rule') return 'root_rule';
     if (skill.source === 'bundled') return 'bundled';
     if (skill.source === 'legacy') return 'legacy';
+    if (skill.source === 'global') return 'global';
     if (skill.source === 'project') return 'project';
     return skill.source || skill.type || 'skill';
 }
@@ -103,6 +105,8 @@ export function skillSourceLabel(skill: SkillManifest): string {
             return 'Bundled skill';
         case 'project':
             return 'Project skill';
+        case 'global':
+            return 'Global skill';
         case 'legacy':
             return 'Legacy skill';
         case 'root_rule':
@@ -128,6 +132,7 @@ export function buildSkillSummary(skills: SkillManifest[]) {
         disabled: skills.filter((skill) => !skill.enabled || skill.visibility === 'off').length,
         problems: skills.filter(skillHasProblems).length,
         project: skills.filter((skill) => skillScope(skill) === 'project').length,
+        global: skills.filter((skill) => skillScope(skill) === 'global').length,
     };
 }
 
@@ -199,23 +204,27 @@ function sourceOrder(source: string): number {
     switch (source) {
         case 'project':
             return 0;
-        case 'bundled':
+        case 'global':
             return 1;
-        case 'legacy':
+        case 'bundled':
             return 2;
-        case 'root_rule':
+        case 'legacy':
             return 3;
-        default:
+        case 'root_rule':
             return 4;
+        default:
+            return 5;
     }
 }
 
-const SOURCE_GROUP_ORDER = ['project', 'bundled', 'legacy', 'root_rule'];
+const SOURCE_GROUP_ORDER = ['project', 'global', 'bundled', 'legacy', 'root_rule'];
 
 function sourceGroupLabel(source: string): string {
     switch (source) {
         case 'project':
             return 'Project';
+        case 'global':
+            return 'Global';
         case 'bundled':
             return 'Bundled';
         case 'legacy':
@@ -231,6 +240,8 @@ function sourceGroupDescription(source: string): string {
     switch (source) {
         case 'project':
             return '.ricochet/skills in this workspace';
+        case 'global':
+            return '~/.ricochet/skills available across workspaces';
         case 'bundled':
             return 'Built-in Ricochet capabilities';
         case 'legacy':
@@ -242,7 +253,7 @@ function sourceGroupDescription(source: string): string {
     }
 }
 
-export function SkillsTab({ customInstructions, setCustomInstructions }: SkillsTabProps) {
+export function SkillsTab({ customInstructions, setCustomInstructions, onOpenMarketplace }: SkillsTabProps) {
     const { postMessage } = useVSCodeApi();
     const [skills, setSkills] = useState<SkillManifest[]>([]);
     const [loading, setLoading] = useState(true);
@@ -437,6 +448,15 @@ export function SkillsTab({ customInstructions, setCustomInstructions }: SkillsT
                     <div className="flex flex-wrap items-center gap-2">
                         <button
                             type="button"
+                            onClick={onOpenMarketplace}
+                            className="h-8 px-2.5 rounded-md bg-muted/10 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/30 inline-flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                            title="Open curated marketplace"
+                        >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            Marketplace
+                        </button>
+                        <button
+                            type="button"
                             onClick={rescanSkills}
                             disabled={busyAction === 'rescan'}
                             className="h-8 px-2.5 rounded-md bg-muted/10 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/30 disabled:opacity-50 inline-flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
@@ -462,6 +482,7 @@ export function SkillsTab({ customInstructions, setCustomInstructions }: SkillsT
                     <SummaryMetric label="disabled" value={summary.disabled} />
                     <SummaryMetric label="problems" value={summary.problems} tone={summary.problems > 0 ? 'warning' : 'default'} />
                     <SummaryMetric label="project" value={summary.project} />
+                    <SummaryMetric label="global" value={summary.global} />
                 </div>
 
                 {(error || notice) && (
@@ -523,6 +544,7 @@ export function SkillsTab({ customInstructions, setCustomInstructions }: SkillsT
                         >
                             <option value="all">All sources</option>
                             <option value="project">Project</option>
+                            <option value="global">Global</option>
                             <option value="bundled">Bundled</option>
                             <option value="legacy">Legacy</option>
                             <option value="root_rule">Root rules</option>

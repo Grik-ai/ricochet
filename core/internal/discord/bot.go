@@ -20,7 +20,7 @@ import (
 )
 
 const discordBotAlreadyRunningMessage = "Discord bot is already running in another Ricochet window"
-const discordGatewayCloudOwnerMessage = "Discord gateway is configured for Ricochet Cloud"
+const discordGatewayCloudOwnerMessage = "Discord gateway is configured for Hosted Ricochet"
 const discordGatewayDisabledMessage = "Discord gateway is disabled by RICOCHET_DISCORD_GATEWAY_MODE"
 
 // Config controls Discord Live Mode behavior.

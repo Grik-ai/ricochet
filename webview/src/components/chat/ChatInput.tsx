@@ -1,6 +1,6 @@
-import { useRef, useEffect, KeyboardEvent, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type ReactNode } from 'react';
+import { useRef, useEffect, KeyboardEvent, useState, useCallback, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Send, Mic, Square, ChevronDown, FileCode, StopCircle, X, Plus, Bot, Hand, ShieldCheck, ShieldAlert, CheckCircle2, Play, Info, Gauge, Paperclip, Image as ImageIcon, Settings, type LucideIcon } from 'lucide-react';
+import { Send, Mic, Square, ChevronDown, FileCode, StopCircle, X, Plus, Bot, Hand, ShieldCheck, ShieldAlert, CheckCircle2, Play, Info, RotateCcw, Gauge, Paperclip, Image as ImageIcon, Settings, FileText, type LucideIcon } from 'lucide-react';
 import { AffectedFilesList } from './AffectedFilesList';
 import { useAudioRecorder } from '../../hooks/useAudioRecorder';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
@@ -18,6 +18,7 @@ import {
     findModelProvider,
     modelAccessBadgeClass,
     selectBestModel,
+    settingsTabForModelAccess,
     type ModelAccessProvider,
     type SelectedModelLike,
 } from './modelAccess';
@@ -46,6 +47,7 @@ interface ChatInputProps {
     fileResults?: FileSearchResult[];
     searchFiles?: (query: string) => void;
     liveStatus?: EtherStatus;
+    isLiveModeLoading?: boolean;
     onToggleLiveMode?: () => void;
     currentModel: SelectedModel;
     onModelChange: (model: SelectedModel) => void;
@@ -68,24 +70,122 @@ export interface EtherAdapterDisplayState {
     key: EtherAdapterKey;
     configured: boolean;
     active: boolean;
+    error?: string;
 }
 
-export function etherAdapterStatusLabel(adapter: EtherAdapterDisplayState): 'connected' | 'Gateway enabled' | 'Not configured' {
+export function etherAdapterStatusLabel(adapter: EtherAdapterDisplayState): 'connected' | 'configured' | 'not configured' | 'error' {
+    if (adapter.error) return 'error';
     if (adapter.active) return 'connected';
-    if (adapter.configured) return 'Gateway enabled';
-    return 'Not configured';
+    if (adapter.configured) return 'configured';
+    return 'not configured';
 }
 
-export function etherAdapterVisibleStatusLabel(adapter: EtherAdapterDisplayState): '' | 'Active' {
-    return adapter.active ? 'Active' : '';
+export function etherAdapterDisplayName(key: EtherAdapterKey, label?: string): string {
+    if (key === 'telegram') return 'Telegram';
+    if (key === 'discord') return 'Discord';
+    return (label || key).replace(/\s*gateway\s*/ig, ' ').trim() || key;
 }
 
-export function etherAdapterButtonClass(adapter: EtherAdapterDisplayState, selected: boolean): string {
-    const base = 'relative flex h-8 min-w-[92px] items-center justify-start gap-2 rounded-md px-2 text-left transition-colors';
+export function etherAdapterButtonClass(adapter: EtherAdapterDisplayState): string {
+    const base = 'relative flex h-8 min-w-[82px] items-center justify-start gap-1.5 rounded-md px-2 text-left transition-colors';
     if (!adapter.configured) {
         return `${base} bg-transparent text-vscode-fg/32 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg/62`;
     }
-    return `${base} bg-vscode-editor-background text-vscode-fg/70 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg ${selected ? 'ring-1 ring-vscode-button-bg/60' : ''}`;
+    if (adapter.error) {
+        return `${base} bg-transparent text-amber-200/72 hover:bg-vscode-list-hoverBackground hover:text-amber-100`;
+    }
+    return `${base} bg-transparent text-vscode-fg/70 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg`;
+}
+
+export interface EtherMenuRect {
+    top: number;
+    left?: number;
+    right: number;
+    bottom: number;
+}
+
+export interface EtherViewportSize {
+    width: number;
+    height: number;
+}
+
+export interface ToolbarPopoverOptions {
+    width: number;
+    height: number;
+    minWidth?: number;
+    align?: 'start' | 'end';
+    placement?: 'auto' | 'below';
+    gap?: number;
+    margin?: number;
+}
+
+export function computeToolbarPopoverPosition(
+    anchorRect: EtherMenuRect,
+    viewport: EtherViewportSize,
+    options: ToolbarPopoverOptions
+): CSSProperties {
+    const gap = options.gap ?? 6;
+    const margin = options.margin ?? 12;
+    const placement = options.placement ?? 'auto';
+    const minWidth = options.minWidth ?? Math.min(220, options.width);
+    const maxWidth = Math.max(0, viewport.width - margin * 2);
+    const cappedWidth = maxWidth > 0 ? Math.min(options.width, maxWidth) : options.width;
+    const width = maxWidth > 0 ? Math.max(Math.min(minWidth, maxWidth), cappedWidth) : options.width;
+    const maxLeft = Math.max(margin, viewport.width - width - margin);
+    const targetLeft = options.align === 'end'
+        ? anchorRect.right - width
+        : anchorRect.left ?? anchorRect.right - width;
+    const left = Math.max(margin, Math.min(targetLeft, maxLeft));
+    const roomAbove = anchorRect.top - margin;
+    const roomBelow = viewport.height - anchorRect.bottom - margin;
+    const openBelow = placement === 'below' || roomBelow >= options.height || roomBelow >= roomAbove;
+    const top = openBelow
+        ? placement === 'below'
+            ? Math.max(margin, anchorRect.bottom + gap)
+            : Math.min(anchorRect.bottom + gap, Math.max(margin, viewport.height - options.height - margin))
+        : Math.max(margin, anchorRect.top - options.height - gap);
+    const maxHeight = openBelow
+        ? Math.max(placement === 'below' ? 1 : 48, viewport.height - top - margin)
+        : Math.max(48, anchorRect.top - gap - margin);
+
+    return {
+        position: 'fixed',
+        left,
+        top,
+        width,
+        maxHeight,
+        maxWidth: `calc(100vw - ${margin * 2}px)`,
+        transformOrigin: openBelow ? 'top right' : 'bottom right',
+    };
+}
+
+export function computeEtherMenuPosition(
+    anchorRect: EtherMenuRect,
+    viewport: EtherViewportSize,
+    menuSize = { width: 226, height: 44 }
+): CSSProperties {
+    return computeToolbarPopoverPosition(anchorRect, viewport, {
+        width: menuSize.width,
+        height: menuSize.height,
+        minWidth: Math.min(212, menuSize.width),
+        align: 'end',
+        placement: 'below',
+        gap: 6,
+    });
+}
+
+export function etherAdapterStatusDotClass(adapter: EtherAdapterDisplayState): string {
+    if (adapter.error) return 'bg-amber-300 shadow-[0_0_8px_rgba(252,211,77,0.35)]';
+    if (adapter.active) return 'bg-emerald-300 shadow-[0_0_8px_rgba(110,231,183,0.32)]';
+    if (adapter.configured) return 'bg-vscode-fg/38';
+    return 'bg-transparent ring-1 ring-vscode-fg/30';
+}
+
+export function etherMainStatusDotClass(isLiveMode: boolean, hasConfiguredAdapter: boolean, hasChannelError: boolean): string {
+    if (hasChannelError) return 'bg-amber-300 shadow-[0_0_8px_rgba(252,211,77,0.35)]';
+    if (isLiveMode) return 'bg-emerald-300 shadow-[0_0_8px_rgba(110,231,183,0.35)]';
+    if (hasConfiguredAdapter) return 'bg-vscode-fg/38';
+    return 'bg-transparent ring-1 ring-vscode-fg/35';
 }
 
 export const MAX_CHAT_ATTACHMENTS = 8;
@@ -111,11 +211,96 @@ export function attachmentSizeError(size: number): string | null {
 }
 
 const IMAGE_EXTENSION_PATTERN = /\.(avif|bmp|gif|heic|heif|jpe?g|png|svg|webp)$/i;
+const PDF_EXTENSION_PATTERN = /\.pdf$/i;
+const TEXT_LIKE_MIME_PATTERN = /^(text\/|application\/(json|xml|javascript|x-javascript|typescript|x-typescript|x-sh|graphql|ld\+json|toml|yaml|x-yaml)|image\/svg\+xml\b)/i;
 
 export function isImageContextFile(file: Pick<ContextFilePayload, 'mime' | 'name' | 'path'>): boolean {
     const mime = file.mime || '';
     if (mime.toLowerCase().startsWith('image/')) return true;
     return IMAGE_EXTENSION_PATTERN.test(file.name || file.path || '');
+}
+
+export function isPdfContextFile(file: Pick<ContextFilePayload, 'mime' | 'name' | 'path'>): boolean {
+    const mime = (file.mime || '').split(';')[0].trim().toLowerCase();
+    return mime === 'application/pdf' || PDF_EXTENSION_PATTERN.test(file.name || file.path || '');
+}
+
+export function isTextLikeContextFile(file: Pick<ContextFilePayload, 'mime' | 'name' | 'path' | 'source'>): boolean {
+    const mime = (file.mime || '').split(';')[0].trim().toLowerCase();
+    if (mime && TEXT_LIKE_MIME_PATTERN.test(mime)) return true;
+    return /\.(csv|json|jsonl|md|markdown|txt|log|ts|tsx|js|jsx|mjs|cjs|css|scss|html|xml|yaml|yml|toml|go|py|rs|java|kt|swift|c|cc|cpp|h|hpp|sh|bash|zsh|sql)$/i.test(file.name || file.path || '');
+}
+
+export type AttachmentIngestionStatus = 'staged' | 'sent' | 'included_text' | 'needs_pdf_parse' | 'needs_ocr' | 'unsupported_binary';
+
+export function attachmentIngestionStatus(file: Pick<ContextFilePayload, 'mime' | 'name' | 'path' | 'source' | 'status'>): AttachmentIngestionStatus {
+    if (file.status === 'staging') return 'staged';
+    if (file.status === 'error') return 'unsupported_binary';
+    if (isPdfContextFile(file)) return 'needs_pdf_parse';
+    if (isImageContextFile(file)) return 'needs_ocr';
+    if (isTextLikeContextFile(file)) return 'included_text';
+    return file.source === 'attachment' ? 'unsupported_binary' : 'sent';
+}
+
+export function attachmentStatusBadgeLabel(file: Pick<ContextFilePayload, 'mime' | 'name' | 'path' | 'source' | 'status'>): string {
+    switch (attachmentIngestionStatus(file)) {
+        case 'staged':
+            return 'Saving';
+        case 'included_text':
+            return 'Text';
+        case 'needs_pdf_parse':
+            return 'PDF';
+        case 'needs_ocr':
+            return 'OCR';
+        case 'unsupported_binary':
+            return 'Saved';
+        case 'sent':
+        default:
+            return 'Sent';
+    }
+}
+
+export function attachmentStatusTitle(file: Pick<ContextFilePayload, 'mime' | 'name' | 'path' | 'source' | 'status'>): string {
+    switch (attachmentIngestionStatus(file)) {
+        case 'staged':
+            return 'File is being saved before sending.';
+        case 'included_text':
+            return 'Readable text will be included in model context.';
+        case 'needs_pdf_parse':
+            return 'PDF will be parsed locally when pdftotext is available.';
+        case 'needs_ocr':
+            return 'Image text requires local OCR; the image is not uploaded to the provider.';
+        case 'unsupported_binary':
+            return 'File is attached and listed, but binary content is not readable as text.';
+        case 'sent':
+        default:
+            return 'File will be sent as an attachment reference.';
+    }
+}
+
+export function attachmentFileKind(file: Pick<ContextFilePayload, 'mime' | 'name' | 'path' | 'source'>): 'image' | 'pdf' | 'csv' | 'text' | 'file' {
+    if (isImageContextFile(file)) return 'image';
+    if (isPdfContextFile(file)) return 'pdf';
+    const name = file.name || file.path || '';
+    const mime = (file.mime || '').split(';')[0].trim().toLowerCase();
+    if (mime === 'text/csv' || /\.csv$/i.test(name)) return 'csv';
+    if (isTextLikeContextFile(file)) return 'text';
+    return 'file';
+}
+
+export function attachmentContentWarning(file: Pick<ContextFilePayload, 'mime' | 'name' | 'path' | 'source'>): string | null {
+    const mime = (file.mime || '').split(';')[0].trim().toLowerCase();
+    const path = file.name || file.path || '';
+    if (mime === 'application/pdf' || PDF_EXTENSION_PATTERN.test(path)) {
+        return 'PDF content is not readable yet';
+    }
+    if (isImageContextFile(file)) {
+        return 'Image content is not readable yet';
+    }
+    if (file.source === 'attachment' && mime && !TEXT_LIKE_MIME_PATTERN.test(mime)) {
+        return 'Binary content is not readable yet';
+    }
+    return null;
 }
 
 export function formatAttachmentSize(size?: number): string {
@@ -460,7 +645,7 @@ function UsageBadge({
                         <div key={`${model.provider}-${model.model}-${model.keySource || 'none'}`} className="flex items-center justify-between gap-2 rounded border border-vscode-border bg-vscode-editor-background px-2 py-1.5">
                             <div className="min-w-0">
                                 <div className="truncate text-[11px] text-vscode-fg/80">{model.model}</div>
-                                <div className="text-[9px] text-vscode-fg/40">{model.provider} · {model.keySource === 'user' ? 'Your key' : model.keySource === 'server' ? 'Server key' : 'No key'} · {usageSourceLabel(model.source)}</div>
+                                <div className="text-[9px] text-vscode-fg/40">{model.provider} · {model.keySource === 'user' ? 'Key connected' : model.keySource === 'server' ? 'Included' : model.keySource === 'hosted' ? 'Grik Account' : 'No key'} · {usageSourceLabel(model.source)}</div>
                             </div>
                             <div className="shrink-0 text-right text-[10px] text-vscode-fg/45">
                                 <div>{formatTokens(model.inputTokens)} / {formatTokens(model.outputTokens)}</div>
@@ -532,6 +717,8 @@ export interface AutoApprovalSettings {
     use_browser?: boolean;
     use_mcp?: boolean;
     enable_notifications?: boolean;
+    max_requests?: number;
+    max_cost_usd?: number;
 }
 
 export const APPROVAL_PRESETS: Record<ApprovalMode, AutoApprovalSettings> = {
@@ -594,11 +781,19 @@ export function approvalModeFromSettings(settings?: AutoApprovalSettings): Appro
         settings.delete_files ||
         settings.delete_files_external ||
         settings.read_files_external ||
-        settings.use_browser
+        settings.use_browser ||
+        settings.use_mcp
     ) {
         return 'full';
     }
     return 'auto';
+}
+
+export function buildApprovalPresetPayload(mode: ApprovalMode, current?: AutoApprovalSettings): AutoApprovalSettings {
+    return {
+        ...(current || {}),
+        ...APPROVAL_PRESETS[mode],
+    };
 }
 
 const DEFAULT_COMMANDS = [
@@ -639,27 +834,6 @@ function normalizeChoiceOption(choice: string, index: number, metadata?: ChoiceO
     };
 }
 
-export function selectEtherBadgeAdapter<T extends EtherAdapterDisplayState>(
-    adapters: T[],
-    preferredKey?: EtherAdapterKey | null,
-    lastSource?: string | null
-): T | null {
-    const activeAdapters = adapters.filter(adapter => adapter.active);
-    if (activeAdapters.length === 0) return null;
-
-    if (preferredKey) {
-        const preferred = activeAdapters.find(adapter => adapter.key === preferredKey);
-        if (preferred) return preferred;
-    }
-
-    if (lastSource === 'telegram' || lastSource === 'discord') {
-        const lastUsed = activeAdapters.find(adapter => adapter.key === lastSource);
-        if (lastUsed) return lastUsed;
-    }
-
-    return activeAdapters[0] || null;
-}
-
 export function ChatInput(props: ChatInputProps) {
     const {
         value,
@@ -673,6 +847,7 @@ export function ChatInput(props: ChatInputProps) {
         fileResults = [],
         searchFiles,
         liveStatus,
+        isLiveModeLoading = false,
         onToggleLiveMode,
         currentMode,
         onModeChange,
@@ -703,17 +878,35 @@ export function ChatInput(props: ChatInputProps) {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const etherMenuRef = useRef<HTMLDivElement>(null);
+    const etherButtonRef = useRef<HTMLButtonElement>(null);
+    const etherPopoverRef = useRef<HTMLDivElement>(null);
+    const etherCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const contextButtonRef = useRef<HTMLButtonElement>(null);
+    const contextPopoverRef = useRef<HTMLDivElement>(null);
+    const approvalButtonRef = useRef<HTMLButtonElement>(null);
+    const approvalPopoverRef = useRef<HTMLDivElement>(null);
     const rootRef = useRef<HTMLDivElement>(null);
     const modelButtonRef = useRef<HTMLButtonElement>(null);
-    const { isRecording, toggleRecording } = useAudioRecorder();
+    const {
+        isRecording,
+        isRequesting,
+        isTranscribing,
+        audioError,
+        lastTranscript,
+        resetTranscript,
+        toggleRecording
+    } = useAudioRecorder();
 
     const [showModelMenu, setShowModelMenu] = useState(false);
     const [showContextMenu, setShowContextMenu] = useState(false);
     const [showUsageMenu, setShowUsageMenu] = useState(false);
     const [showEtherMenu, setShowEtherMenu] = useState(false);
-    const [preferredEtherAdapter, setPreferredEtherAdapter] = useState<EtherAdapterKey | null>(null);
+    const [etherMenuStyle, setEtherMenuStyle] = useState<CSSProperties>({});
+    const [contextMenuStyle, setContextMenuStyle] = useState<CSSProperties>({});
+    const [approvalMenuStyle, setApprovalMenuStyle] = useState<CSSProperties>({});
     const [showApprovalMenu, setShowApprovalMenu] = useState(false);
     const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask');
+    const [autoApprovalSettings, setAutoApprovalSettings] = useState<AutoApprovalSettings>({});
     const [currentModel, setCurrentModel] = useState(propCurrentModel ?? DEFAULT_MODEL);
     const [modelProviders, setModelProviders] = useState<ModelAccessProvider[]>([]);
     const [agentDraftEnabled, setAgentDraftEnabled] = useState(false);
@@ -727,9 +920,45 @@ export function ChatInput(props: ChatInputProps) {
     const [availableCommands] = useState(DEFAULT_COMMANDS);
     const { postMessage, onMessage } = useVSCodeApi();
 
+    const clearEtherCloseTimer = useCallback(() => {
+        if (!etherCloseTimerRef.current) return;
+        clearTimeout(etherCloseTimerRef.current);
+        etherCloseTimerRef.current = null;
+    }, []);
+
+    const openEtherDetails = useCallback(() => {
+        clearEtherCloseTimer();
+        setShowEtherMenu(true);
+        setShowContextMenu(false);
+        setShowApprovalMenu(false);
+        setShowModelMenu(false);
+        setShowUsageMenu(false);
+    }, [clearEtherCloseTimer]);
+
+    const scheduleEtherDetailsClose = useCallback(() => {
+        clearEtherCloseTimer();
+        etherCloseTimerRef.current = setTimeout(() => {
+            setShowEtherMenu(false);
+            etherCloseTimerRef.current = null;
+        }, 140);
+    }, [clearEtherCloseTimer]);
+
+    useEffect(() => {
+        return () => clearEtherCloseTimer();
+    }, [clearEtherCloseTimer]);
+
     useEffect(() => {
         contextFilesRef.current = contextFiles;
     }, [contextFiles]);
+
+    useEffect(() => {
+        const transcript = lastTranscript?.text.trim();
+        if (!transcript) return;
+        const separator = value && !/\s$/.test(value) ? ' ' : '';
+        onChange(`${value}${separator}${transcript}`);
+        resetTranscript();
+        textareaRef.current?.focus();
+    }, [lastTranscript, onChange, resetTranscript, value]);
 
     useEffect(() => {
         return () => {
@@ -737,12 +966,80 @@ export function ChatInput(props: ChatInputProps) {
         };
     }, []);
 
+    const updateToolbarPopoverPositions = useCallback(() => {
+        if (typeof window === 'undefined') return;
+        const viewport = {
+            width: window.innerWidth || 0,
+            height: window.innerHeight || 0,
+        };
+        const contextRect = contextButtonRef.current?.getBoundingClientRect();
+        if (showContextMenu && contextRect) {
+            const size = contextPopoverRef.current?.getBoundingClientRect();
+            setContextMenuStyle(computeToolbarPopoverPosition(contextRect, viewport, {
+                width: 256,
+                height: size?.height || 222,
+                minWidth: 240,
+                align: 'start',
+            }));
+        }
+        const approvalRect = approvalButtonRef.current?.getBoundingClientRect();
+        if (showApprovalMenu && approvalRect) {
+            const size = approvalPopoverRef.current?.getBoundingClientRect();
+            setApprovalMenuStyle(computeToolbarPopoverPosition(approvalRect, viewport, {
+                width: 288,
+                height: size?.height || 226,
+                minWidth: 260,
+                align: 'start',
+            }));
+        }
+        const etherRect = etherButtonRef.current?.getBoundingClientRect();
+        if (showEtherMenu && etherRect) {
+            const size = etherPopoverRef.current?.getBoundingClientRect();
+            setEtherMenuStyle(computeEtherMenuPosition(etherRect, viewport, {
+                width: 226,
+                height: size?.height || 44,
+            }));
+        }
+    }, [showApprovalMenu, showContextMenu, showEtherMenu]);
+
+    useEffect(() => {
+        if ((!showContextMenu && !showApprovalMenu && !showEtherMenu) || typeof window === 'undefined') return;
+
+        updateToolbarPopoverPositions();
+        window.addEventListener('resize', updateToolbarPopoverPositions);
+        window.addEventListener('scroll', updateToolbarPopoverPositions, true);
+        return () => {
+            window.removeEventListener('resize', updateToolbarPopoverPositions);
+            window.removeEventListener('scroll', updateToolbarPopoverPositions, true);
+        };
+    }, [showApprovalMenu, showContextMenu, showEtherMenu, updateToolbarPopoverPositions]);
+
+    useEffect(() => {
+        if (!showContextMenu && !showApprovalMenu) return;
+
+        const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setShowContextMenu(false);
+                setShowApprovalMenu(false);
+            }
+        };
+
+        document.addEventListener('keydown', handleKeyDown);
+        return () => {
+            document.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [showApprovalMenu, showContextMenu]);
+
     useEffect(() => {
         if (!showEtherMenu) return;
 
         const handlePointerDown = (event: globalThis.MouseEvent) => {
             const target = event.target as Node | null;
-            if (target && etherMenuRef.current?.contains(target)) return;
+            if (target && (
+                etherMenuRef.current?.contains(target) ||
+                etherButtonRef.current?.contains(target) ||
+                etherPopoverRef.current?.contains(target)
+            )) return;
             setShowEtherMenu(false);
         };
         const handleKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -794,6 +1091,7 @@ export function ChatInput(props: ChatInputProps) {
                     onModelChange(nextModel);
                     postMessage({ type: 'get_models' });
                 }
+                setAutoApprovalSettings(settings?.auto_approval || {});
                 setApprovalMode(approvalModeFromSettings(settings?.auto_approval));
             }
             if (msg.type === 'models') {
@@ -1110,7 +1408,7 @@ export function ChatInput(props: ChatInputProps) {
             return;
         }
         if (selectedModelAccess.action === 'settings') {
-            onOpenSettings?.('models');
+            onOpenSettings?.(settingsTabForModelAccess(selectedModelAccess));
         }
     };
 
@@ -1149,7 +1447,7 @@ export function ChatInput(props: ChatInputProps) {
 
     const handleApprovalModeChange = (mode: ApprovalMode) => {
         setShowApprovalMenu(false);
-        postMessage({ type: 'auto_approve_settings', payload: APPROVAL_PRESETS[mode] });
+        postMessage({ type: 'auto_approve_settings', payload: buildApprovalPresetPayload(mode, autoApprovalSettings) });
     };
 
     const selectedApproval = APPROVAL_OPTIONS.find(option => option.id === approvalMode) ?? APPROVAL_OPTIONS[0];
@@ -1175,50 +1473,219 @@ export function ChatInput(props: ChatInputProps) {
     const etherAdapters = [
         {
             key: 'telegram' as const,
-            label: telegramStatus?.label || 'Telegram',
-            short: 'TG',
+            label: etherAdapterDisplayName('telegram', telegramStatus?.label),
             Icon: TelegramIcon,
             brandClass: 'text-sky-400',
             configured: Boolean(telegramStatus?.configured || connectedPlatforms.has('telegram')),
             active: Boolean(telegramStatus?.active || (isLiveMode && connectedPlatforms.has('telegram'))),
+            error: telegramStatus?.error,
         },
         {
             key: 'discord' as const,
-            label: discordStatus?.label || 'Discord',
-            short: 'DC',
+            label: etherAdapterDisplayName('discord', discordStatus?.label),
             Icon: DiscordIcon,
             brandClass: 'text-indigo-300',
             configured: Boolean(discordStatus?.configured || connectedPlatforms.has('discord')),
             active: Boolean(discordStatus?.active || (isLiveMode && connectedPlatforms.has('discord'))),
+            error: discordStatus?.error,
         },
     ];
-    const activeEtherBadgeAdapter = selectEtherBadgeAdapter(etherAdapters, preferredEtherAdapter, liveStatus?.lastSource || null);
     const hasConfiguredEtherAdapter = etherAdapters.some(adapter => adapter.configured);
+    const hasEtherChannelError = etherAdapters.some(adapter => Boolean(adapter.error));
+    const audioErrorMessage = audioError?.message || '';
+    const audioErrorOpensSettings = audioError?.phase === 'setup' || Boolean(audioErrorMessage && /whisper|voice input requires|settings/i.test(audioErrorMessage));
+    const audioErrorOpensMicrophonePermissions = audioError?.phase === 'permission';
+    const showMicRetry = Boolean(audioError && audioError.retryable === true && audioError.phase === 'transcription');
+    const micStatusTitle = isRecording
+        ? 'Recording. Click to stop.'
+        : isRequesting
+            ? 'Waiting for microphone permission.'
+            : isTranscribing
+                ? 'Transcribing voice input.'
+                : audioErrorMessage
+                    ? audioErrorOpensSettings
+                        ? `${audioErrorMessage} Open Integrations to configure voice input.`
+                        : audioErrorOpensMicrophonePermissions
+                            ? `${audioErrorMessage} Open microphone permission settings.`
+                        : `${audioErrorMessage} Click the microphone to try again.`
+                    : 'Record voice input';
+    const micErrorTitle = audioErrorMessage
+        ? `${audioErrorMessage}${audioErrorOpensSettings ? ' Open Integrations to configure voice input.' : audioErrorOpensMicrophonePermissions ? ' Open microphone permission settings.' : showMicRetry ? ' Click to retry recording.' : ''}`
+        : 'Retry voice input';
+    const micButtonAriaLabel = isRecording
+        ? 'Recording. Click to stop.'
+        : isRequesting
+            ? 'Waiting for microphone permission'
+            : isTranscribing
+                ? 'Transcribing voice input'
+            : 'Record voice input';
     const showRemoteStartChip = hasConfiguredEtherAdapter && liveStatus?.allowRemoteSessionStart === false;
+    const handleEtherToggleClick = () => {
+        setShowEtherMenu(false);
+        setShowContextMenu(false);
+        setShowApprovalMenu(false);
+        setShowModelMenu(false);
+        setShowUsageMenu(false);
+        if (!hasConfiguredEtherAdapter) {
+            onOpenSettings?.('integrations');
+            return;
+        }
+        if (!isLiveModeLoading) {
+            onToggleLiveMode?.();
+        }
+    };
     const handleEtherAdapterClick = (adapter: typeof etherAdapters[number]) => {
         if (!adapter.configured) {
             setShowEtherMenu(false);
             onOpenSettings?.('integrations');
             return;
         }
-        setPreferredEtherAdapter(adapter.key);
-        if (!isLiveMode) {
-            onToggleLiveMode?.();
+        if (adapter.error) {
+            onOpenSettings?.('integrations');
+            setShowEtherMenu(false);
         }
-        setShowEtherMenu(false);
     };
-    useEffect(() => {
-        if (!preferredEtherAdapter) return;
-        const preferred = etherAdapters.find(adapter => adapter.key === preferredEtherAdapter);
-        if (!preferred?.configured) {
-            setPreferredEtherAdapter(null);
-        }
-    }, [
-        preferredEtherAdapter,
-        connectedVia,
-        telegramStatus?.configured,
-        discordStatus?.configured
-    ]);
+    const etherMenu = showEtherMenu ? (
+        <div
+            ref={etherPopoverRef}
+            className="fixed z-[2147483647] flex w-max items-center gap-1 overflow-y-auto rounded-md border border-vscode-border bg-vscode-input-bg p-1 shadow-2xl animate-in fade-in slide-in-from-bottom-2"
+            style={etherMenuStyle}
+            role="dialog"
+            aria-label="Ether channels"
+            onMouseEnter={openEtherDetails}
+            onMouseLeave={scheduleEtherDetailsClose}
+        >
+            {etherAdapters.map(adapter => {
+                const Icon = adapter.Icon;
+                const statusLabel = etherAdapterStatusLabel(adapter);
+                const adapterTitle = adapter.configured
+                    ? `${adapter.label}: ${adapter.error || statusLabel}. Telegram and Discord can be active at the same time.`
+                    : `${adapter.label}: not configured. Open Integrations to receive sent messages.`;
+                return (
+                    <button
+                        key={adapter.key}
+                        type="button"
+                        onClick={() => handleEtherAdapterClick(adapter)}
+                        title={adapterTitle}
+                        aria-label={adapterTitle}
+                        className={etherAdapterButtonClass(adapter)}
+                    >
+                        <Icon className={`h-4 w-4 shrink-0 ${adapter.configured ? adapter.brandClass : ''}`} />
+                        <span className="min-w-0 flex items-center gap-1 leading-none">
+                            <span className="block truncate text-[11px] font-medium">{adapter.label}</span>
+                            <span
+                                className={`h-1.5 w-1.5 shrink-0 rounded-full ${etherAdapterStatusDotClass(adapter)}`}
+                                aria-hidden="true"
+                            />
+                        </span>
+                    </button>
+                );
+            })}
+            <button
+                type="button"
+                onClick={() => {
+                    setShowEtherMenu(false);
+                    onOpenSettings?.('integrations');
+                }}
+                title="Open Integrations"
+                aria-label="Open Integrations"
+                className="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-vscode-fg/55 transition-colors hover:bg-vscode-list-hoverBackground hover:text-vscode-fg"
+            >
+                <Settings className="h-4 w-4" />
+            </button>
+        </div>
+    ) : null;
+    const contextMenu = showContextMenu ? (
+        <div
+            ref={contextPopoverRef}
+            className="fixed z-[2147483647] w-64 overflow-hidden rounded-md border border-vscode-border bg-vscode-input-bg shadow-2xl animate-in fade-in zoom-in-95"
+            style={contextMenuStyle}
+            role="dialog"
+            aria-label="Insert context"
+        >
+            <button
+                onClick={handleRequestContext}
+                className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
+            >
+                <FileCode className="mt-0.5 h-4 w-4 text-vscode-fg/55" />
+                <span className="min-w-0">
+                    <span className="block text-[12px] font-medium text-vscode-fg/85">Add workspace files</span>
+                    <span className="block text-[10px] text-vscode-fg/45">Attach indexed project files to this turn.</span>
+                </span>
+            </button>
+            <button
+                onClick={() => {
+                    setShowContextMenu(false);
+                    fileInputRef.current?.click();
+                }}
+                className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
+            >
+                <Paperclip className="mt-0.5 h-4 w-4 text-vscode-fg/55" />
+                <span className="min-w-0">
+                    <span className="block text-[12px] font-medium text-vscode-fg/85">Attach local files</span>
+                    <span className="block text-[10px] text-vscode-fg/45">Paste, drop, or choose files for this turn.</span>
+                </span>
+            </button>
+            <button
+                onClick={handlePrepareAgent}
+                disabled={isLoading}
+                className={`w-full flex items-start gap-3 px-3 py-2.5 text-left transition-colors disabled:opacity-45 disabled:cursor-not-allowed ${
+                    agentDraftEnabled ? 'bg-vscode-list-hoverBackground' : 'hover:bg-vscode-list-hoverBackground'
+                }`}
+            >
+                <Bot className={`mt-0.5 h-4 w-4 ${agentDraftEnabled ? 'text-vscode-button-bg' : 'text-vscode-fg/55'}`} />
+                <span className="min-w-0">
+                    <span className="block text-[12px] font-medium text-vscode-fg/85">Prepare agent mission</span>
+                    <span className="block text-[10px] text-vscode-fg/45">Show confirmation before autonomous launch.</span>
+                </span>
+                {agentDraftEnabled && <CheckCircle2 className="mt-0.5 ml-auto h-4 w-4 text-vscode-button-bg" />}
+            </button>
+            <div className="mx-3 border-t border-vscode-border/70" />
+            <button
+                onClick={() => onModeChange(planFirstToggle.nextMode)}
+                className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
+                title="Plan first: read and reason before edits or commands"
+            >
+                <CheckCircle2 className={`h-4 w-4 ${planFirstToggle.active ? 'text-vscode-button-bg' : 'text-vscode-fg/45'}`} />
+                <span className="min-w-0 flex-1">
+                    <span className="block text-[12px] font-medium text-vscode-fg/85">Plan first</span>
+                    <span className="block text-[10px] text-vscode-fg/45">Ask the agent to reason before edits or commands.</span>
+                </span>
+                <span className={`relative h-5 w-9 rounded-full transition-colors ${planFirstToggle.active ? 'bg-vscode-button-bg' : 'bg-vscode-border'}`}>
+                    <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${planFirstToggle.active ? 'translate-x-[18px]' : 'translate-x-0.5'}`} />
+                </span>
+            </button>
+        </div>
+    ) : null;
+    const approvalMenu = showApprovalMenu ? (
+        <div
+            ref={approvalPopoverRef}
+            className="fixed z-[2147483647] w-72 overflow-hidden rounded-md border border-vscode-border bg-vscode-input-bg shadow-2xl animate-in fade-in zoom-in-95"
+            style={approvalMenuStyle}
+            role="dialog"
+            aria-label="Approval policy"
+        >
+            <div className="px-3 py-2 border-b border-vscode-border bg-vscode-editor-background text-[10px] font-medium text-vscode-fg/55">Approval policy</div>
+            {APPROVAL_OPTIONS.map(option => {
+                const Icon = option.icon;
+                const isSelected = option.id === approvalMode;
+                return (
+                    <button
+                        key={option.id}
+                        onClick={() => handleApprovalModeChange(option.id)}
+                        className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
+                    >
+                        <Icon className={`mt-0.5 h-4 w-4 ${isSelected ? 'text-vscode-button-bg' : 'text-vscode-fg/45'}`} />
+                        <span className="min-w-0 flex-1">
+                            <span className="block text-[12px] font-medium text-vscode-fg/85">{option.label}</span>
+                            <span className="block text-[10px] text-vscode-fg/45">{option.description}</span>
+                        </span>
+                        {isSelected && <CheckCircle2 className="mt-0.5 h-4 w-4 text-vscode-button-bg" />}
+                    </button>
+                );
+            })}
+        </div>
+    ) : null;
     const allowRemoteSessionStart = () => {
         postMessage({ type: 'set_remote_session_start', payload: { enabled: true } });
     };
@@ -1247,6 +1714,8 @@ export function ChatInput(props: ChatInputProps) {
                     }}
                 />
             )}
+            {contextMenu && (typeof document !== 'undefined' ? createPortal(contextMenu, document.body) : contextMenu)}
+            {approvalMenu && (typeof document !== 'undefined' ? createPortal(approvalMenu, document.body) : approvalMenu)}
 
             {/* Chips Container */}
             {(contextFiles.length > 0 || agentDraftEnabled) && (
@@ -1271,77 +1740,69 @@ export function ChatInput(props: ChatInputProps) {
                         const imageAttachment = isImageContextFile(file);
                         const displayName = attachmentDisplayName(file);
                         const metaLabel = attachmentMetaLabel(file);
+                        const contentWarning = attachmentContentWarning(file);
+                        const statusLabel = attachmentStatusBadgeLabel(file);
+                        const statusTitle = file.error || attachmentStatusTitle(file);
+                        const fileKind = attachmentFileKind(file);
+                        const AttachmentIcon = fileKind === 'image'
+                            ? ImageIcon
+                            : fileKind === 'text' || fileKind === 'csv' || fileKind === 'pdf'
+                                ? FileText
+                                : file.source === 'attachment'
+                                    ? Paperclip
+                                    : FileCode;
                         return (
                         <div
                             key={`ctx-${file.path}-${i}`}
-                            title={file.error || file.stagedPath || file.path}
-                            className={`group shrink-0 overflow-hidden rounded-md border text-[11px] transition-colors ${
+                            title={[displayName, statusTitle, contentWarning, file.stagedPath || file.path].filter(Boolean).join('\n')}
+                            className={`group flex h-11 min-w-[190px] max-w-[250px] shrink-0 items-center gap-2 overflow-hidden rounded-md border px-2 py-1.5 text-[11px] transition-colors ${
                                 errored
                                     ? 'bg-rose-500/10 text-rose-300/85 border-rose-500/25'
                                     : staging
                                         ? 'bg-vscode-input-bg text-vscode-fg/45 border-vscode-border'
                                         : 'bg-vscode-input-bg text-vscode-fg/70 border-vscode-border hover:bg-vscode-list-hoverBackground hover:text-vscode-fg'
-                            } ${imageAttachment ? 'w-40' : 'flex min-w-[190px] max-w-[260px] items-center gap-2 px-2.5 py-2'}`}
+                            }`}
                         >
-                            {imageAttachment ? (
-                                <>
-                                    <div className="relative h-20 bg-vscode-editor-background">
-                                        {file.previewUrl ? (
-                                            <img
-                                                src={file.previewUrl}
-                                                alt={displayName}
-                                                className="h-full w-full object-cover"
-                                            />
-                                        ) : (
-                                            <div className="flex h-full w-full items-center justify-center text-vscode-fg/35">
-                                                <ImageIcon className="h-6 w-6" />
-                                            </div>
-                                        )}
-                                        {staging && (
-                                            <div className="absolute inset-0 flex items-center justify-center bg-vscode-editor-background/70">
-                                                <span className="codicon codicon-loading codicon-modifier-spin text-[14px] text-vscode-fg/55" />
-                                            </div>
-                                        )}
-                                        <button
-                                            onClick={() => removeContextFile(i)}
-                                            className="absolute right-1 top-1 rounded bg-vscode-editor-background/85 p-1 text-vscode-fg/55 opacity-0 shadow-sm transition-opacity hover:text-vscode-fg group-hover:opacity-100"
-                                            title="Remove attachment"
-                                        >
-                                            <X className="h-3 w-3" />
-                                        </button>
-                                    </div>
-                                    <div className="flex min-w-0 items-center gap-2 px-2 py-1.5">
-                                        <ImageIcon className={`h-3.5 w-3.5 shrink-0 ${errored ? 'text-rose-300/70' : 'text-vscode-fg/45'}`} />
-                                        <span className="min-w-0 flex-1">
-                                            <span className="block truncate font-medium">{displayName}</span>
-                                            <span className={`block truncate text-[10px] ${errored ? 'text-rose-300/70' : 'text-vscode-fg/40'}`}>{metaLabel}</span>
-                                        </span>
-                                    </div>
-                                </>
-                            ) : (
-                                <>
-                                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-vscode-editor-background text-vscode-fg/45">
-                                        {staging ? (
-                                            <span className="codicon codicon-loading codicon-modifier-spin text-[13px]" />
-                                        ) : file.source === 'attachment' ? (
-                                            <Paperclip className={`h-4 w-4 ${errored ? 'text-rose-300/70' : ''}`} />
-                                        ) : (
-                                            <FileCode className={`h-4 w-4 ${errored ? 'text-rose-300/70' : ''}`} />
-                                        )}
+                            <span className="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded bg-vscode-editor-background text-vscode-fg/45">
+                                {imageAttachment && file.previewUrl ? (
+                                    <img
+                                        src={file.previewUrl}
+                                        alt={displayName}
+                                        className="h-full w-full object-cover"
+                                    />
+                                ) : staging ? (
+                                    <span className="codicon codicon-loading codicon-modifier-spin text-[13px]" />
+                                ) : (
+                                    <AttachmentIcon className={`h-4 w-4 ${errored ? 'text-rose-300/70' : ''}`} />
+                                )}
+                                {staging && imageAttachment && file.previewUrl && (
+                                    <span className="absolute inset-0 flex items-center justify-center bg-vscode-editor-background/70">
+                                        <span className="codicon codicon-loading codicon-modifier-spin text-[13px] text-vscode-fg/55" />
                                     </span>
-                                    <span className="min-w-0 flex-1">
-                                        <span className="block truncate font-medium">{displayName}</span>
-                                        <span className={`block truncate text-[10px] ${errored ? 'text-rose-300/70' : 'text-vscode-fg/40'}`}>{metaLabel}</span>
-                                    </span>
-                                    <button
-                                        onClick={() => removeContextFile(i)}
-                                        className="rounded p-0.5 opacity-0 transition-opacity hover:bg-vscode-list-hoverBackground group-hover:opacity-100"
-                                        title="Remove attachment"
-                                    >
-                                        <X className="h-3 w-3" />
-                                    </button>
-                                </>
-                            )}
+                                )}
+                            </span>
+                            <span className="min-w-0 flex-1">
+                                <span className="block truncate font-medium">{displayName}</span>
+                                <span className={`block truncate text-[10px] ${errored ? 'text-rose-300/70' : 'text-vscode-fg/40'}`}>{metaLabel}</span>
+                            </span>
+                            <span
+                                className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                                    errored
+                                        ? 'bg-rose-500/12 text-rose-300/80'
+                                        : attachmentIngestionStatus(file) === 'included_text'
+                                            ? 'bg-emerald-500/10 text-emerald-300/80'
+                                            : 'bg-vscode-editor-background text-vscode-fg/45'
+                                }`}
+                            >
+                                {statusLabel}
+                            </span>
+                            <button
+                                onClick={() => removeContextFile(i)}
+                                className="rounded p-0.5 opacity-0 transition-opacity hover:bg-vscode-list-hoverBackground group-hover:opacity-100"
+                                title="Remove attachment"
+                            >
+                                <X className="h-3 w-3" />
+                            </button>
                         </div>
                     );})}
                 </div>
@@ -1508,6 +1969,8 @@ export function ChatInput(props: ChatInputProps) {
                     <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
                         <div className="relative shrink-0">
                             <button
+                                ref={contextButtonRef}
+                                type="button"
                                 onClick={() => {
                                     setShowContextMenu(prev => !prev);
                                     setShowApprovalMenu(false);
@@ -1520,67 +1983,12 @@ export function ChatInput(props: ChatInputProps) {
                             >
                                 <Plus className="w-4 h-4" />
                             </button>
-
-                            {showContextMenu && (
-                                <div className="absolute bottom-full left-0 mb-2 w-64 overflow-hidden rounded-md border border-vscode-border bg-vscode-input-bg shadow-lg z-[9999] animate-in fade-in slide-in-from-bottom-2">
-                                    <button
-                                        onClick={handleRequestContext}
-                                        className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
-                                    >
-                                        <FileCode className="mt-0.5 h-4 w-4 text-vscode-fg/55" />
-                                        <span className="min-w-0">
-                                            <span className="block text-[12px] font-medium text-vscode-fg/85">Add workspace files</span>
-                                            <span className="block text-[10px] text-vscode-fg/45">Attach indexed project files to this turn.</span>
-                                        </span>
-                                    </button>
-                                    <button
-                                        onClick={() => {
-                                            setShowContextMenu(false);
-                                            fileInputRef.current?.click();
-                                        }}
-                                        className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
-                                    >
-                                        <Paperclip className="mt-0.5 h-4 w-4 text-vscode-fg/55" />
-                                        <span className="min-w-0">
-                                            <span className="block text-[12px] font-medium text-vscode-fg/85">Attach local files</span>
-                                            <span className="block text-[10px] text-vscode-fg/45">Paste, drop, or choose files for this turn.</span>
-                                        </span>
-                                    </button>
-                                    <button
-                                        onClick={handlePrepareAgent}
-                                        disabled={isLoading}
-                                        className={`w-full flex items-start gap-3 px-3 py-2.5 text-left transition-colors disabled:opacity-45 disabled:cursor-not-allowed ${
-                                            agentDraftEnabled ? 'bg-vscode-list-hoverBackground' : 'hover:bg-vscode-list-hoverBackground'
-                                        }`}
-                                    >
-                                        <Bot className={`mt-0.5 h-4 w-4 ${agentDraftEnabled ? 'text-vscode-button-bg' : 'text-vscode-fg/55'}`} />
-                                        <span className="min-w-0">
-                                            <span className="block text-[12px] font-medium text-vscode-fg/85">Prepare agent mission</span>
-                                            <span className="block text-[10px] text-vscode-fg/45">Show confirmation before autonomous launch.</span>
-                                        </span>
-                                        {agentDraftEnabled && <CheckCircle2 className="mt-0.5 ml-auto h-4 w-4 text-vscode-button-bg" />}
-                                    </button>
-                                    <div className="mx-3 border-t border-vscode-border/70" />
-                                    <button
-                                        onClick={() => onModeChange(planFirstToggle.nextMode)}
-                                        className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
-                                        title="Plan first: read and reason before edits or commands"
-                                    >
-                                        <CheckCircle2 className={`h-4 w-4 ${planFirstToggle.active ? 'text-vscode-button-bg' : 'text-vscode-fg/45'}`} />
-                                        <span className="min-w-0 flex-1">
-                                            <span className="block text-[12px] font-medium text-vscode-fg/85">Plan first</span>
-                                            <span className="block text-[10px] text-vscode-fg/45">Ask the agent to reason before edits or commands.</span>
-                                        </span>
-                                        <span className={`relative h-5 w-9 rounded-full transition-colors ${planFirstToggle.active ? 'bg-vscode-button-bg' : 'bg-vscode-border'}`}>
-                                            <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${planFirstToggle.active ? 'translate-x-[18px]' : 'translate-x-0.5'}`} />
-                                        </span>
-                                    </button>
-                                </div>
-                            )}
                         </div>
 
                         <div className="relative shrink-0">
                             <button
+                                ref={approvalButtonRef}
+                                type="button"
                                 onClick={() => {
                                     setShowApprovalMenu(prev => !prev);
                                     setShowContextMenu(false);
@@ -1596,30 +2004,6 @@ export function ChatInput(props: ChatInputProps) {
                                 <span className="sm:hidden text-[10px] font-medium">{approvalMode === 'ask' ? 'Ask' : approvalMode === 'auto' ? 'Auto' : 'Full'}</span>
                                 <ChevronDown className="w-3 h-3 opacity-40" />
                             </button>
-
-                            {showApprovalMenu && (
-                                <div className="absolute bottom-full left-0 mb-2 w-72 overflow-hidden rounded-md border border-vscode-border bg-vscode-input-bg shadow-lg z-[9999] animate-in fade-in slide-in-from-bottom-2">
-                                    <div className="px-3 py-2 border-b border-vscode-border bg-vscode-editor-background text-[10px] font-medium text-vscode-fg/55">Approval policy</div>
-                                    {APPROVAL_OPTIONS.map(option => {
-                                        const Icon = option.icon;
-                                        const isSelected = option.id === approvalMode;
-                                        return (
-                                            <button
-                                                key={option.id}
-                                                onClick={() => handleApprovalModeChange(option.id)}
-                                                className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
-                                            >
-                                                <Icon className={`mt-0.5 h-4 w-4 ${isSelected ? 'text-vscode-button-bg' : 'text-vscode-fg/45'}`} />
-                                                <span className="min-w-0 flex-1">
-                                                    <span className="block text-[12px] font-medium text-vscode-fg/85">{option.label}</span>
-                                                    <span className="block text-[10px] text-vscode-fg/45">{option.description}</span>
-                                                </span>
-                                                {isSelected && <CheckCircle2 className="mt-0.5 h-4 w-4 text-vscode-button-bg" />}
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                            )}
                         </div>
 
                         <button
@@ -1653,94 +2037,91 @@ export function ChatInput(props: ChatInputProps) {
                     <div className="ml-auto flex shrink-0 items-center gap-2">
                         <div ref={etherMenuRef} className="relative shrink-0">
                             <button
+                                ref={etherButtonRef}
                                 type="button"
-                                onClick={() => {
-                                    setShowEtherMenu(prev => !prev);
-                                    setShowContextMenu(false);
-                                    setShowApprovalMenu(false);
-                                    setShowModelMenu(false);
-                                    setShowUsageMenu(false);
-                                }}
-                                className={`relative p-2 rounded transition-colors ${
+                                onClick={handleEtherToggleClick}
+                                onMouseEnter={openEtherDetails}
+                                onMouseLeave={scheduleEtherDetailsClose}
+                                onFocus={openEtherDetails}
+                                disabled={isLiveModeLoading}
+                                className={`relative p-2 rounded transition-colors disabled:cursor-wait ${
                                     isLiveMode
-                                        ? 'bg-vscode-button-bg text-vscode-button-fg'
+                                        ? 'bg-vscode-button-bg text-vscode-button-fg hover:bg-vscode-button-hover'
                                         : 'text-vscode-fg/40 hover:text-vscode-fg/75 hover:bg-vscode-list-hoverBackground'
-                                }`}
-                                title="Ether accepts only sent Telegram or Discord messages. It does not read typing in other apps."
-                                aria-label="Ether Gateway accepts sent Telegram and Discord messages only"
+                                } ${isLiveModeLoading ? 'opacity-70' : ''}`}
+                                title={hasConfiguredEtherAdapter ? (isLiveMode ? 'Disable Ether' : 'Enable Ether') : 'Open Integrations to configure Ether'}
+                                aria-label={hasConfiguredEtherAdapter ? (isLiveMode ? 'Disable Ether' : 'Enable Ether') : 'Configure Ether integrations'}
+                                aria-haspopup="dialog"
                             >
-                                <EtherIcon className="w-4 h-4" />
-                                {activeEtherBadgeAdapter && (
-                                    <span className="absolute -right-1 -top-1 flex gap-0.5">
-                                        <span className="flex h-3.5 min-w-3.5 items-center justify-center rounded-sm bg-vscode-editor-background px-0.5 text-[7px] font-semibold leading-none text-vscode-button-bg ring-1 ring-vscode-button-bg/45">
-                                            {activeEtherBadgeAdapter.short}
-                                        </span>
-                                    </span>
-                                )}
+                                <EtherIcon className={`w-4 h-4 ${isLiveModeLoading ? 'animate-pulse' : ''}`} />
+                                <span
+                                    className={`absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${etherMainStatusDotClass(isLiveMode, hasConfiguredEtherAdapter, hasEtherChannelError)}`}
+                                    aria-hidden="true"
+                                />
                             </button>
-
-                            {showEtherMenu && (
-                                <div className="absolute bottom-full right-0 z-[9999] mb-2 flex items-center gap-1.5 rounded-md border border-vscode-border bg-vscode-input-bg p-1.5 shadow-lg animate-in fade-in slide-in-from-bottom-2">
-                                    {etherAdapters.map(adapter => {
-                                        const Icon = adapter.Icon;
-                                        const selected = activeEtherBadgeAdapter?.key === adapter.key;
-                                        const statusLabel = etherAdapterStatusLabel(adapter);
-                                        const visibleStatusLabel = etherAdapterVisibleStatusLabel(adapter);
-                                        const selectedLabel = selected ? 'selected source, ' : '';
-                                        const adapterTitle = adapter.configured
-                                            ? `${adapter.label}: ${selectedLabel}${statusLabel}. Receives sent messages only.`
-                                            : `${adapter.label}: Not configured. Open Integrations to receive sent messages.`;
-                                        return (
-                                            <button
-                                                key={adapter.key}
-                                                type="button"
-                                                onClick={() => handleEtherAdapterClick(adapter)}
-                                                title={adapterTitle}
-                                                aria-label={adapterTitle}
-                                                className={etherAdapterButtonClass(adapter, selected)}
-                                            >
-                                                <Icon className={`h-4 w-4 shrink-0 ${adapter.configured ? adapter.brandClass : ''}`} />
-                                                <span className="min-w-0 flex flex-1 items-center gap-1.5 leading-none">
-                                                    <span className="block truncate text-[11px] font-medium">{adapter.label}</span>
-                                                    <span
-                                                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                                                            adapter.active
-                                                                ? 'bg-emerald-300 shadow-[0_0_8px_rgba(110,231,183,0.32)]'
-                                                                : adapter.configured
-                                                                    ? 'bg-vscode-fg/40'
-                                                                    : 'bg-transparent ring-1 ring-vscode-fg/30'
-                                                        }`}
-                                                        aria-hidden="true"
-                                                    />
-                                                    {visibleStatusLabel && (
-                                                        <span className="sr-only">{visibleStatusLabel}</span>
-                                                    )}
-                                                </span>
-                                                {selected && (
-                                                    <span className="codicon codicon-check text-[11px] text-vscode-button-bg" />
-                                                )}
-                                            </button>
-                                        );
-                                    })}
-                                    <div className="h-6 w-px bg-vscode-border/80" />
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            setShowEtherMenu(false);
-                                            onOpenSettings?.('integrations');
-                                        }}
-                                        title="Open Integrations"
-                                        aria-label="Open Integrations"
-                                        className="flex h-8 w-8 items-center justify-center rounded-md border border-vscode-border/60 bg-vscode-editor-background text-vscode-fg/55 transition-colors hover:bg-vscode-list-hoverBackground hover:text-vscode-fg"
-                                    >
-                                        <Settings className="h-4 w-4" />
-                                    </button>
-                                </div>
-                            )}
+                            {etherMenu && (typeof document !== 'undefined' ? createPortal(etherMenu, document.body) : etherMenu)}
                         </div>
-                        <button onClick={toggleRecording} className={`p-2 rounded transition-colors ${isRecording ? 'bg-red-500/15 text-red-400' : 'text-vscode-fg/40 hover:text-vscode-fg/75 hover:bg-vscode-list-hoverBackground'}`}>
+                        <button
+                            onClick={toggleRecording}
+                            disabled={isRequesting || isTranscribing}
+                            className={`relative p-2 rounded transition-colors disabled:cursor-wait disabled:opacity-65 ${
+                                isRecording
+                                    ? 'bg-red-500/15 text-red-400'
+                                    : isRequesting || isTranscribing
+                                        ? 'text-vscode-fg/55 bg-vscode-list-hoverBackground'
+                                        : 'text-vscode-fg/40 hover:text-vscode-fg/75 hover:bg-vscode-list-hoverBackground'
+                            }`}
+                            title={micStatusTitle}
+                            aria-label={micButtonAriaLabel}
+                        >
                             {isRecording ? <Square className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                            {(isRequesting || isTranscribing) && (
+                                <span
+                                    className="absolute right-1 top-1 h-1.5 w-1.5 animate-pulse rounded-full bg-vscode-fg/50"
+                                    aria-hidden="true"
+                                />
+                            )}
                         </button>
+                        {audioError && (
+                            <div className="group relative flex h-5 w-5 items-center justify-center">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (audioErrorOpensSettings) {
+                                            onOpenSettings?.('integrations');
+                                            return;
+                                        }
+                                        if (audioErrorOpensMicrophonePermissions) {
+                                            postMessage({ type: 'open_microphone_permissions' });
+                                            return;
+                                        }
+                                        if (showMicRetry) {
+                                            toggleRecording();
+                                        }
+                                    }}
+                                    className={`flex h-5 w-5 items-center justify-center rounded transition-colors ${
+                                        audioErrorOpensSettings || audioErrorOpensMicrophonePermissions
+                                            ? 'text-amber-200/78 hover:bg-amber-300/10 hover:text-amber-100'
+                                            : showMicRetry
+                                                ? 'text-vscode-fg/55 hover:bg-vscode-list-hoverBackground hover:text-vscode-fg'
+                                                : 'text-amber-200/72 hover:bg-amber-300/10 hover:text-amber-100'
+                                    }`}
+                                    title={micErrorTitle}
+                                    aria-label={audioErrorOpensSettings ? 'Open voice input settings' : audioErrorOpensMicrophonePermissions ? 'Open microphone permission settings' : showMicRetry ? 'Retry voice input recording' : 'Voice input error details'}
+                                >
+                                    {showMicRetry ? (
+                                        <RotateCcw className="h-3.5 w-3.5" />
+                                    ) : audioErrorOpensSettings || audioErrorOpensMicrophonePermissions ? (
+                                        <Settings className="h-3.5 w-3.5" />
+                                    ) : (
+                                        <Info className="h-3.5 w-3.5" />
+                                    )}
+                                </button>
+                                <span className="pointer-events-none absolute right-0 top-full z-[2147483647] mt-1 hidden w-56 rounded-md border border-vscode-border bg-vscode-input-bg px-2 py-1.5 text-left text-[10px] leading-snug text-vscode-fg/75 shadow-2xl group-hover:block group-focus-within:block">
+                                    {micErrorTitle}
+                                </span>
+                            </div>
+                        )}
 
                         {agentDraftEnabled && !(isLoading || isRemoteProcessing) && (
                             <button

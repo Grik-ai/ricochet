@@ -3,6 +3,7 @@ import { isHostedSubscriptionAccess, type GrikAccountController } from '../../ho
 export type ModelCredentialMode = 'none' | 'grik_account' | 'provider_key';
 
 export type ModelAccessState =
+    | 'coming_soon'
     | 'ready'
     | 'anonymous_free'
     | 'grik_sign_in_required'
@@ -33,6 +34,8 @@ export interface ModelAccessModel {
     credentialMode?: ModelCredentialMode;
     requiresSubscription?: boolean;
     mayTrainOnYourPrompts?: boolean;
+    launchState?: 'live' | 'soon' | string;
+    ownedBy?: string;
 }
 
 export interface SelectedModelAccess {
@@ -50,6 +53,8 @@ export interface SelectedModelLike {
     provider: string;
     mayTrainOnYourPrompts?: boolean;
     credentialMode?: ModelCredentialMode;
+    launchState?: 'live' | 'soon' | string;
+    ownedBy?: string;
 }
 
 export function modelCredentialMode(provider: ModelAccessProvider | undefined, model: ModelAccessModel | undefined): ModelCredentialMode {
@@ -68,6 +73,14 @@ export function providerHasKey(provider: ModelAccessProvider | undefined): boole
     return Boolean(provider.hasKey || provider.hasUserKey || provider.keySource === 'server' || provider.keySource === 'user');
 }
 
+export function providerCredentialLabel(provider: ModelAccessProvider | undefined): string {
+    if (!provider) return 'No key';
+    if (provider.keySource === 'hosted' || provider.accessMode === 'subscription') return 'Grik Account';
+    if (provider.keySource === 'user' || provider.hasUserKey) return 'Key connected';
+    if (provider.keySource === 'server' || provider.hasKey) return 'Included';
+    return 'No key';
+}
+
 export function deriveModelAccess(
     provider: ModelAccessProvider | undefined,
     model: ModelAccessModel | undefined,
@@ -84,13 +97,23 @@ export function deriveModelAccess(
         };
     }
 
+    if (String(model.launchState || '').toLowerCase() === 'soon') {
+        return {
+            state: 'coming_soon',
+            sendable: false,
+            label: 'Soon',
+            detail: model.ownedBy === 'grik' || provider.id === 'grik' ? 'Grik model coming soon.' : 'This model is coming soon.',
+            action: null,
+        };
+    }
+
     const credentialMode = modelCredentialMode(provider, model);
     if (credentialMode === 'none') {
         return {
             state: 'anonymous_free',
             sendable: true,
-            label: 'Free',
-            detail: 'Anonymous Grik free model',
+            label: 'Free, no sign-in',
+            detail: 'No Grik Account or provider key required.',
             action: null,
         };
     }
@@ -101,7 +124,7 @@ export function deriveModelAccess(
             return {
                 state: 'ready',
                 sendable: true,
-                label: 'Grik',
+                label: 'Grik Account',
                 detail: summary.detail || 'Hosted Ricochet model available',
                 action: null,
             };
@@ -110,7 +133,7 @@ export function deriveModelAccess(
             return {
                 state: 'grik_sign_in_required',
                 sendable: false,
-                label: 'Sign in',
+                label: 'Sign in required',
                 detail: 'Sign in to Grik to use this hosted model.',
                 actionLabel: 'Account',
                 action: 'account',
@@ -129,7 +152,7 @@ export function deriveModelAccess(
         return {
             state: 'grik_upgrade_required',
             sendable: false,
-            label: summary.accessLabel || 'Upgrade',
+            label: summary.accessLabel || 'Upgrade required',
             detail: summary.detail || 'Upgrade your Grik account to use this hosted model.',
             actionLabel: 'Account',
             action: 'account',
@@ -137,11 +160,12 @@ export function deriveModelAccess(
     }
 
     if (providerHasKey(provider)) {
+        const label = providerCredentialLabel(provider);
         return {
             state: 'ready',
             sendable: true,
-            label: 'API key',
-            detail: 'Provider API key configured',
+            label,
+            detail: label === 'Included' ? 'Included provider access is configured.' : 'Provider API key is connected.',
             action: null,
         };
     }
@@ -149,7 +173,7 @@ export function deriveModelAccess(
     return {
         state: 'byok_key_required',
         sendable: false,
-        label: 'API key',
+        label: model.isFree || model.accessMode === 'free' ? 'Free, requires key' : 'No key',
         detail: `Add an API key for ${provider.name || provider.id}.`,
         actionLabel: 'Settings',
         action: 'settings',
@@ -162,6 +186,8 @@ export function modelAccessBadgeLabel(access: SelectedModelAccess): string {
 
 export function modelAccessBadgeClass(access: SelectedModelAccess): string {
     switch (access.state) {
+        case 'coming_soon':
+            return 'bg-zinc-400/10 text-zinc-300';
         case 'anonymous_free':
             return 'bg-green-400/10 text-green-400';
         case 'ready':
@@ -223,4 +249,45 @@ export function selectBestModel(
     }
 
     return null;
+}
+
+export function providerDisplayRank(providerId?: string): number {
+    switch (String(providerId || '').toLowerCase()) {
+        case 'grik':
+            return 0;
+        case 'openrouter':
+            return 10;
+        case 'anthropic':
+            return 20;
+        case 'openai':
+            return 30;
+        case 'deepseek':
+            return 40;
+        case 'zhipu':
+            return 50;
+        case 'zhipu-coding':
+            return 51;
+        case 'gemini':
+            return 60;
+        case 'xai':
+            return 70;
+        case 'minimax':
+            return 80;
+        case 'mistral':
+            return 90;
+        default:
+            return 1000;
+    }
+}
+
+export function sortProvidersByDisplayOrder<T extends { id: string; name?: string }>(providers: T[]): T[] {
+    return [...providers].sort((a, b) => {
+        const rank = providerDisplayRank(a.id) - providerDisplayRank(b.id);
+        if (rank !== 0) return rank;
+        return (a.name || a.id).localeCompare(b.name || b.id) || a.id.localeCompare(b.id);
+    });
+}
+
+export function settingsTabForModelAccess(access: SelectedModelAccess): 'models' | 'providers' {
+    return access.state === 'byok_key_required' ? 'providers' : 'models';
 }

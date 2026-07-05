@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/igoryan-dao/ricochet/internal/paths"
 	"github.com/igoryan-dao/ricochet/internal/protocol"
 	"gopkg.in/yaml.v3"
 )
@@ -186,9 +187,11 @@ func (m *Manager) LoadSkills() error {
 		m.skills[rule.Name] = rule
 	}
 
-	// ─── Phase 19: Dynamic Project Skills ───
+	// Dynamic skills are loaded global-first so project skills can override
+	// a global skill with the same manifest name.
+	m.loadDynamicSkillsFrom(filepath.Join(paths.GetGlobalDir(), "skills"), "global")
 	m.loadRootRules()
-	m.loadDynamicSkills()
+	m.loadDynamicSkillsFrom(filepath.Join(m.cwd, ".ricochet", "skills"), "project")
 
 	return nil
 }
@@ -300,13 +303,16 @@ func (m *Manager) loadRootRules() {
 	}
 }
 
-func (m *Manager) loadDynamicSkills() {
-	skillsDir := filepath.Join(m.cwd, ".ricochet", "skills")
+func (m *Manager) loadDynamicSkillsFrom(skillsDir, source string) {
 	entries, err := os.ReadDir(skillsDir)
 	if err != nil {
 		return // Directory might not exist, that's fine
 	}
 
+	sourceLabel := "Project"
+	if source == "global" {
+		sourceLabel = "Global"
+	}
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			if strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
@@ -316,9 +322,10 @@ func (m *Manager) loadDynamicSkills() {
 					"Misplaced skill file: "+entry.Name(),
 					path,
 					[]string{
-						"Project skills must live at .ricochet/skills/<name>/SKILL.md.",
-						"Move this file into .ricochet/skills/" + strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())) + "/SKILL.md to load it.",
+						sourceLabel + " skills must live at skills/<name>/SKILL.md.",
+						"Move this file into " + filepath.Join("skills", strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())), "SKILL.md") + " to load it.",
 					},
+					source,
 				)
 			}
 			continue
@@ -331,16 +338,18 @@ func (m *Manager) loadDynamicSkills() {
 			if os.IsNotExist(err) {
 				m.addSkillDiagnostic(
 					"_diagnostic_missing_"+sanitizeSkillName(skillName),
-					"Invalid project skill: "+skillName,
+					"Invalid "+source+" skill: "+skillName,
 					skillPath,
-					[]string{"Missing SKILL.md. Project skills must use .ricochet/skills/<name>/SKILL.md."},
+					[]string{"Missing SKILL.md. Skills must use skills/<name>/SKILL.md."},
+					source,
 				)
 			} else {
 				m.addSkillDiagnostic(
 					"_diagnostic_read_"+sanitizeSkillName(skillName),
-					"Unreadable project skill: "+skillName,
+					"Unreadable "+source+" skill: "+skillName,
 					skillPath,
 					[]string{"Could not read SKILL.md: " + err.Error()},
+					source,
 				)
 			}
 			continue
@@ -351,7 +360,7 @@ func (m *Manager) loadDynamicSkills() {
 			Name:          skillName,
 			DisplayName:   skillName,
 			Type:          "dynamic",
-			Source:        "project",
+			Source:        source,
 			Enabled:       true,
 			UserInvocable: true,
 			ContentPath:   skillPath,
@@ -365,9 +374,10 @@ func (m *Manager) loadDynamicSkills() {
 				if err := yaml.Unmarshal([]byte(parts[1]), &fm); err != nil {
 					m.addSkillDiagnostic(
 						"_diagnostic_yaml_"+sanitizeSkillName(skillName),
-						"Invalid project skill: "+skillName,
+						"Invalid "+source+" skill: "+skillName,
 						skillPath,
 						[]string{"Invalid SKILL.md YAML frontmatter: " + err.Error()},
+						source,
 					)
 					continue
 				}
@@ -408,9 +418,10 @@ func (m *Manager) loadDynamicSkills() {
 			} else {
 				m.addSkillDiagnostic(
 					"_diagnostic_frontmatter_"+sanitizeSkillName(skillName),
-					"Invalid project skill: "+skillName,
+					"Invalid "+source+" skill: "+skillName,
 					skillPath,
 					[]string{"SKILL.md starts with frontmatter but does not include a closing --- marker."},
+					source,
 				)
 				continue
 			}
@@ -419,7 +430,7 @@ func (m *Manager) loadDynamicSkills() {
 		if rule.Content == "" {
 			rule.Content = content
 		}
-		applySkillDefaults(rule, "project")
+		applySkillDefaults(rule, source)
 
 		m.skills[rule.Name] = rule
 	}
@@ -842,7 +853,7 @@ func triggerHint(s *SkillRule) []string {
 	return hints
 }
 
-func (m *Manager) addSkillDiagnostic(name, displayName, contentPath string, errors []string) {
+func (m *Manager) addSkillDiagnostic(name, displayName, contentPath string, errors []string, source string) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "_diagnostic_skill"
@@ -854,6 +865,7 @@ func (m *Manager) addSkillDiagnostic(name, displayName, contentPath string, erro
 	if len(errors) > 0 {
 		description = errors[0]
 	}
+	source = firstNonEmpty(source, "project")
 	rule := &SkillRule{
 		Name:              name,
 		DisplayName:       displayName,
@@ -863,13 +875,13 @@ func (m *Manager) addSkillDiagnostic(name, displayName, contentPath string, erro
 		ContentPath:       contentPath,
 		Description:       description,
 		WhenToUse:         strings.Join(errors, " "),
-		Source:            "project",
+		Source:            source,
 		Enabled:           false,
 		enabledConfigured: true,
 		UserInvocable:     false,
 		LoadStatus:        "warning",
 		ValidationErrors:  append([]string(nil), errors...),
-		Scope:             "project",
+		Scope:             source,
 		Visibility:        "off",
 	}
 	m.skills[name] = rule
@@ -920,6 +932,10 @@ func skillScope(skill *SkillRule) string {
 		return "bundled"
 	case "legacy":
 		return "legacy"
+	case "global":
+		if skill.Type == "dynamic" || skill.Type == "diagnostic" {
+			return "global"
+		}
 	case "project":
 		if skill.Type == "dynamic" || skill.Type == "diagnostic" {
 			return "project"

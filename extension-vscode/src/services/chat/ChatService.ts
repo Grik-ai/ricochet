@@ -240,7 +240,35 @@ export class ChatService {
             case 'audio_start':
             case 'audio_chunk':
             case 'audio_stop':
-                await this.core.send(message.type, message.payload || {});
+                try {
+                    const result = await this.core.send(message.type, message.payload || {});
+                    if (message.type === 'audio_stop') {
+                        this.postMessage({ type: 'audio_transcription_result', payload: result });
+                    }
+                } catch (error: any) {
+                    const errorMessage = error?.message || String(error);
+                    if (message.type === 'audio_stop') {
+                        this.postMessage({
+                            type: 'audio_transcription_result',
+                            payload: {
+                                ok: false,
+                                error: errorMessage,
+                                phase: 'transcription',
+                                retryable: true,
+                            },
+                        });
+                    } else {
+                        this.postMessage({
+                            type: 'audio_recording_status',
+                            payload: {
+                                state: 'error',
+                                phase: 'recording',
+                                message: errorMessage,
+                                retryable: false,
+                            },
+                        });
+                    }
+                }
                 break;
 
             case 'get_state':

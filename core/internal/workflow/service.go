@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"bufio"
+	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+//go:embed bundled/*.md
+var bundledWorkflowsFS embed.FS
 
 // Workflow represents a user-defined automation workflow
 type Workflow struct {
@@ -42,7 +46,7 @@ func NewManager(cwd string) *Manager {
 	}
 }
 
-// LoadWorkflows scans .agent/workflows/*.md and parses them
+// LoadWorkflows loads built-in workflows and project .agent/workflows/*.md overrides.
 func (m *Manager) LoadWorkflows() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -50,11 +54,42 @@ func (m *Manager) LoadWorkflows() error {
 	// reset
 	m.workflows = make(map[string]Workflow)
 
-	workflowDir := filepath.Join(m.cwd, ".agent", "workflows")
-	if _, err := os.Stat(workflowDir); os.IsNotExist(err) {
-		return nil // No workflows defined yet
+	if err := m.loadBundledWorkflows(); err != nil {
+		return err
 	}
 
+	workflowDir := filepath.Join(m.cwd, ".agent", "workflows")
+	if _, err := os.Stat(workflowDir); os.IsNotExist(err) {
+		return nil
+	}
+
+	return m.loadWorkflowDir(workflowDir, false)
+}
+
+func (m *Manager) loadBundledWorkflows() error {
+	entries, err := bundledWorkflowsFS.ReadDir("bundled")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
+			continue
+		}
+		path := filepath.Join("bundled", entry.Name())
+		content, err := bundledWorkflowsFS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		wf, err := m.parseWorkflowContent(entry.Name(), content)
+		if err != nil {
+			return fmt.Errorf("parse bundled workflow %s: %w", entry.Name(), err)
+		}
+		m.workflows[wf.Command] = wf
+	}
+	return nil
+}
+
+func (m *Manager) loadWorkflowDir(workflowDir string, strict bool) error {
 	entries, err := os.ReadDir(workflowDir)
 	if err != nil {
 		return err
@@ -68,6 +103,9 @@ func (m *Manager) LoadWorkflows() error {
 		path := filepath.Join(workflowDir, entry.Name())
 		wf, err := m.parseWorkflow(path)
 		if err != nil {
+			if strict {
+				return err
+			}
 			// Log error but continue loading others
 			fmt.Printf("Failed to parse workflow %s: %v\n", entry.Name(), err)
 			continue
@@ -103,8 +141,10 @@ func (m *Manager) parseWorkflow(path string) (Workflow, error) {
 	if err != nil {
 		return Workflow{}, err
 	}
+	return m.parseWorkflowContent(filepath.Base(path), content)
+}
 
-	filename := filepath.Base(path)
+func (m *Manager) parseWorkflowContent(filename string, content []byte) (Workflow, error) {
 	basename := strings.TrimSuffix(filename, filepath.Ext(filename))
 	command := "/" + basename
 

@@ -3,7 +3,14 @@ import { createPortal } from 'react-dom';
 import { Search, Check, Cpu, X, Loader2, Key, UserCircle, ShieldAlert } from 'lucide-react';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
 import { isHostedSubscriptionAccess, type GrikAccountController } from '../../hooks/useGrikAccount';
-import { deriveModelAccess, modelAccessBadgeClass, type ModelCredentialMode } from './modelAccess';
+import {
+    deriveModelAccess,
+    modelAccessBadgeClass,
+    settingsTabForModelAccess,
+    sortProvidersByDisplayOrder,
+    type ModelCredentialMode,
+    type SelectedModelAccess,
+} from './modelAccess';
 
 interface ModelInfo {
     id: string;
@@ -22,6 +29,8 @@ interface ModelInfo {
     limited?: boolean;
     deprecated?: boolean;
     apiType?: string;
+    launchState?: 'live' | 'soon' | string;
+    ownedBy?: string;
     mayTrainOnYourPrompts?: boolean;
 }
 
@@ -94,6 +103,22 @@ export function computeModelPickerPosition(
     };
 }
 
+export function initialModelPickerProvider(currentProvider: string | undefined, providers: Pick<ProviderInfo, 'id'>[]): string {
+    if (currentProvider && providers.some(provider => provider.id === currentProvider)) return currentProvider;
+    return providers[0]?.id || '';
+}
+
+export function reconcileModelPickerProvider(
+    currentProvider: string | undefined,
+    providers: Pick<ProviderInfo, 'id'>[],
+    manuallySelectedProvider: string | undefined,
+): string {
+    if (manuallySelectedProvider && providers.some(provider => provider.id === manuallySelectedProvider)) {
+        return manuallySelectedProvider;
+    }
+    return initialModelPickerProvider(currentProvider, providers);
+}
+
 /**
  * ModelPickerModal — Dynamic model selection with provider filtering.
  */
@@ -124,9 +149,10 @@ export function ModelPickerModal({
     useEffect(() => {
         if (isOpen) {
             setIsLoading(true);
+            setSelectedProvider(currentModel.provider || '');
             postMessage({ type: 'get_models' });
         }
-    }, [isOpen, postMessage]);
+    }, [currentModel.provider, isOpen, postMessage]);
 
     // Listen for models response
     useEffect(() => {
@@ -138,20 +164,13 @@ export function ModelPickerModal({
                     return;
                 }
 
+                const sortedProviders = sortProvidersByDisplayOrder(result.providers);
                 // Rely on backend - no hardcoded filters
-                setProviders(result.providers);
+                setProviders(sortedProviders);
                 setHidePromptTrainingModels(Boolean(result.hide_prompt_training_models ?? result.hidePromptTrainingModels ?? false));
                 setIsLoading(false);
 
-                // If current model is selected, try to match provider
-                if (result.providers.length > 0 && !selectedProvider) {
-                    const match = result.providers.find(p => p.id === currentModel.provider);
-                    if (match) {
-                        setSelectedProvider(match.id);
-                    } else {
-                        setSelectedProvider(result.providers[0].id);
-                    }
-                }
+                setSelectedProvider(prev => reconcileModelPickerProvider(currentModel.provider, sortedProviders, prev));
             }
         });
         return () => { unsubscribe(); };
@@ -181,6 +200,8 @@ export function ModelPickerModal({
                 limited: m.limited,
                 deprecated: m.deprecated,
                 apiType: m.apiType,
+                launchState: m.launchState,
+                ownedBy: m.ownedBy,
                 mayTrainOnYourPrompts: m.mayTrainOnYourPrompts
             }))
         );
@@ -209,19 +230,18 @@ export function ModelPickerModal({
     // Get current provider info
     const currentProviderInfo = providers.find(p => p.id === selectedProvider);
     const selectedProviderUsesGrikAccount = isHostedSubscriptionAccess(currentProviderInfo?.accessMode, currentProviderInfo?.keySource);
-    const selectedProviderAccountLabel = grikAccount?.summary.label || (currentProviderInfo?.available ? 'Subscription' : 'Sign in required');
-    const selectedProviderAccessLabel = grikAccount?.summary.accessLabel || (currentProviderInfo?.available ? 'Available' : 'Sign in required');
+    const selectedProviderAccountLabel = grikAccount?.summary.label || (currentProviderInfo?.available ? 'Grik Account' : 'Sign in required');
 
     const accessForModel = (model: typeof allModels[number]) => {
         const provider = providers.find(p => p.id === model.providerId);
         return deriveModelAccess(provider, model, grikAccount);
     };
 
-    const openAccessAction = (access: ReturnType<typeof accessForModel>) => {
+    const openAccessAction = (access: SelectedModelAccess) => {
         if (access.action === 'account') {
             onOpenAccount?.();
         } else if (access.action === 'settings') {
-            onOpenSettings?.('models');
+            onOpenSettings?.(settingsTabForModelAccess(access));
         }
     };
 
@@ -283,8 +303,10 @@ export function ModelPickerModal({
             const model = filteredModels[selectedIndex];
             const access = accessForModel(model);
             if (!access.sendable) {
-                openAccessAction(access);
-                onClose();
+                if (access.action) {
+                    openAccessAction(access);
+                    onClose();
+                }
                 return;
             }
             onSelectModel({ id: model.id, name: model.name, provider: model.providerId, mayTrainOnYourPrompts: model.mayTrainOnYourPrompts, credentialMode: model.credentialMode });
@@ -348,7 +370,7 @@ export function ModelPickerModal({
                         ))}
                     </select>
                     {currentProviderInfo?.available && !selectedProviderUsesGrikAccount && (
-                        <span title={currentProviderInfo.keySource === 'user' ? 'User API key configured' : 'Server API key configured'}>
+                        <span title={currentProviderInfo.keySource === 'server' ? 'Included provider access' : 'Provider key connected'}>
                             <Key className="w-3 h-3 text-green-400" />
                         </span>
                     )}
@@ -364,7 +386,7 @@ export function ModelPickerModal({
             {selectedProviderUsesGrikAccount && (
                 <div className="flex items-center justify-between gap-3 border-b border-vscode-border px-3 py-2 text-[11px]">
                     <div className="min-w-0">
-                        <div className="font-medium text-vscode-fg/78">Grik account</div>
+                        <div className="font-medium text-vscode-fg/78">Grik Account</div>
                         <div className="truncate text-vscode-fg/45">{grikAccount?.summary.detail || 'Sign in to use Ricochet hosted subscription models.'}</div>
                         {grikAccount?.summary.quotaWarning && (
                             <div className={`mt-0.5 truncate ${grikAccount.summary.quotaWarning.tone === 'danger' ? 'text-rose-200/80' : 'text-amber-200/80'}`}>
@@ -406,37 +428,37 @@ export function ModelPickerModal({
                     </div>
                 ) : (
                     filteredModels.map((model, index) => {
-                        const usesGrikAccount = isHostedSubscriptionAccess(model.accessMode, model.keySource) || model.requiresSubscription;
                         const access = accessForModel(model);
                         const locked = !access.sendable;
+                        const comingSoon = access.state === 'coming_soon';
                         return (
                         <button
                             key={`${model.providerId}-${model.id}`}
                             onClick={() => {
                                 if (locked) {
-                                    openAccessAction(access);
-                                    onClose();
+                                    if (access.action) {
+                                        openAccessAction(access);
+                                        onClose();
+                                    }
                                     return;
                                 }
                                 onSelectModel({ id: model.id, name: model.name, provider: model.providerId, mayTrainOnYourPrompts: model.mayTrainOnYourPrompts, credentialMode: model.credentialMode });
                                 onClose();
                             }}
                             aria-disabled={locked}
-                            className={`w-full flex items-center justify-between px-3 py-2.5 transition-colors ${locked ? 'opacity-70' : ''} ${index === selectedIndex ? 'bg-vscode-list-hoverBackground' :
+                            disabled={comingSoon}
+                            className={`w-full flex items-center justify-between px-3 py-2.5 transition-colors ${locked ? 'opacity-70' : ''} ${comingSoon ? 'cursor-not-allowed' : ''} ${index === selectedIndex ? 'bg-vscode-list-hoverBackground' :
                                 model.id === currentModel.id ? 'bg-vscode-list-hoverBackground' : 'hover:bg-vscode-list-hoverBackground'
                                 }`}
                         >
                             <div className="flex-1 text-left">
                                 <div className="flex items-center gap-2">
                                     <span className="text-[11px] text-vscode-fg/85">{model.name}</span>
-                                    {model.isFree && (
-                                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">FREE</span>
-                                    )}
                                     <span className={`text-[9px] px-1.5 py-0.5 rounded ${modelAccessBadgeClass(access)}`} title={access.detail}>
                                         {access.label}
                                     </span>
-                                    {(model.requiresSubscription || model.accessMode === 'subscription') && (
-                                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300">SUB</span>
+                                    {(model.ownedBy === 'grik' || (model.providerId === 'grik' && model.id === 'ricochet-code')) && (
+                                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300">Grik model</span>
                                     )}
                                     {model.limited && (
                                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">LIMITED</span>
@@ -449,12 +471,6 @@ export function ModelPickerModal({
                                             <ShieldAlert className="w-3 h-3" />
                                             {modelPrivacyBadgeLabel(model)}
                                         </span>
-                                    )}
-                                    {locked && usesGrikAccount && (
-                                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-200">{selectedProviderAccessLabel.toUpperCase()}</span>
-                                    )}
-                                    {!usesGrikAccount && (model.hasUserKey || model.hasKey) && (
-                                        <span className="text-[9px] text-blue-400">✓</span>
                                     )}
                                 </div>
                                 <div className="flex items-center gap-2 text-[10px] text-vscode-fg/45">

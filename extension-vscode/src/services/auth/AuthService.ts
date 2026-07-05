@@ -34,7 +34,7 @@ type TokenResponse = {
     expires_at?: number | string;
     expiresAt?: number | string;
     status?: string;
-    error?: string;
+    error?: unknown;
 };
 
 const AUTH_SECRET_KEY = 'ricochet.grik.auth';
@@ -236,8 +236,7 @@ export class AuthService {
 
         const payload = await readJson<TokenResponse>(response);
         if (!response.ok) {
-            const error = payload?.error || (payload as any)?.message || `Device login failed with ${response.status}.`;
-            throw new Error(error);
+            throw new Error(apiErrorMessage(payload, `Device login failed with ${response.status}.`));
         }
 
         const accessToken = payload.access_token || payload.accessToken;
@@ -334,7 +333,7 @@ export class AuthService {
         });
         const payload = await readJson<T>(response);
         if (!response.ok) {
-            throw new HttpError(response.status, (payload as any)?.error || (payload as any)?.message || `Request failed with ${response.status}.`);
+            throw new HttpError(response.status, apiErrorMessage(payload, `Request failed with ${response.status}.`));
         }
         return payload;
     }
@@ -348,7 +347,7 @@ export class AuthService {
         });
         const payload = await readJson<unknown>(response);
         if (!response.ok) {
-            throw new HttpError(response.status, (payload as any)?.error || (payload as any)?.message || `Request failed with ${response.status}.`);
+            throw new HttpError(response.status, apiErrorMessage(payload, `Request failed with ${response.status}.`));
         }
         return payload;
     }
@@ -493,7 +492,7 @@ export class AuthService {
 
     private failDeviceAuth(error: any) {
         this.cancelLogin();
-        const message = error?.name === 'AbortError' ? 'Sign in was cancelled.' : error?.message || 'Sign in failed.';
+        const message = error?.name === 'AbortError' ? 'Sign in was cancelled.' : errorMessage(error, 'Sign in failed.');
         this.postMessage({ type: 'device_auth_failed', payload: { error: message } });
     }
 }
@@ -522,8 +521,57 @@ function isTransientError(error: unknown) {
     return /UND_ERR_CONNECT_TIMEOUT|connect timeout|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|Cannot reach Grik API/i.test(message);
 }
 
-function errorMessage(error: unknown) {
-    return error instanceof Error ? error.message : String(error || 'Request failed.');
+function errorMessage(error: unknown, fallback = 'Request failed.') {
+    if (error instanceof Error) {
+        return normalizeMessage(error.message, fallback);
+    }
+    return normalizeMessage(error, fallback);
+}
+
+function apiErrorMessage(payload: unknown, fallback: string) {
+    return normalizeMessage(payload, fallback);
+}
+
+function normalizeMessage(value: unknown, fallback: string): string {
+    if (typeof value === 'string') {
+        return value.trim() || fallback;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+        return String(value);
+    }
+    if (!value) {
+        return fallback;
+    }
+    if (typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        const nestedError = isPlainObject(record.error) ? record.error : null;
+        const candidates = [
+            nestedError?.message,
+            record.message,
+            typeof record.error === 'string' ? record.error : undefined,
+            nestedError?.code,
+            record.code,
+        ];
+        for (const candidate of candidates) {
+            if (typeof candidate === 'string' && candidate.trim()) {
+                return candidate.trim();
+            }
+            if (typeof candidate === 'number' || typeof candidate === 'boolean') {
+                return String(candidate);
+            }
+        }
+        try {
+            const serialized = JSON.stringify(value);
+            return serialized && serialized !== '{}' ? serialized : fallback;
+        } catch {
+            return fallback;
+        }
+    }
+    return fallback;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 async function readJson<T>(response: Response): Promise<T> {
