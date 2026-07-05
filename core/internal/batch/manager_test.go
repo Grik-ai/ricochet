@@ -172,6 +172,7 @@ func TestRunnerAbortCancelsRunningWorker(t *testing.T) {
 	if worker.Status != "aborted" {
 		t.Fatalf("worker status = %s", worker.Status)
 	}
+	waitForRunnerIdle(t, runner)
 }
 
 func TestManagerRecoversCorruptStateFile(t *testing.T) {
@@ -260,6 +261,21 @@ func waitForWorkerStatus(t *testing.T, manager *Manager, workerID, status string
 	}
 	t.Fatalf("worker %s did not reach %s", workerID, status)
 	return protocol.BatchWorker{}
+}
+
+func waitForRunnerIdle(t *testing.T, runner *Runner) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runner.mu.Lock()
+		active := len(runner.cancels)
+		runner.mu.Unlock()
+		if active == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("runner did not become idle")
 }
 
 func makeTestRepo(t *testing.T) string {
