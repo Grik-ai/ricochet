@@ -471,7 +471,9 @@ func (h *Hub) Close() error {
 	defer h.mu.Unlock()
 
 	for _, conn := range h.connections {
-		conn.Client.Close()
+		if conn != nil && conn.Client != nil {
+			conn.Client.Close()
+		}
 	}
 	return nil
 }

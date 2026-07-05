@@ -46,6 +46,18 @@ func TestHubLoadMergedSettingsProjectOverridesGlobal(t *testing.T) {
 	}
 }
 
+func TestHubCloseSkipsConnectionsWithoutClient(t *testing.T) {
+	hub := NewHubWithDirs(t.TempDir(), t.TempDir())
+	hub.mu.Lock()
+	hub.connections["failed-start"] = &McpConnection{Name: "failed-start", Status: "error"}
+	hub.connections["nil-connection"] = nil
+	hub.mu.Unlock()
+
+	if err := hub.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+}
+
 func writeMcpSettingsForTest(t *testing.T, path string, settings McpSettings) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
