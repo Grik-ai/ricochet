@@ -469,6 +469,29 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 			})
 		}
 
+	case "get_session_snapshot":
+		var payload struct {
+			SessionID string `json:"session_id"`
+		}
+		json.Unmarshal(msg.Payload, &payload)
+		sessionID := payload.SessionID
+		if sessionID == "" {
+			sessionID = "default"
+		}
+
+		if h.Agent == nil {
+			if err := h.lazyInitAgent(); err != nil {
+				writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
+				return
+			}
+		}
+
+		writer.Send(protocol.RPCMessage{
+			ID:      msg.ID,
+			Type:    "response",
+			Payload: protocol.EncodeRPC(h.Agent.GetSessionSnapshot(sessionID)),
+		})
+
 	case "list_sessions":
 		if h.Agent != nil {
 			sessions := h.Agent.ListSessions()

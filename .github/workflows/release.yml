@@ -296,6 +296,7 @@ jobs:
         run: |
           set -euo pipefail
           cd extension-vscode
+          npm run check:package-secrets
           npm run build
           npx @vscode/vsce package --no-dependencies --out "ricochet-${VERSION}.vsix"
 

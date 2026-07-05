@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,6 +40,75 @@ func TestDefaultProviderMatchesDocumentedDefault(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("Grik anonymous default Qwen model missing from provider catalog")
+	}
+}
+
+func TestLoadEnvLocalLoadsProjectEnvByDefault(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "core", "config"), 0755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "core", "config", ".env.local"), []byte("OPENROUTER_API_KEY=project-local-key\n"), 0600); err != nil {
+		t.Fatalf("write project env: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("chdir workspace: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("RICOCHET_DISABLE_PROJECT_ENV_LOCAL", "")
+	t.Setenv("RICOCHET_ENABLE_PROJECT_ENV_LOCAL", "")
+
+	pm := &ProvidersManager{userKeys: make(map[string]string)}
+	pm.loadEnvLocal()
+
+	if got := os.Getenv("OPENROUTER_API_KEY"); got != "project-local-key" {
+		t.Fatalf("OPENROUTER_API_KEY = %q, want project-local-key", got)
+	}
+}
+
+func TestLoadEnvLocalCanDisableProjectEnvButKeepUserEnv(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "core", "config"), 0755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "core", "config", ".env.local"), []byte("OPENROUTER_API_KEY=project-local-key\n"), 0600); err != nil {
+		t.Fatalf("write project env: %v", err)
+	}
+
+	home := t.TempDir()
+	userConfigDir := filepath.Join(home, ".ricochet")
+	if err := os.MkdirAll(userConfigDir, 0755); err != nil {
+		t.Fatalf("mkdir user config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(userConfigDir, ".env.local"), []byte("OPENROUTER_API_KEY=user-local-key\n"), 0600); err != nil {
+		t.Fatalf("write user env: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("chdir workspace: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("HOME", home)
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("RICOCHET_DISABLE_PROJECT_ENV_LOCAL", "1")
+	t.Setenv("RICOCHET_ENABLE_PROJECT_ENV_LOCAL", "")
+
+	pm := &ProvidersManager{userKeys: make(map[string]string)}
+	pm.loadEnvLocal()
+
+	if got := os.Getenv("OPENROUTER_API_KEY"); got != "user-local-key" {
+		t.Fatalf("OPENROUTER_API_KEY = %q, want user-local-key", got)
 	}
 }
 

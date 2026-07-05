@@ -29,7 +29,11 @@ export class CoreProcess {
     private ready = false;
     private readyPayload: ReadyPayload | null = null;
 
-    constructor(private rootPath: string, private extensionPath: string) { }
+    constructor(
+        private rootPath: string,
+        private extensionPath: string,
+        private extensionMode: vscode.ExtensionMode = vscode.ExtensionMode.Production
+    ) { }
 
     async ensureStarted(reason = 'request'): Promise<void> {
         if (this.process && this.ready) {
@@ -52,15 +56,24 @@ export class CoreProcess {
 
         const binaryPath = this.getBinaryPath();
 
-        // Load default API keys from .env.keys file
-        const envKeys = this.loadEnvKeys();
+        const envKeys = this.loadDevelopmentEnvKeys();
 
         console.log(`[Extension] Starting core process (${reason}): ${binaryPath} in ${this.rootPath}`);
+
+        const childEnv: NodeJS.ProcessEnv = {
+            ...process.env,
+            ...envKeys,
+            PROJECT_ROOT: this.rootPath,
+            RICOCHET_EXTENSION_MODE: vscode.ExtensionMode[this.extensionMode]?.toLowerCase() || String(this.extensionMode)
+        };
+        if (this.extensionMode === vscode.ExtensionMode.Production && process.env.RICOCHET_ENABLE_PROJECT_ENV_LOCAL !== '1') {
+            childEnv.RICOCHET_DISABLE_PROJECT_ENV_LOCAL = '1';
+        }
 
         this.process = spawn(binaryPath, ['--stdio'], {
             cwd: this.rootPath,
             stdio: ['pipe', 'pipe', 'pipe'],
-            env: { ...process.env, ...envKeys, PROJECT_ROOT: this.rootPath }
+            env: childEnv
         });
 
         if (!this.process.stdout || !this.process.stdin) {
@@ -316,11 +329,21 @@ export class CoreProcess {
     }
 
     /**
-     * Load default API keys from .env.keys file
+     * Load local development API keys from .env.keys.
+     * Production extensions must never consume bundled key files; a packaged
+     * extension with .env.keys would otherwise leak the packager's credentials.
      */
-    private loadEnvKeys(): Record<string, string> {
+    private loadDevelopmentEnvKeys(): Record<string, string> {
         const envPath = path.join(this.extensionPath, '.env.keys');
         const result: Record<string, string> = {};
+        const explicitDevOptIn = process.env.RICOCHET_ENABLE_EXTENSION_ENV_KEYS === '1';
+
+        if (this.extensionMode !== vscode.ExtensionMode.Development && !explicitDevOptIn) {
+            if (fs.existsSync(envPath)) {
+                console.warn('Ignoring .env.keys in installed Ricochet extension; configure provider keys in settings or user env instead.');
+            }
+            return result;
+        }
 
         try {
             if (fs.existsSync(envPath)) {
@@ -336,7 +359,7 @@ export class CoreProcess {
                         }
                     }
                 }
-                console.log(`Loaded ${Object.keys(result).length} API keys from .env.keys`);
+                console.log(`Loaded ${Object.keys(result).length} development API keys from .env.keys`);
             }
         } catch (error) {
             console.warn('Failed to load .env.keys:', error);

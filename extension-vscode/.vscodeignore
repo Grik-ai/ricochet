@@ -6,3 +6,13 @@ tsconfig.json
 node_modules/**
 **/*.map
 .DS_Store
+.env
+.env.*
+*.keys
+*.local
+**/.env
+**/.env.*
+**/*.keys
+**/*.local
+core/config/.env.local
+config/.env.local

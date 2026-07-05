@@ -195,22 +195,26 @@ func (pm *ProvidersManager) loadEnvLocal() {
 
 	// Get home directory
 	home, _ := os.UserHomeDir()
+	disableProjectEnvLocal := strings.EqualFold(os.Getenv("RICOCHET_DISABLE_PROJECT_ENV_LOCAL"), "1") &&
+		!strings.EqualFold(os.Getenv("RICOCHET_ENABLE_PROJECT_ENV_LOCAL"), "1")
 
 	// Look for .env.local in various locations
-	paths := []string{
-		// Relative to executable (bin/darwin-arm64 -> ../../core/config)
-		filepath.Join(execDir, "..", "..", "core", "config", ".env.local"),
-		filepath.Join(execDir, "config", ".env.local"),
-		filepath.Join(execDir, "..", "config", ".env.local"),
-		// Current directory variations
-		filepath.Join(cwd, "config", ".env.local"),
-		filepath.Join(cwd, "core", "config", ".env.local"),
-		"config/.env.local",
-		"core/config/.env.local",
-		".env.local",
-		// Home directory
-		filepath.Join(home, ".ricochet", ".env.local"),
+	paths := []string{}
+	if !disableProjectEnvLocal {
+		paths = append(paths,
+			// Relative to executable (bin/darwin-arm64 -> ../../core/config)
+			filepath.Join(execDir, "..", "..", "core", "config", ".env.local"),
+			filepath.Join(execDir, "config", ".env.local"),
+			filepath.Join(execDir, "..", "config", ".env.local"),
+			// Current directory variations
+			filepath.Join(cwd, "config", ".env.local"),
+			filepath.Join(cwd, "core", "config", ".env.local"),
+			"config/.env.local",
+			"core/config/.env.local",
+			".env.local",
+		)
 	}
+	paths = append(paths, filepath.Join(home, ".ricochet", ".env.local"))
 
 	for _, path := range paths {
 		data, err := os.ReadFile(path)

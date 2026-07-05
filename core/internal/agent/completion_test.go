@@ -279,7 +279,7 @@ func TestHardBudgetCompletesWithLastSubstantialDraft(t *testing.T) {
 	if !strings.Contains(final.Content, "Polybot Project Comprehensive Analysis") {
 		t.Fatalf("expected final to use last substantial draft, got %q", final.Content)
 	}
-	if len(progress) == 0 || progress[len(progress)-1].Result != "BUDGET_EXCEEDED" {
+	if len(progress) == 0 || progress[len(progress)-1].Result != "budget_exceeded" || progress[len(progress)-1].Event != "stopped" || progress[len(progress)-1].IsActive {
 		t.Fatalf("expected budget-exceeded stopped progress, got %#v", progress)
 	}
 }

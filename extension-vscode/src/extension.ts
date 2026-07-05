@@ -23,7 +23,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // Create the Go core process wrapper, but do not spawn the binary until a
     // Ricochet view/command actually sends a request. This prevents passive IDE
     // windows from becoming Telegram/Discord gateway owners.
-    coreProcess = new CoreProcess(workspacePath, context.extensionPath);
+    coreProcess = new CoreProcess(workspacePath, context.extensionPath, context.extensionMode);
 
     // Initialize Language Service (LSP Bridge)
     new LanguageService(coreProcess);

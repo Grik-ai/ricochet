@@ -416,6 +416,15 @@ function hasBlockingActiveWorkers(context: SessionContext): boolean {
     return Boolean(context.missionTitle) && hasActiveWorkers(context.workers);
 }
 
+function hasRunningMessageToolCalls(message: any): boolean {
+    const toolCalls = Array.isArray(message?.toolCalls) ? message.toolCalls : [];
+    return toolCalls.some((tc: any) => tc.status !== 'completed' && tc.status !== 'error');
+}
+
+function isTerminalAssistantMessage(message: any): boolean {
+    return message?.role === 'assistant' && message.isStreaming !== true;
+}
+
 function completeRuntimeWorkers(workers: Record<string, WorkerState>, timestamp = Date.now()): Record<string, WorkerState> {
     return Object.fromEntries(Object.entries(workers).map(([id, worker]) => {
         if (!worker.isActive && !/queued|running|in progress|active/i.test(worker.status || '')) {
@@ -708,7 +717,6 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
             let workers = { ...context.workers };
             const toolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls : [];
             const hasRunningToolCalls = toolCalls.some((tc: any) => tc.status !== 'completed' && tc.status !== 'error');
-            const isFinalNoWorkUpdate = msg.isStreaming === false && !hasRunningToolCalls && !hasActiveWorkers(context.workers);
 
             // 1. Text Content
             if (msg.content) {
@@ -810,6 +818,7 @@ function transitionFromStreaming(event: SessionEvent, context: SessionContext, c
                 });
             }
 
+            const isFinalNoWorkUpdate = isTerminalAssistantMessage(msg) && !hasRunningToolCalls && !hasActiveWorkers(workers);
             if (isFinalNoWorkUpdate) {
                 return {
                     nextState: SessionState.completed,
@@ -1078,9 +1087,7 @@ function transitionFromCompleted(event: SessionEvent, context?: SessionContext):
         case "chat_update": {
             const ctx = context || createInitialContext();
             const msg = event.message;
-            const toolCalls = Array.isArray(msg?.toolCalls) ? msg.toolCalls : [];
-            const hasRunningToolCalls = toolCalls.some((tc: any) => tc.status !== 'completed' && tc.status !== 'error');
-            if (msg?.isStreaming === false && !hasRunningToolCalls && !hasBlockingActiveWorkers(ctx)) {
+            if (isTerminalAssistantMessage(msg) && !hasRunningMessageToolCalls(msg) && !hasBlockingActiveWorkers(ctx)) {
                 return {
                     nextState: SessionState.completed,
                     contextUpdate: completionContextUpdate(ctx, msg.timestamp || Date.now())

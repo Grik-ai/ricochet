@@ -26,7 +26,8 @@ export class AgentService {
         private readonly core: CoreProcess,
         private readonly postMessage: (message: any) => void,
         private readonly sessionService: SessionService,
-        private readonly onSessionMetadataChanged?: (metadata: SessionMetadata) => void
+        private readonly onSessionMetadataChanged?: (metadata: SessionMetadata) => void,
+        private readonly onActiveSessionChanged?: (sessionId: string | null) => void
     ) {
         this.core.onMessage('plan_updated', async () => {
             // Fetch fresh tasks and broadcast to UI
@@ -70,6 +71,7 @@ export class AgentService {
         const workspaceDir = vscode.workspace.workspaceFolders?.[0].uri.fsPath || '';
         const existingSessionId = payload?.session_id;
         this.activeSessionId = existingSessionId || await this.sessionService.createSession(workspaceDir, payload?.prompt || "Start autonomous task.");
+        this.onActiveSessionChanged?.(this.activeSessionId);
 
         let prompt = payload?.prompt || "Start autonomous task.";
 
@@ -160,7 +162,7 @@ export class AgentService {
         }
 
         // Detect Completion (Stop)
-        if (!msg.isStreaming && (!msg.toolCalls || msg.toolCalls.length === 0)) {
+        if (msg.isStreaming !== true && (!msg.toolCalls || msg.toolCalls.length === 0)) {
             this.postMessage({ type: 'ask_completion_result' }); // Marks as done in UI
         }
     }
@@ -172,6 +174,7 @@ export class AgentService {
 
             // Mark as null immediately to ignore incoming messages for this ID
             this.activeSessionId = null;
+            this.onActiveSessionChanged?.(null);
 
             // Send abort signal to Core
             try {

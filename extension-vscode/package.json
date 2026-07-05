@@ -1,257 +1,258 @@
 {
-    "name": "ricochet",
-    "displayName": "Ricochet",
-    "description": "Ricochet is the first hybrid coding agent that lives in your IDE and your pocket. Code autonomously with a powerful VS Code assistant, then switch to Ether Mode to control your development environment remotely via messenger. Build, debug, and deploy from anywhere.",
-    "version": "0.1.0",
-    "publisher": "grik",
-    "icon": "assets/ricochet.png",
-    "repository": {
-        "type": "git",
-        "url": "https://github.com/Grik-ai/ricochet.git"
-    },
-    "engines": {
-        "vscode": "^1.85.0"
-    },
-    "categories": [
-        "Programming Languages",
-        "Machine Learning",
-        "Chat"
-    ],
-    "keywords": [
-        "ai",
-        "coding",
-        "assistant",
-        "telegram",
-        "live-mode",
-        "agent"
-    ],
-    "activationEvents": [
-        "onView:ricochet.chatView",
-        "onView:ricochet.pendingChanges",
-        "onCommand:ricochet.newChat",
-        "onCommand:ricochet.toggleLiveMode",
-        "onCommand:ricochet.openAgent",
-        "onCommand:ricochet.openHistory",
-        "onCommand:ricochet.openAccount",
-        "onCommand:ricochet.openSettings",
-        "onCommand:ricochet.installCli",
-        "onCommand:ricochet.refreshPendingChanges",
-        "onCommand:ricochet.openPendingChange",
-        "onCommand:ricochet.acceptEdit",
-        "onCommand:ricochet.rejectEdit",
-        "onCommand:ricochet.acceptHunk",
-        "onCommand:ricochet.rejectHunk"
-    ],
-    "main": "./dist/extension.js",
-    "contributes": {
-        "viewsContainers": {
-            "activitybar": [
-                {
-                    "id": "ricochet-sidebar",
-                    "title": "Ricochet",
-                    "icon": "assets/icon.svg"
-                }
-            ]
-        },
-        "views": {
-            "ricochet-sidebar": [
-                {
-                    "type": "webview",
-                    "id": "ricochet.chatView",
-                    "name": "Ricochet Chat",
-                    "icon": "assets/icon.svg"
-                }
-            ],
-            "explorer": [
-                {
-                    "id": "ricochet.pendingChanges",
-                    "name": "Ricochet Pending Changes",
-                    "icon": "$(diff)"
-                }
-            ]
-        },
-        "commands": [
-            {
-                "command": "ricochet.newChat",
-                "title": "New Task",
-                "icon": "$(plus)"
-            },
-            {
-                "command": "ricochet.toggleLiveMode",
-                "title": "Toggle Live Mode",
-                "icon": "assets/voice.svg"
-            },
-            {
-                "command": "ricochet.openAgent",
-                "title": "Open Agent",
-                "icon": "$(robot)"
-            },
-            {
-                "command": "ricochet.openHistory",
-                "title": "Open History",
-                "icon": "$(history)"
-            },
-            {
-                "command": "ricochet.openAccount",
-                "title": "Open Grik Account",
-                "icon": "$(account)"
-            },
-            {
-                "command": "ricochet.openSettings",
-                "title": "Open Settings",
-                "icon": "$(settings-gear)"
-            },
-            {
-                "command": "ricochet.installCli",
-                "title": "Install CLI Globally",
-                "icon": "$(terminal)"
-            },
-            {
-                "command": "ricochet.refreshPendingChanges",
-                "title": "Refresh Pending Changes",
-                "icon": "$(refresh)"
-            },
-            {
-                "command": "ricochet.openPendingChange",
-                "title": "Open Pending Change",
-                "icon": "$(go-to-file)"
-            },
-            {
-                "command": "ricochet.acceptEdit",
-                "title": "Accept File",
-                "icon": "$(check)"
-            },
-            {
-                "command": "ricochet.rejectEdit",
-                "title": "Reject File",
-                "icon": "$(x)"
-            },
-            {
-                "command": "ricochet.acceptHunk",
-                "title": "Accept Hunk",
-                "icon": "$(check)"
-            },
-            {
-                "command": "ricochet.rejectHunk",
-                "title": "Reject Hunk",
-                "icon": "$(x)"
-            }
-        ],
-        "menus": {
-            "view/title": [
-                {
-                    "command": "ricochet.newChat",
-                    "group": "navigation@10",
-                    "when": "view == ricochet.chatView"
-                },
-                {
-                    "command": "ricochet.toggleLiveMode",
-                    "group": "navigation@20",
-                    "when": "view == ricochet.chatView"
-                },
-                {
-                    "command": "ricochet.openAgent",
-                    "group": "navigation@30",
-                    "when": "view == ricochet.chatView"
-                },
-                {
-                    "command": "ricochet.openHistory",
-                    "group": "navigation@40",
-                    "when": "view == ricochet.chatView"
-                },
-                {
-                    "command": "ricochet.openAccount",
-                    "group": "navigation@45",
-                    "when": "view == ricochet.chatView"
-                },
-                {
-                    "command": "ricochet.openSettings",
-                    "group": "navigation@50",
-                    "when": "view == ricochet.chatView"
-                },
-                {
-                    "command": "ricochet.refreshPendingChanges",
-                    "group": "navigation@10",
-                    "when": "view == ricochet.pendingChanges"
-                }
-            ],
-            "view/item/context": [
-                {
-                    "command": "ricochet.openPendingChange",
-                    "group": "inline@1",
-                    "when": "view == ricochet.pendingChanges && viewItem =~ /pending(File|Hunk)/"
-                },
-                {
-                    "command": "ricochet.acceptEdit",
-                    "group": "inline@2",
-                    "when": "view == ricochet.pendingChanges && viewItem == pendingFile"
-                },
-                {
-                    "command": "ricochet.rejectEdit",
-                    "group": "inline@3",
-                    "when": "view == ricochet.pendingChanges && viewItem == pendingFile"
-                },
-                {
-                    "command": "ricochet.acceptHunk",
-                    "group": "inline@2",
-                    "when": "view == ricochet.pendingChanges && viewItem == pendingHunk"
-                },
-                {
-                    "command": "ricochet.rejectHunk",
-                    "group": "inline@3",
-                    "when": "view == ricochet.pendingChanges && viewItem == pendingHunk"
-                }
-            ]
-        },
-        "configuration": {
-            "title": "Ricochet",
-            "properties": {
-                "ricochet.grik.apiBaseUrl": {
-                    "type": "string",
-                    "default": "https://grik.io/api/v1",
-                    "description": "Base URL for the Grik API used by Ricochet account, credits, and device login. For local development use http://localhost:8080/api/v1."
-                },
-                "ricochet.grik.webBaseUrl": {
-                    "type": "string",
-                    "default": "https://grik.io",
-                    "description": "Base URL for Grik web dashboard, registration, and billing pages."
-                },
-                "ricochet.webview.devServerUrl": {
-                    "type": "string",
-                    "default": "",
-                    "description": "Development only. When set to a Vite dev server URL such as http://127.0.0.1:5173, Ricochet loads the webview from that server for hot reload instead of webview-dist."
-                }
-            }
+  "name": "ricochet",
+  "displayName": "Ricochet",
+  "description": "Ricochet is the first hybrid coding agent that lives in your IDE and your pocket. Code autonomously with a powerful VS Code assistant, then switch to Ether Mode to control your development environment remotely via messenger. Build, debug, and deploy from anywhere.",
+  "version": "0.1.0",
+  "publisher": "grik",
+  "icon": "assets/ricochet.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Grik-ai/ricochet.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Chat"
+  ],
+  "keywords": [
+    "ai",
+    "coding",
+    "assistant",
+    "telegram",
+    "live-mode",
+    "agent"
+  ],
+  "activationEvents": [
+    "onView:ricochet.chatView",
+    "onView:ricochet.pendingChanges",
+    "onCommand:ricochet.newChat",
+    "onCommand:ricochet.toggleLiveMode",
+    "onCommand:ricochet.openAgent",
+    "onCommand:ricochet.openHistory",
+    "onCommand:ricochet.openAccount",
+    "onCommand:ricochet.openSettings",
+    "onCommand:ricochet.installCli",
+    "onCommand:ricochet.refreshPendingChanges",
+    "onCommand:ricochet.openPendingChange",
+    "onCommand:ricochet.acceptEdit",
+    "onCommand:ricochet.rejectEdit",
+    "onCommand:ricochet.acceptHunk",
+    "onCommand:ricochet.rejectHunk"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ricochet-sidebar",
+          "title": "Ricochet",
+          "icon": "assets/icon.svg"
         }
+      ]
     },
-    "scripts": {
-        "vscode:prepublish": "npm run build",
-        "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node && npm run copy-wasm",
-        "watch": "npm run build -- --watch",
-        "copy-wasm": "cp node_modules/tree-sitter-wasms/out/*.wasm dist/",
-        "lint": "eslint src --ext ts",
-        "test": "vitest"
+    "views": {
+      "ricochet-sidebar": [
+        {
+          "type": "webview",
+          "id": "ricochet.chatView",
+          "name": "Ricochet Chat",
+          "icon": "assets/icon.svg"
+        }
+      ],
+      "explorer": [
+        {
+          "id": "ricochet.pendingChanges",
+          "name": "Ricochet Pending Changes",
+          "icon": "$(diff)"
+        }
+      ]
     },
-    "devDependencies": {
-        "@types/node": "^20.10.0",
-        "@types/vscode": "^1.85.0",
-        "@typescript-eslint/eslint-plugin": "^6.13.0",
-        "@typescript-eslint/parser": "^6.13.0",
-        "esbuild": "^0.19.8",
-        "eslint": "^8.54.0",
-        "typescript": "^5.3.2",
-        "vitest": "^1.0.0"
+    "commands": [
+      {
+        "command": "ricochet.newChat",
+        "title": "New Task",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "ricochet.toggleLiveMode",
+        "title": "Toggle Live Mode",
+        "icon": "assets/voice.svg"
+      },
+      {
+        "command": "ricochet.openAgent",
+        "title": "Open Agent",
+        "icon": "$(robot)"
+      },
+      {
+        "command": "ricochet.openHistory",
+        "title": "Open History",
+        "icon": "$(history)"
+      },
+      {
+        "command": "ricochet.openAccount",
+        "title": "Open Grik Account",
+        "icon": "$(account)"
+      },
+      {
+        "command": "ricochet.openSettings",
+        "title": "Open Settings",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "ricochet.installCli",
+        "title": "Install CLI Globally",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "ricochet.refreshPendingChanges",
+        "title": "Refresh Pending Changes",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "ricochet.openPendingChange",
+        "title": "Open Pending Change",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "ricochet.acceptEdit",
+        "title": "Accept File",
+        "icon": "$(check)"
+      },
+      {
+        "command": "ricochet.rejectEdit",
+        "title": "Reject File",
+        "icon": "$(x)"
+      },
+      {
+        "command": "ricochet.acceptHunk",
+        "title": "Accept Hunk",
+        "icon": "$(check)"
+      },
+      {
+        "command": "ricochet.rejectHunk",
+        "title": "Reject Hunk",
+        "icon": "$(x)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "ricochet.newChat",
+          "group": "navigation@10",
+          "when": "view == ricochet.chatView"
+        },
+        {
+          "command": "ricochet.toggleLiveMode",
+          "group": "navigation@20",
+          "when": "view == ricochet.chatView"
+        },
+        {
+          "command": "ricochet.openAgent",
+          "group": "navigation@30",
+          "when": "view == ricochet.chatView"
+        },
+        {
+          "command": "ricochet.openHistory",
+          "group": "navigation@40",
+          "when": "view == ricochet.chatView"
+        },
+        {
+          "command": "ricochet.openAccount",
+          "group": "navigation@45",
+          "when": "view == ricochet.chatView"
+        },
+        {
+          "command": "ricochet.openSettings",
+          "group": "navigation@50",
+          "when": "view == ricochet.chatView"
+        },
+        {
+          "command": "ricochet.refreshPendingChanges",
+          "group": "navigation@10",
+          "when": "view == ricochet.pendingChanges"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "ricochet.openPendingChange",
+          "group": "inline@1",
+          "when": "view == ricochet.pendingChanges && viewItem =~ /pending(File|Hunk)/"
+        },
+        {
+          "command": "ricochet.acceptEdit",
+          "group": "inline@2",
+          "when": "view == ricochet.pendingChanges && viewItem == pendingFile"
+        },
+        {
+          "command": "ricochet.rejectEdit",
+          "group": "inline@3",
+          "when": "view == ricochet.pendingChanges && viewItem == pendingFile"
+        },
+        {
+          "command": "ricochet.acceptHunk",
+          "group": "inline@2",
+          "when": "view == ricochet.pendingChanges && viewItem == pendingHunk"
+        },
+        {
+          "command": "ricochet.rejectHunk",
+          "group": "inline@3",
+          "when": "view == ricochet.pendingChanges && viewItem == pendingHunk"
+        }
+      ]
     },
-    "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.25.1",
-        "chokidar": "^5.0.0",
-        "delay": "^7.0.0",
-        "fast-deep-equal": "^3.1.3",
-        "p-wait-for": "^6.0.0",
-        "reconnecting-eventsource": "^1.6.4",
-        "simple-git": "^3.30.0",
-        "zod": "^4.3.5",
-        "web-tree-sitter": "^0.22.6",
-        "tree-sitter-wasms": "^0.1.11"
+    "configuration": {
+      "title": "Ricochet",
+      "properties": {
+        "ricochet.grik.apiBaseUrl": {
+          "type": "string",
+          "default": "https://grik.io/api/v1",
+          "description": "Base URL for the Grik API used by Ricochet account, credits, and device login. For local development use http://localhost:8080/api/v1."
+        },
+        "ricochet.grik.webBaseUrl": {
+          "type": "string",
+          "default": "https://grik.io",
+          "description": "Base URL for Grik web dashboard, registration, and billing pages."
+        },
+        "ricochet.webview.devServerUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Development only. When set to a Vite dev server URL such as http://127.0.0.1:5173, Ricochet loads the webview from that server for hot reload instead of webview-dist."
+        }
+      }
     }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run check:package-secrets && npm run build",
+    "check:package-secrets": "../scripts/check-extension-package-secrets.sh",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node && npm run copy-wasm",
+    "watch": "npm run build -- --watch",
+    "copy-wasm": "cp node_modules/tree-sitter-wasms/out/*.wasm dist/",
+    "lint": "eslint src --ext ts",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "esbuild": "^0.19.8",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.2",
+    "vitest": "^1.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "chokidar": "^5.0.0",
+    "delay": "^7.0.0",
+    "fast-deep-equal": "^3.1.3",
+    "p-wait-for": "^6.0.0",
+    "reconnecting-eventsource": "^1.6.4",
+    "simple-git": "^3.30.0",
+    "zod": "^4.3.5",
+    "web-tree-sitter": "^0.22.6",
+    "tree-sitter-wasms": "^0.1.11"
+  }
 }

@@ -36,6 +36,61 @@ describe('session state machine completion', () => {
         });
     });
 
+    it('treats final assistant chat_update without isStreaming as completed from streaming', () => {
+        const machine = createSessionStateMachine();
+
+        machine.send({ type: 'start_session', content: 'Analyze project' });
+        machine.send({ type: 'session_created', sessionId: 'session-1' });
+        machine.send({ type: 'api_req_started' });
+
+        machine.send({
+            type: 'chat_update',
+            message: {
+                id: 'assistant-final-no-flag',
+                role: 'assistant',
+                content: 'Analysis complete.',
+                timestamp: 100,
+                toolCalls: [],
+            },
+        });
+
+        expect(machine.getState()).toBe(SessionState.completed);
+        expect(machine.getUiState()).toEqual({
+            showSpinner: false,
+            showCancelButton: false,
+            isActive: false,
+        });
+    });
+
+    it('treats budget exceeded progress as terminal stopped state', () => {
+        const machine = createSessionStateMachine();
+
+        machine.send({ type: 'session_created', sessionId: 'session-1' });
+        machine.send({ type: 'api_req_started' });
+        machine.send({
+            type: 'task_progress',
+            payload: {
+                session_id: 'session-1',
+                run_id: 'run-1',
+                event: 'stopped',
+                status: 'Run stopped after budget limit. The agent reached its internal exploration budget and returned the latest available result.',
+                result: 'budget_exceeded',
+                is_active: false,
+            },
+        });
+
+        expect(machine.getState()).toBe(SessionState.stopped);
+        expect(machine.getUiState()).toEqual({
+            showSpinner: false,
+            showCancelButton: false,
+            isActive: false,
+        });
+        expect(machine.getContext()).toMatchObject({
+            missionStatus: 'stopped',
+            parentTurnStatus: 'failed',
+        });
+    });
+
     it('does not keep composer active for non-mission worker leftovers after completion', () => {
         const machine = createSessionStateMachine();
 

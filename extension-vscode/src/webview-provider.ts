@@ -3,7 +3,7 @@ import { CoreProcess } from './core-process';
 import { McpServerManager } from './services/mcp/McpServerManager';
 import { McpHub } from './services/mcp/McpHub';
 import { ShadowCheckpointService } from './services/checkpoints/ShadowCheckpointService';
-import { SessionMetadata, SessionService } from './services/session/SessionService';
+import { SessionData, SessionMetadata, SessionService } from './services/session/SessionService';
 import { ChatService } from './services/chat/ChatService';
 import { McpService } from './services/mcp/McpService';
 import { AgentService } from './services/agent/AgentService';
@@ -64,6 +64,13 @@ interface PendingInteractionRequest {
     question: string;
     toolName?: string;
     kind: 'permission' | 'choice';
+}
+
+interface CoreSessionSnapshot {
+    session_id?: string;
+    sessionId?: string;
+    messages?: any[];
+    todos?: any[];
 }
 
 function deriveToolNameFromApprovalQuestion(question: string): string | undefined {
@@ -127,6 +134,9 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
     private networkHealthService?: NetworkHealthService;
     private authService: AuthService;
     private agentService: AgentService;
+    private coreSessionSnapshotUnsupported = false;
+    private coreSessionSnapshotPreflightStarted = false;
+    private coreSessionSnapshotPreflightInFlight = false;
     private pendingPermissionRequests: Map<string, PendingInteractionRequest> = new Map();
     private pendingChoices: Map<string, string[]> = new Map();
 
@@ -139,7 +149,14 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
             this.core,
             (msg) => this.postMessage(msg),
             this.sessionService,
-            (metadata) => this.handleSessionMetadataChanged(metadata)
+            (metadata) => this.handleSessionMetadataChanged(metadata),
+            (sessionId) => {
+                if (sessionId) {
+                    this.chatService?.setActiveSession(sessionId);
+                } else {
+                    this.chatService?.setActiveSession(null);
+                }
+            }
         );
 
         // Initialize services
@@ -175,6 +192,13 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
             this.networkHealthService?.recordActivity(Date.now());
             this.chatService?.onChatUpdate(payload);
             this.agentService.onChatUpdate(payload);
+        });
+
+        this.core.onMessage('ready', () => {
+            this.coreSessionSnapshotUnsupported = false;
+            this.coreSessionSnapshotPreflightStarted = false;
+            this.chatService?.enableSessionSnapshotSync();
+            this.preflightCoreSessionSnapshotSupport();
         });
 
         this.core.onMessage('task_progress', (payload) => {
@@ -382,6 +406,7 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
         this.restoreWebviewState().catch(console.error);
         this.authService.syncState().catch(console.error);
         this.networkHealthService?.start();
+        this.preflightCoreSessionSnapshotSupport();
 
         // Handle messages from webview
         webviewView.webview.onDidReceiveMessage(async (message) => {
@@ -803,31 +828,44 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
                         await this.createNewSession();
                         break;
 
-                    case 'load_session':
+                    case 'load_session': {
                         // Cancel any active runtime before loading another chat. Late events from the
                         // old session are filtered by ChatService, but aborting here keeps the core loop
                         // and the input state aligned with the visible session.
                         await this.chatService?.cancelActiveChatRuntime('load_session');
                         await this.agentService.handleMessage({ type: 'cancel_session' });
 
-                        const sessionData = await this.sessionService.loadSession(message.payload.id);
+                        const sessionId = message.payload.id;
+                        const sessionData = await this.loadSessionDataWithCoreRepair(sessionId);
                         if (sessionData) {
-                            this.chatService?.setActiveSession(message.payload.id);
-                            await this.syncViewTitleForSession(message.payload.id);
+                            this.chatService?.setActiveSession(sessionId);
+                            await this.syncViewTitleForSession(sessionId);
+
+                            let renderState: any = null;
 
                             try {
                                 // Hydrate backend with session history
                                 await this.core.send('hydrate_session', {
-                                    session_id: message.payload.id,
+                                    session_id: sessionId,
                                     messages: sessionData.messages
                                 });
+                                renderState = await this.core.send('get_state', { session_id: sessionId });
                             } catch (e) {
                                 console.error('Failed to hydrate session:', e);
                             }
 
-                            this.postMessage({ type: 'session_loaded', payload: { id: message.payload.id, ...sessionData } });
+                            this.postMessage({
+                                type: 'session_loaded',
+                                payload: {
+                                    id: sessionId,
+                                    ...sessionData,
+                                    messages: renderState?.messages || sessionData.messages,
+                                    todos: renderState?.todos || sessionData.todos || []
+                                }
+                            });
                         }
                         break;
+                    }
 
                     case 'delete_session':
                         await this.sessionService.deleteSession(message.payload.id);
@@ -859,7 +897,8 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
                         // Sync active session ID to ChatService so it can persist mission logs
                         if (message.type === 'start_session' && this.agentService.activeSessionId) {
                             if (this.chatService) {
-                                this.chatService.activeSessionId = this.agentService.activeSessionId;
+                                this.chatService.setActiveSession(this.agentService.activeSessionId);
+                                await this.chatService.syncSessionFromCore(this.agentService.activeSessionId);
                             }
                         }
                         break;
@@ -991,7 +1030,7 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
                         try {
                             const sessionId = explicitSessionIdFromPayload(message.payload) || '';
                             if (sessionId) {
-                                const sessionData = await this.sessionService.loadSession(sessionId);
+                                const sessionData = await this.loadSessionDataWithCoreRepair(sessionId);
                                 await this.core.send('hydrate_session', {
                                     session_id: sessionId,
                                     messages: sessionData?.messages || []
@@ -1009,7 +1048,7 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
                         try {
                             const sessionId = message.payload?.session_id || this.chatService?.activeSessionId || this.agentService?.activeSessionId || '';
                             if (sessionId) {
-                                const sessionData = await this.sessionService.loadSession(sessionId);
+                                const sessionData = await this.loadSessionDataWithCoreRepair(sessionId);
                                 await this.core.send('hydrate_session', {
                                     session_id: sessionId,
                                     messages: sessionData?.messages || []
@@ -1020,14 +1059,7 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
                                 this.postMessage({ type: 'context_compaction', payload: result.event });
                             }
                             if (sessionId && result?.event?.event === 'context_condensed') {
-                                const state: any = await this.core.send('get_state', { session_id: sessionId });
-                                const existing = await this.sessionService.loadSession(sessionId);
-                                const workspaceDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-                                await this.sessionService.saveSession(sessionId, {
-                                    messages: state?.messages || existing?.messages || [],
-                                    todos: state?.todos || existing?.todos || [],
-                                    usage: existing?.usage
-                                }, workspaceDir);
+                                await this.saveCoreSnapshotToSession(sessionId);
                             }
                             if (result?.status) {
                                 this.postMessage({ type: 'context_status', payload: result.status });
@@ -1613,6 +1645,126 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
 
             this.postMessage({ type: 'session_created', payload: { id: newId } });
         }
+    }
+
+    private async loadSessionDataWithCoreRepair(sessionId: string): Promise<SessionData | null> {
+        const localData = await this.sessionService.loadSession(sessionId);
+        const snapshot = await this.getCoreSessionSnapshot(sessionId);
+
+        if (snapshot && this.shouldRepairSessionFromCore(localData, snapshot)) {
+            const repaired = await this.saveCoreSnapshotToSession(sessionId, snapshot, localData);
+            if (repaired) {
+                console.log('[WebviewProvider] Repaired session history from core snapshot:', {
+                    session_id: sessionId,
+                    local_messages: localData?.messages?.length || 0,
+                    core_messages: snapshot.messages?.length || 0
+                });
+                return repaired;
+            }
+        }
+
+        return localData;
+    }
+
+    private async getCoreSessionSnapshot(sessionId: string): Promise<CoreSessionSnapshot | null> {
+        if (!sessionId) return null;
+        if (this.coreSessionSnapshotUnsupported) return null;
+
+        try {
+            const snapshot = await this.core.send('get_session_snapshot', { session_id: sessionId }) as CoreSessionSnapshot;
+            if (!snapshot || !Array.isArray(snapshot.messages)) {
+                return null;
+            }
+            return snapshot;
+        } catch (e) {
+            if (this.isUnsupportedSnapshotError(e)) {
+                this.disableCoreSessionSnapshotSupport('[WebviewProvider] Core does not support get_session_snapshot; lazy history repair disabled until core restart.');
+                return null;
+            }
+            console.error('[WebviewProvider] Failed to fetch core session snapshot:', e);
+            return null;
+        }
+    }
+
+    private preflightCoreSessionSnapshotSupport(): void {
+        if (this.coreSessionSnapshotPreflightStarted || this.coreSessionSnapshotPreflightInFlight || this.coreSessionSnapshotUnsupported) {
+            return;
+        }
+
+        this.coreSessionSnapshotPreflightStarted = true;
+        this.coreSessionSnapshotPreflightInFlight = true;
+        this.core.send('get_session_snapshot', { session_id: '__ricochet_snapshot_preflight__' }, 15000)
+            .then((snapshot: any) => {
+                if (!snapshot || !Array.isArray(snapshot.messages)) {
+                    console.warn('[WebviewProvider] Core get_session_snapshot preflight returned an unexpected payload; snapshot sync will retry lazily.');
+                }
+            })
+            .catch((e) => {
+                if (this.isUnsupportedSnapshotError(e)) {
+                    this.disableCoreSessionSnapshotSupport('[WebviewProvider] Core does not support get_session_snapshot; snapshot sync disabled until core restart.');
+                    return;
+                }
+                console.warn('[WebviewProvider] Core get_session_snapshot preflight failed; snapshot sync will retry lazily:', e);
+            })
+            .finally(() => {
+                this.coreSessionSnapshotPreflightInFlight = false;
+            });
+    }
+
+    private disableCoreSessionSnapshotSupport(message: string): void {
+        if (this.coreSessionSnapshotUnsupported) {
+            return;
+        }
+        this.coreSessionSnapshotUnsupported = true;
+        this.chatService?.disableSessionSnapshotSync();
+        console.warn(message);
+    }
+
+    private shouldRepairSessionFromCore(localData: SessionData | null, snapshot: CoreSessionSnapshot): boolean {
+        const localMessages = Array.isArray(localData?.messages) ? localData?.messages || [] : [];
+        const coreMessages = Array.isArray(snapshot.messages) ? snapshot.messages : [];
+        if (coreMessages.length === 0) return false;
+        if (localMessages.length === 0) return true;
+
+        const localAssistantCount = localMessages.filter(message => message?.role === 'assistant').length;
+        const coreAssistantCount = coreMessages.filter(message => message?.role === 'assistant').length;
+        const localOnlyUserMessages = localMessages.length > 0 && localMessages.every(message => message?.role === 'user');
+
+        return coreMessages.length > localMessages.length ||
+            coreAssistantCount > localAssistantCount ||
+            (localOnlyUserMessages && coreAssistantCount > 0);
+    }
+
+    private async saveCoreSnapshotToSession(
+        sessionId: string,
+        snapshot?: CoreSessionSnapshot | null,
+        existing?: SessionData | null
+    ): Promise<SessionData | null> {
+        const coreSnapshot = snapshot || await this.getCoreSessionSnapshot(sessionId);
+        if (!coreSnapshot || !Array.isArray(coreSnapshot.messages)) {
+            return existing || await this.sessionService.loadSession(sessionId);
+        }
+
+        const current = existing || await this.sessionService.loadSession(sessionId);
+        const metadata = await this.sessionService.getSessionMetadata(sessionId);
+        const workspaceDir = metadata?.workspaceDir || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+        const data: SessionData = {
+            messages: coreSnapshot.messages,
+            todos: Array.isArray(coreSnapshot.todos) ? coreSnapshot.todos : current?.todos || [],
+            usage: current?.usage
+        };
+
+        await this.sessionService.saveSession(sessionId, data, workspaceDir);
+        const updatedMetadata = await this.sessionService.getSessionMetadata(sessionId);
+        if (updatedMetadata) {
+            this.handleSessionMetadataChanged(updatedMetadata);
+        }
+        return data;
+    }
+
+    private isUnsupportedSnapshotError(error: unknown): boolean {
+        const message = error instanceof Error ? error.message : String(error);
+        return /Unknown message type:\s*get_session_snapshot/i.test(message);
     }
 
     async toggleLiveMode(): Promise<void> {

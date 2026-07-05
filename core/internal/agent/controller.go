@@ -1497,6 +1497,35 @@ func (c *Controller) HydrateSession(sessionID string, messages []protocol.Messag
 	session.StateHandler.SetMessages(messages)
 }
 
+// GetSessionSnapshot returns the raw protocol history for persistence and
+// hydration. Unlike GetState, this does not merge tool results or convert
+// messages into UI chat rows.
+func (c *Controller) GetSessionSnapshot(sessionID string) map[string]interface{} {
+	if sessionID == "" {
+		sessionID = "default"
+	}
+
+	session := c.GetSession(sessionID)
+	if session == nil {
+		return map[string]interface{}{
+			"session_id": sessionID,
+			"messages":   []protocol.Message{},
+			"todos":      []protocol.Todo{},
+		}
+	}
+
+	todos := session.Todos
+	if todos == nil {
+		todos = []protocol.Todo{}
+	}
+
+	return map[string]interface{}{
+		"session_id": session.ID,
+		"messages":   session.StateHandler.GetMessages(),
+		"todos":      todos,
+	}
+}
+
 // DeleteSession deletes a session
 func (c *Controller) DeleteSession(id string) error {
 	return c.sessionManager.DeleteSession(id)
@@ -1789,9 +1818,11 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 		}
 
 		lowerStatus := strings.ToLower(status)
-		isActiveProgress := result != "COMPLETED" && result != "ERROR" && !strings.Contains(lowerStatus, "waiting for approval")
+		lowerResult := strings.ToLower(strings.TrimSpace(result))
+		isTerminalProgress := result == "COMPLETED" || result == "ERROR" || lowerResult == "budget_exceeded" || lowerResult == "stopped" || event == "completed" || event == "error" || event == "stopped"
+		isActiveProgress := !isTerminalProgress && !strings.Contains(lowerStatus, "waiting for approval")
 		completedAt := int64(0)
-		if result == "COMPLETED" || result == "ERROR" || event == "completed" || event == "error" {
+		if isTerminalProgress {
 			completedAt = time.Now().UnixMilli()
 			terminalProgressEmitted = true
 		}
@@ -1924,14 +1955,15 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 		if hubTaskCreationRequested && createdHubTaskCount == 0 {
 			emitTaskProgressEvent("error", "Task creation was requested, but no Hub Tasks were created.", nil, 0, 0, "ERROR")
 		}
-		status := "Run stopped before a final response"
-		result := "STOPPED"
-		if strings.Contains(strings.ToLower(reason), "budget") {
-			status = "Run stopped after budget limit"
-			result = "BUDGET_EXCEEDED"
+		if !terminalProgressEmitted {
+			status := "Run stopped before a final response"
+			result := "stopped"
+			if strings.Contains(strings.ToLower(reason), "budget") {
+				status = "Run stopped after budget limit. The agent reached its internal exploration budget and returned the latest available result."
+				result = "budget_exceeded"
+			}
+			emitTaskProgressEvent("stopped", status, nil, 0, 0, result)
 		}
-		emitTaskProgressEvent("stopped", status, nil, 0, 0, result)
-		terminalProgressEmitted = true
 	}
 
 	// TRIGGER: TaskCreated hook (Phase 0: Request Validation)
@@ -3736,6 +3768,7 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 
 		if hardBudgetExceeded {
 			log.Printf("⚠️ Run budget hard completion: batches=%d hard=%d elapsed=%s predicted=%d", toolBatchCount, hardToolLimit, elapsed.Round(time.Second), predictedTaskSize)
+			emitTaskProgressEvent("stopped", "Run stopped after budget limit. The agent reached its internal exploration budget and returned the latest available result.", nil, 0, 0, "budget_exceeded")
 			emitSyntheticFinal("run budget exceeded")
 			break
 		}

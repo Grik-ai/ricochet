@@ -54,6 +54,13 @@ if [ ! -x "$SOURCE_CORE" ]; then
   exit 1
 fi
 
+if ! strings "$SOURCE_CORE" 2>/dev/null | grep -q 'get_session_snapshot'; then
+  echo "Bundled core binary does not support required RPC: get_session_snapshot"
+  "$SOURCE_CORE" version --json 2>/dev/null || "$SOURCE_CORE" version 2>/dev/null || true
+  echo "Run ./scripts/build-all.sh before syncing the extension."
+  exit 1
+fi
+
 timestamp() {
   date -u +"%Y%m%dT%H%M%SZ"
 }

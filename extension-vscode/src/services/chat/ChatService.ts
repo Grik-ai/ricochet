@@ -8,6 +8,13 @@ import { formatChatErrorInfo } from './chatErrors';
 import * as path from 'path';
 import * as fs from 'fs';
 
+interface SessionSnapshotPayload {
+    session_id?: string;
+    sessionId?: string;
+    messages?: any[];
+    todos?: any[];
+}
+
 export function isQueuedChatMessageResult(result: unknown): result is Record<string, any> {
     if (!result || typeof result !== 'object' || Array.isArray(result)) return false;
     const record = result as Record<string, any>;
@@ -59,6 +66,7 @@ export class ChatService {
     private readonly workspaceStateKey = 'ricochet_active_session_id';
     private readonly hydratedCoreSessions = new Set<string>();
     private activeRunIdValue: string | null = null;
+    private sessionSnapshotUnsupported = false;
 
     // Throttling for chat updates to prevent webview crash
     private pendingChatUpdate: any = null;
@@ -88,7 +96,15 @@ export class ChatService {
         return this.activeRunIdValue;
     }
 
-    public setActiveSession(sessionId: string) {
+    public disableSessionSnapshotSync(): void {
+        this.sessionSnapshotUnsupported = true;
+    }
+
+    public enableSessionSnapshotSync(): void {
+        this.sessionSnapshotUnsupported = false;
+    }
+
+    public setActiveSession(sessionId: string | null) {
         this.activeSessionId = sessionId;
     }
 
@@ -129,7 +145,7 @@ export class ChatService {
 
                 // Save user message to session
                 if (requestSessionId) {
-                    await this.sessionService.appendMessage(requestSessionId, {
+                    await this.sessionService.upsertMessage(requestSessionId, {
                         role: 'user',
                         content: message.payload.content,
                         timestamp: Date.now(),
@@ -179,6 +195,9 @@ export class ChatService {
                     // The core promise resolves when the autonomous loop has concluded.
                     // Some short/read-only runs can finish without a final chat_update,
                     // so always release the webview input as a completion fallback.
+                    if (requestSessionId) {
+                        await this.syncSessionFromCore(requestSessionId);
+                    }
                     console.log('[ChatService] Posting ask_completion_result', { session_id: requestSessionId, run_id: requestedRunId });
                     this.postMessage({ type: 'ask_completion_result', payload: { session_id: requestSessionId, run_id: requestedRunId } });
                     if (!requestedRunId || this.activeRunIdValue === requestedRunId) {
@@ -297,18 +316,20 @@ export class ChatService {
             await this.onUsageUpdate(payload.usage);
         }
 
-        const isFinalMessage = payload.message?.isStreaming === false || payload.done === true;
+        const message = payload.message as any;
+        const isFinalUpdate = payload.done === true || (message && message.isStreaming !== true);
 
         // Final messages bypass throttle and flush immediately
-        if (isFinalMessage) {
+        if (isFinalUpdate) {
+            const terminalPayload = this.normalizeTerminalPayload(payload);
             this.flushPendingUpdate();
-            this.postChatUpdate(payload);
+            this.postChatUpdate(terminalPayload);
 
             // Check for pending edits in tool calls. The core can either ask the extension
             // to review an edit via propose_edit, or apply an auto-approved edit directly.
             // Register both running and completed edit tools so the review bar/decorations
             // still appear after auto-approved writes.
-            const toolCalls = payload.message?.toolCalls;
+            const toolCalls = terminalPayload.message?.toolCalls;
             if (toolCalls && toolCalls.length > 0) {
                 for (const tool of toolCalls as any[]) {
                     if (tool.status === 'completed') {
@@ -318,11 +339,10 @@ export class ChatService {
             }
 
             // Save to session
-            if (this.activeSessionId && payload.message && !(payload.message as any).partial) {
-                await this.sessionService.appendMessage(this.activeSessionId, {
-                    ...payload.message,
-                    timestamp: Date.now()
-                });
+            const sessionId = this.sessionIdForPayload(terminalPayload);
+            if (sessionId && terminalPayload.message && !(terminalPayload.message as any).partial) {
+                await this.sessionService.upsertMessage(sessionId, this.normalizeMessageForPersistence(terminalPayload, sessionId));
+                await this.notifySessionMetadata(sessionId);
             }
             return;
         }
@@ -357,6 +377,41 @@ export class ChatService {
         return this.belongsToActiveSession(payload);
     }
 
+    public async syncSessionFromCore(sessionId: string): Promise<boolean> {
+        if (!sessionId) return false;
+        if (this.sessionSnapshotUnsupported) return false;
+
+        try {
+            const snapshot = await this.core.send('get_session_snapshot', { session_id: sessionId }) as SessionSnapshotPayload;
+            const messages = Array.isArray(snapshot?.messages) ? snapshot.messages : undefined;
+            if (!messages) return false;
+
+            const existing = await this.sessionService.loadSession(sessionId);
+            if (messages.length === 0 && (existing?.messages?.length || 0) > 0) {
+                return false;
+            }
+
+            const sessionMeta = await this.sessionService.getSessionMetadata(sessionId);
+            const workspaceDir = sessionMeta?.workspaceDir || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+
+            await this.sessionService.saveSession(sessionId, {
+                messages,
+                todos: Array.isArray(snapshot?.todos) ? snapshot.todos : existing?.todos || [],
+                usage: existing?.usage
+            }, workspaceDir);
+            await this.notifySessionMetadata(sessionId);
+            return true;
+        } catch (e) {
+            if (this.isUnsupportedSnapshotError(e)) {
+                this.disableSessionSnapshotSync();
+                console.warn('[ChatService] Core does not support get_session_snapshot; disabling snapshot sync until core restart.');
+                return false;
+            }
+            console.error('[ChatService] Failed to sync session from core snapshot:', e);
+            return false;
+        }
+    }
+
     public async cancelActiveChatRuntime(reason = 'session_switch'): Promise<void> {
         const sessionId = this.activeSessionId;
         if (!sessionId) return;
@@ -377,6 +432,7 @@ export class ChatService {
     private async ensureCoreSessionHydrated(sessionId: string): Promise<void> {
         if (this.hydratedCoreSessions.has(sessionId)) return;
 
+        await this.syncSessionFromCore(sessionId);
         const sessionData = await this.sessionService.loadSession(sessionId);
         try {
             await this.core.send('hydrate_session', {
@@ -391,8 +447,43 @@ export class ChatService {
     }
 
     private belongsToActiveSession(payload: ChatUpdatePayload): boolean {
-        const payloadSessionId = payload.session_id || (payload.message as any)?.sessionId;
+        const payloadSessionId = this.sessionIdForPayload(payload);
         return !payloadSessionId || !this.activeSessionId || payloadSessionId === this.activeSessionId;
+    }
+
+    private sessionIdForPayload(payload: ChatUpdatePayload): string | undefined {
+        const message = payload.message as any;
+        return payload.session_id || message?.session_id || message?.sessionId || this.activeSessionId || undefined;
+    }
+
+    private normalizeMessageForPersistence(payload: ChatUpdatePayload, sessionId: string): any {
+        const message = (payload.message || {}) as any;
+        return {
+            ...message,
+            timestamp: message.timestamp || Date.now(),
+            sessionId,
+            session_id: message.session_id || sessionId,
+            run_id: message.run_id || payload.run_id,
+            turn_id: message.turn_id || payload.run_id
+        };
+    }
+
+    private normalizeTerminalPayload(payload: ChatUpdatePayload): ChatUpdatePayload {
+        if (!payload.message || payload.message.isStreaming === false) {
+            return payload;
+        }
+        return {
+            ...payload,
+            message: {
+                ...payload.message,
+                isStreaming: false
+            }
+        };
+    }
+
+    private isUnsupportedSnapshotError(error: unknown): boolean {
+        const message = error instanceof Error ? error.message : String(error);
+        return /Unknown message type:\s*get_session_snapshot/i.test(message);
     }
 
     private postChatUpdate(payload: ChatUpdatePayload): void {
