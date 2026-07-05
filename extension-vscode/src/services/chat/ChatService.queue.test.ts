@@ -39,11 +39,19 @@ describe('ChatService queued chat responses', () => {
     });
 
     it('normalizes queued payloads with the original session and run metadata', () => {
+        const contextFiles = [{
+            path: '.ricochet/attachments/session/doc.md',
+            stagedPath: '.ricochet/attachments/session/doc.md',
+            name: 'doc.md',
+            kind: 'attachment',
+            source: 'attachment',
+            mime: 'text/markdown',
+        }];
         const payload = normalizeQueuedMessagePayload({
             message: {
                 id: 'queue-message-1',
                 text: 'прервалось',
-                context_files: [{ path: '.ricochet/attachments/session/doc.md', name: 'doc.md' }],
+                context_files: contextFiles,
             },
         }, 'session-1', 'run-queued', 'fallback text');
 
@@ -55,13 +63,15 @@ describe('ChatService queued chat responses', () => {
             message_id: 'queue-message-1',
             status: 'queued',
             text: 'прервалось',
-            context_files: [{ path: '.ricochet/attachments/session/doc.md', name: 'doc.md' }],
+            context_files: contextFiles,
+            contextFiles,
             message: {
                 id: 'queue-message-1',
                 session_id: 'session-1',
                 run_id: 'run-queued',
                 text: 'прервалось',
-                context_files: [{ path: '.ricochet/attachments/session/doc.md', name: 'doc.md' }],
+                context_files: contextFiles,
+                contextFiles,
             },
         });
     });

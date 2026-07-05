@@ -7,6 +7,17 @@ import (
 	"testing"
 )
 
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "ricochet_skills_home")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("HOME", home)
+	code := m.Run()
+	os.RemoveAll(home)
+	os.Exit(code)
+}
+
 func TestFindApplicableSkills(t *testing.T) {
 	// Setup temporary directory with skills
 	tmpDir, err := os.MkdirTemp("", "skills_test")
@@ -450,6 +461,69 @@ Verify touched files and report blockers truthfully.
 	}
 	if !foundRootRule {
 		t.Fatalf("expected root rules to remain applicable with project skill: %#v", applicable)
+	}
+}
+
+func TestGlobalSkillsLoadBeforeProjectOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	writeSkillFileForTest(t, filepath.Join(home, ".ricochet", "skills", "shared", "SKILL.md"), `---
+name: shared
+description: global shared
+allowed_tools:
+  - read_file
+---
+# Shared Global
+`)
+	writeSkillFileForTest(t, filepath.Join(home, ".ricochet", "skills", "global-only", "SKILL.md"), `---
+name: global-only
+description: global only
+allowed_tools:
+  - read_file
+---
+# Global Only
+`)
+	writeSkillFileForTest(t, filepath.Join(tmpDir, ".ricochet", "skills", "shared", "SKILL.md"), `---
+name: shared
+description: project shared
+allowed_tools:
+  - read_file
+---
+# Shared Project
+`)
+
+	mgr := NewManager(tmpDir)
+	if err := mgr.LoadSkills(); err != nil {
+		t.Fatal(err)
+	}
+	manifests := mgr.ListSkillManifests()
+	var sharedScope, sharedDescription, globalOnlyScope string
+	for _, manifest := range manifests {
+		if manifest.Name == "shared" {
+			sharedScope = manifest.Scope
+			sharedDescription = manifest.Description
+		}
+		if manifest.Name == "global-only" {
+			globalOnlyScope = manifest.Scope
+		}
+	}
+	if sharedScope != "project" || !strings.Contains(sharedDescription, "project") {
+		t.Fatalf("expected project shared skill to override global shared, scope=%q description=%q", sharedScope, sharedDescription)
+	}
+	if globalOnlyScope != "global" {
+		t.Fatalf("expected global-only skill in global scope, got %q", globalOnlyScope)
+	}
+}
+
+func writeSkillFileForTest(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
 	}
 }
 

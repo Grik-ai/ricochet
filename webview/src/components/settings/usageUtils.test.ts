@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { UsageSnapshot } from '../../types/protocol';
 import {
     hasUsageData,
+    keySourceLabel,
     mergeUsageSnapshots,
     recentUsageEvents,
     usageSourceLabel,
@@ -108,6 +109,13 @@ describe('usage utils', () => {
         expect(usageSourceLabel(snapshotB)).toBe('Estimated tokens and cost');
         expect(usageSourceLabel(mergeUsageSnapshots([snapshotA, snapshotB]))).toBe('Mixed: provider tokens + estimated fallback');
         expect(usageSourceLabel(null)).toBe('No usage recorded');
+    });
+
+    it('uses user-facing key source labels', () => {
+        expect(keySourceLabel('user')).toBe('Key connected');
+        expect(keySourceLabel('server')).toBe('Included');
+        expect(keySourceLabel('hosted')).toBe('Grik Account');
+        expect(keySourceLabel('none')).toBe('No key');
     });
 
     it('aggregates all saved sessions without mutating originals', () => {

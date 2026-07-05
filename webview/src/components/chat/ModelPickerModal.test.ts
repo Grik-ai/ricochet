@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { computeModelPickerPosition, modelMayTrainOnPrompts, modelPrivacyBadgeLabel } from './ModelPickerModal';
+import {
+    computeModelPickerPosition,
+    initialModelPickerProvider,
+    modelMayTrainOnPrompts,
+    modelPrivacyBadgeLabel,
+    reconcileModelPickerProvider,
+} from './ModelPickerModal';
 
 describe('ModelPickerModal privacy helpers', () => {
     it('labels only explicitly flagged prompt-training models', () => {
@@ -33,5 +39,23 @@ describe('ModelPickerModal positioning', () => {
         expect(Number(style.top)).toBeGreaterThanOrEqual(12);
         expect(Number(style.left)).toBeGreaterThanOrEqual(12);
         expect(Number(style.width)).toBeLessThanOrEqual(820 - 24);
+    });
+});
+
+describe('ModelPickerModal provider selection helpers', () => {
+    const providers = [
+        { id: 'grik' },
+        { id: 'openrouter' },
+        { id: 'zhipu' },
+    ];
+
+    it('uses the current model provider when the picker opens', () => {
+        expect(initialModelPickerProvider('zhipu', providers)).toBe('zhipu');
+        expect(initialModelPickerProvider('missing', providers)).toBe('grik');
+    });
+
+    it('preserves a manual provider choice while providers refresh', () => {
+        expect(reconcileModelPickerProvider('zhipu', providers, 'openrouter')).toBe('openrouter');
+        expect(reconcileModelPickerProvider('zhipu', providers, 'missing')).toBe('zhipu');
     });
 });

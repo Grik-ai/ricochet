@@ -103,7 +103,7 @@ steps: []
 func TestBundledWorkflowsAreStructuredAndClean(t *testing.T) {
 	repoRoot := findRepositoryRoot(t)
 	coreRoot := filepath.Join(repoRoot, "core")
-	workflowDir := filepath.Join(coreRoot, ".agent", "workflows")
+	workflowDir := filepath.Join(coreRoot, "internal", "workflow", "bundled")
 
 	entries, err := os.ReadDir(workflowDir)
 	if err != nil {
@@ -175,7 +175,7 @@ func findRepositoryRoot(t *testing.T) string {
 	}
 
 	for {
-		if _, err := os.Stat(filepath.Join(dir, "core", ".agent", "workflows")); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, "core", "internal", "workflow", "bundled")); err == nil {
 			return dir
 		}
 		parent := filepath.Dir(dir)

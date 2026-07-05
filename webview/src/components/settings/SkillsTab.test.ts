@@ -69,9 +69,10 @@ describe('SkillsTab helpers', () => {
             total: 5,
             enabled: 3,
             disabled: 2,
-            problems: 1,
-            project: 2,
-        });
+        problems: 1,
+        project: 2,
+        global: 0,
+    });
     });
 
     it('groups skills by source in the settings display order', () => {

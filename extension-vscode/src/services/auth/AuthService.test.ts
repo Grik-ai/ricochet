@@ -174,7 +174,46 @@ describe('AuthService account sync', () => {
         });
     });
 
-    it('keeps billing ready when optional budget sync fails', async () => {
+    it('normalizes structured billing API errors without rendering objects', async () => {
+        const messages: Array<{ type: string; payload?: any }> = [];
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+            const url = String(input);
+            if (url.includes('/users/me')) {
+                return jsonResponse({ user: { id: 'user_1', email: 'dev@example.com', plan: 'free' } });
+            }
+            if (url.includes('/billing/credits')) {
+                return jsonResponse({ error: { code: 'credits_unavailable', message: 'Credits API unavailable' } }, 503);
+            }
+            if (url.includes('/billing/entitlements')) {
+                return jsonResponse({ error: { code: 'entitlements_unavailable' } }, 503);
+            }
+            if (url.includes('/ricochet/budget')) {
+                return jsonResponse({ allowed: false, plan: 'free' });
+            }
+            throw new Error(`Unexpected fetch: ${url}`);
+        });
+        vi.stubGlobal('fetch', fetchMock);
+
+        const service = new AuthService(createContext({
+            accessToken: 'access-token',
+            refreshToken: 'refresh-token',
+            expiresAt: Date.now() + 60_000,
+        }), (message) => messages.push(message));
+
+        await service.syncState();
+
+        const billingState = latestPayload(messages, 'billing_state');
+        expect(billingState).toMatchObject({
+            credits: [],
+            entitlements: [],
+            syncStatus: 'degraded',
+        });
+        expect(billingState.error).toContain('Credits API unavailable');
+        expect(billingState.error).toContain('entitlements_unavailable');
+        expect(billingState.error).not.toContain('[object Object]');
+    });
+
+    it('keeps billing ready when optional structured budget sync fails', async () => {
         const messages: Array<{ type: string; payload?: any }> = [];
         const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
             const url = String(input);
@@ -188,7 +227,7 @@ describe('AuthService account sync', () => {
                 return jsonResponse({ entitlements: [{ product: 'ricochet_code', plan: 'pro', status: 'active' }] });
             }
             if (url.includes('/ricochet/budget')) {
-                return jsonResponse({ error: 'budget unavailable' }, 404);
+                return jsonResponse({ error: { code: 'budget_unavailable', message: 'Budget temporarily unavailable' } }, 404);
             }
             throw new Error(`Unexpected fetch: ${url}`);
         });
@@ -208,6 +247,24 @@ describe('AuthService account sync', () => {
             budget: null,
             syncStatus: 'ready',
         });
+        expect(latestPayload(messages, 'billing_state').error).toBeUndefined();
+    });
+
+    it('normalizes structured device token errors', async () => {
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+            const url = String(input);
+            if (url.includes('/auth/device/token')) {
+                return jsonResponse({ error: { code: 'authorization_pending', message: 'Device approval is still pending' } }, 400);
+            }
+            throw new Error(`Unexpected fetch: ${url}`);
+        });
+        vi.stubGlobal('fetch', fetchMock);
+
+        const service = new AuthService(createContext(), () => undefined);
+        (service as any).activeDeviceCode = 'device-code';
+
+        await expect((service as any).pollDeviceToken('device-code', 1, Date.now() + 60_000))
+            .rejects.toThrow('Device approval is still pending');
     });
 
     it('cancels subscriptions with a user token and refreshes billing state', async () => {

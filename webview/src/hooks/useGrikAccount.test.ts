@@ -5,6 +5,8 @@ import {
     formatGrikCredits,
     getRicochetCreditBalance,
     isHostedSubscriptionAccess,
+    normalizeAuthState,
+    normalizeBillingState,
     type GrikBillingState,
 } from './useGrikAccount';
 
@@ -12,6 +14,43 @@ describe('Grik account state helpers', () => {
     it('derives a signed-out Free account badge', () => {
         expect(deriveGrikAccountSummary({ authenticated: false }, {}).label).toBe('Free account');
         expect(deriveGrikAccountSummary({ authenticated: false }, {}).actionLabel).toBe('Sign in');
+    });
+
+    it('derives BYOK Free for signed-in free users without hosted access', () => {
+        const summary = deriveGrikAccountSummary(
+            normalizeAuthState({ authenticated: true, user: { email: 'dev@example.com', plan: 'free' }, syncStatus: 'ready' }),
+            normalizeBillingState({
+                credits: [{ product: 'ricochet_code', balance: 0 }],
+                entitlements: [],
+                syncStatus: 'ready',
+            })
+        );
+
+        expect(summary).toMatchObject({
+            label: 'BYOK Free',
+            plan: 'BYOK Free',
+            status: 'free',
+            hostedAccess: false,
+            accessState: 'upgrade_required',
+            accessLabel: 'Upgrade required',
+        });
+    });
+
+    it('normalizes degraded object-shaped account errors for display', () => {
+        const summary = deriveGrikAccountSummary(
+            normalizeAuthState({ authenticated: true, user: { email: 'dev@example.com', plan: 'free' }, syncStatus: 'ready' } as any),
+            normalizeBillingState({
+                credits: { product: 'ricochet_code', balance: 0 },
+                entitlements: { product: 'ricochet_code', status: 'active' },
+                syncStatus: 'degraded',
+                error: { error: { code: 'billing_sync_failed', message: 'Billing sync failed' } },
+            } as any)
+        );
+
+        expect(summary.label).toBe('Sync issue');
+        expect(summary.plan).toBe('BYOK Free');
+        expect(summary.detail).toBe('Billing sync failed');
+        expect(summary.detail).not.toContain('[object Object]');
     });
 
     it('derives an active plan from Ricochet entitlements', () => {

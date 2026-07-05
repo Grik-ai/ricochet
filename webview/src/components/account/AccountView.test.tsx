@@ -96,6 +96,43 @@ describe('AccountView', () => {
         expect(html).toContain('Open account settings');
     });
 
+    it('renders degraded free billing without object text or unavailable plan', () => {
+        const html = renderAccount(account({
+            authState: {
+                authenticated: true,
+                user: { email: 'igor@example.com', plan: 'free' },
+                syncStatus: 'ready',
+            },
+            billingState: {
+                credits: [
+                    { product: 'ricochet_code', balance: 0 },
+                    { product: 'video', balance: 0 },
+                ],
+                entitlements: [],
+                syncStatus: 'degraded',
+                error: { error: { message: 'Billing sync failed' } },
+            } as any,
+            summary: {
+                label: 'Sync issue',
+                detail: 'Billing sync failed',
+                tone: 'warning',
+                actionLabel: 'Retry',
+                authenticated: true,
+                hostedAccess: false,
+                plan: 'BYOK Free',
+                status: 'free',
+                accessState: 'sync_issue',
+                accessLabel: 'Sync issue',
+            },
+        }));
+
+        expect(html).toContain('Billing sync failed');
+        expect(html).toContain('BYOK Free');
+        expect(html).toContain('Needs refresh');
+        expect(html).not.toContain('Unavailable');
+        expect(html).not.toContain('[object Object]');
+    });
+
     it('renders logged out sign-in without a bordered setup card', () => {
         const html = renderAccount(account({
             authState: { authenticated: false, syncStatus: 'ready' },
