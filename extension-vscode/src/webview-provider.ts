@@ -1026,6 +1026,15 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
                         }
                         break;
 
+                    case 'get_command_events':
+                        try {
+                            const payload = await this.core.send('get_command_events', message.payload || {});
+                            this.postMessage({ type: 'command_events', payload });
+                        } catch (e: any) {
+                            console.error('Failed to get command events:', e);
+                        }
+                        break;
+
                     case 'get_context_status':
                         try {
                             const sessionId = explicitSessionIdFromPayload(message.payload) || '';

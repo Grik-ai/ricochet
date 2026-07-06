@@ -54,6 +54,7 @@ var toolCategoryRegistry = map[string]ToolCategory{
 	"lsp_references":            CategoryRead,
 	"lsp_completions":           CategoryRead,
 	"command_status":            CategoryRead, // Check status of bg command (read-only)
+	"read_terminal":             CategoryRead,
 	"get_workflows":             CategoryRead,
 	"get_context_stats":         CategoryRead,
 	"web_search":                CategoryRead,
@@ -82,6 +83,10 @@ var toolCategoryRegistry = map[string]ToolCategory{
 	"execute_command": CategoryExecute,
 	"run_command":     CategoryExecute,
 	"execute_python":  CategoryExecute,
+	"start_terminal":  CategoryExecute,
+	"send_input":      CategoryExecute,
+	"command_stop":    CategoryExecute,
+	"terminal_close":  CategoryExecute,
 
 	// ─── META TOOLS (Always Silent Auto-Approve) ───
 	"task_boundary":    CategoryMeta,

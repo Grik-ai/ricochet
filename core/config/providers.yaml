@@ -68,6 +68,27 @@ providers:
         requires_subscription: true
         billing_sku: "ricochet_code"
         api_type: "responses"
+      - id: "openai/gpt-5.4-nano"
+        name: "GPT-5.4 Nano (Subscription)"
+        context_window: 400000
+        input_price: 0.2
+        output_price: 1.25
+        supports_tools: true
+        access_mode: "subscription"
+        requires_subscription: true
+        billing_sku: "ricochet_code"
+        api_type: "responses"
+      - id: "openai/gpt-5.6"
+        name: "GPT-5.6 Preview (Limited)"
+        context_window: 1000000
+        input_price: 5.0
+        output_price: 30.0
+        supports_tools: true
+        access_mode: "subscription"
+        requires_subscription: true
+        billing_sku: "ricochet_code"
+        api_type: "responses"
+        limited: true
       - id: "anthropic/claude-fable-5"
         name: "Claude Fable 5 (Subscription)"
         context_window: 1000000
@@ -82,6 +103,16 @@ providers:
         context_window: 1000000
         input_price: 5.0
         output_price: 25.0
+        supports_tools: true
+        access_mode: "subscription"
+        requires_subscription: true
+        billing_sku: "ricochet_code"
+        recommended: true
+      - id: "anthropic/claude-sonnet-5"
+        name: "Claude Sonnet 5 (Subscription)"
+        context_window: 1000000
+        input_price: 3.0
+        output_price: 15.0
         supports_tools: true
         access_mode: "subscription"
         requires_subscription: true
@@ -141,11 +172,30 @@ providers:
         access_mode: "subscription"
         requires_subscription: true
         billing_sku: "ricochet_code"
+      - id: "zhipu/glm-5.2"
+        name: "GLM-5.2 (Subscription)"
+        context_window: 1000000
+        input_price: 1.0
+        output_price: 2.0
+        supports_tools: true
+        access_mode: "subscription"
+        requires_subscription: true
+        billing_sku: "ricochet_code"
+        recommended: true
       - id: "minimax/minimax-m3"
         name: "MiniMax M3 (Subscription)"
         context_window: 1000000
         input_price: 1.0
         output_price: 2.0
+        supports_tools: true
+        access_mode: "subscription"
+        requires_subscription: true
+        billing_sku: "ricochet_code"
+      - id: "minimax/MiniMax-M2.7"
+        name: "MiniMax M2.7 (Subscription)"
+        context_window: 204800
+        input_price: 0.5
+        output_price: 1.0
         supports_tools: true
         access_mode: "subscription"
         requires_subscription: true
@@ -189,6 +239,25 @@ providers:
     key: "${MISTRAL_API_KEY}"
     base_url: "https://api.mistral.ai/v1"
     models:
+      - id: "mistral-medium-latest"
+        name: "Mistral Medium 3.5"
+        context_window: 256000
+        input_price: 1.5
+        output_price: 7.5
+        supports_tools: true
+        recommended: true
+      - id: "mistral-small-latest"
+        name: "Mistral Small 4"
+        context_window: 128000
+        input_price: 0
+        output_price: 0
+        supports_tools: true
+      - id: "devstral-latest"
+        name: "Devstral Latest"
+        context_window: 128000
+        input_price: 0
+        output_price: 0
+        supports_tools: true
       - id: "codestral-latest"
         name: "Codestral (Free)"
         context_window: 32000
@@ -205,6 +274,13 @@ providers:
     key: "${ZHIPU_API_KEY}"
     base_url: "https://api.z.ai/api/paas/v4"
     models:
+      - id: "glm-5.2"
+        name: "GLM-5.2 (Recommended)"
+        context_window: 1000000
+        input_price: 1.0
+        output_price: 2.0
+        supports_tools: true
+        recommended: true
       - id: "glm-5.1"
         name: "GLM-5.1 (Flagship)"
         context_window: 200000
@@ -239,6 +315,13 @@ providers:
     key: "${ZHIPU_API_KEY}"
     base_url: "https://api.z.ai/api/coding/paas/v4"
     models:
+      - id: "glm-5.2"
+        name: "GLM-5.2 Coding"
+        context_window: 1000000
+        input_price: 1.0
+        output_price: 2.0
+        supports_tools: true
+        recommended: true
       - id: "glm-5.1"
         name: "GLM-5.1 Coding"
         context_window: 200000
@@ -252,16 +335,41 @@ providers:
         output_price: 1.0
         supports_tools: true
 
-#  gemini:
-#    enabled: true
-#    key: "${GEMINI_API_KEY}"
-#    models:
-#      - id: "gemini-2.0-flash-exp"
-#        name: "Gemini 2.0 Flash"
-#        context_window: 1000000
-#        free: true
-#        supports_tools: true
-#
+  gemini:
+    enabled: true
+    key: "${GEMINI_API_KEY}"
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+    models:
+      - id: "gemini-3.5-flash"
+        name: "Gemini 3.5 Flash"
+        context_window: 1000000
+        input_price: 1.5
+        output_price: 9.0
+        supports_tools: true
+        recommended: true
+      - id: "gemini-3-flash"
+        name: "Gemini 3 Flash"
+        context_window: 1000000
+        free: true
+        supports_tools: true
+      - id: "gemini-3-pro"
+        name: "Gemini 3 Pro"
+        context_window: 1000000
+        input_price: 1.25
+        output_price: 10.0
+        supports_tools: true
+      - id: "gemini-2.5-flash"
+        name: "Gemini 2.5 Flash"
+        context_window: 1000000
+        free: true
+        supports_tools: true
+      - id: "gemini-2.5-pro"
+        name: "Gemini 2.5 Pro"
+        context_window: 1000000
+        input_price: 1.25
+        output_price: 10.0
+        supports_tools: true
+
   anthropic:
     enabled: true
     key: "${ANTHROPIC_API_KEY}"
@@ -278,6 +386,13 @@ providers:
         context_window: 1000000
         input_price: 5.0
         output_price: 25.0
+        supports_tools: true
+        recommended: true
+      - id: "claude-sonnet-5"
+        name: "Claude Sonnet 5"
+        context_window: 1000000
+        input_price: 3.0
+        output_price: 15.0
         supports_tools: true
         recommended: true
       - id: "claude-sonnet-4-6"
@@ -327,6 +442,21 @@ providers:
         output_price: 4.5
         supports_tools: true
         api_type: "responses"
+      - id: "gpt-5.4-nano"
+        name: "GPT-5.4 Nano"
+        context_window: 400000
+        input_price: 0.2
+        output_price: 1.25
+        supports_tools: true
+        api_type: "responses"
+      - id: "gpt-5.6"
+        name: "GPT-5.6 Preview"
+        context_window: 1000000
+        input_price: 5.0
+        output_price: 30.0
+        supports_tools: true
+        api_type: "responses"
+        limited: true
 
   xai:
     enabled: true
@@ -356,7 +486,7 @@ providers:
   minimax:
     enabled: true
     key: "${MINIMAX_API_KEY}"
-    base_url: "https://api.minimax.io/v1"
+    base_url: "https://api.minimaxi.com/v1"
     models:
       - id: "MiniMax-M3"
         name: "MiniMax M3"
@@ -368,6 +498,24 @@ providers:
       - id: "MiniMax-M2.5"
         name: "MiniMax M2.5"
         context_window: 196608
+        input_price: 0.5
+        output_price: 1.0
+        supports_tools: true
+      - id: "MiniMax-M2.7"
+        name: "MiniMax M2.7"
+        context_window: 204800
+        input_price: 0.5
+        output_price: 1.0
+        supports_tools: true
+      - id: "MiniMax-M2.7-highspeed"
+        name: "MiniMax M2.7 Highspeed"
+        context_window: 204800
+        input_price: 0.5
+        output_price: 1.0
+        supports_tools: true
+      - id: "MiniMax-M2.5-highspeed"
+        name: "MiniMax M2.5 Highspeed"
+        context_window: 204800
         input_price: 0.5
         output_price: 1.0
         supports_tools: true

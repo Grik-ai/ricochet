@@ -19,8 +19,54 @@ func TestOpenAINewProviderUsesResponsesForGPT55(t *testing.T) {
 	}
 }
 
+func TestNewProviderHonorsResponsesAPITypeForCustomProvider(t *testing.T) {
+	provider, err := NewProvider(ProviderConfig{
+		Provider: "xai",
+		Model:    "grok-4.3",
+		APIKey:   "test",
+		APIType:  "responses",
+		BaseURL:  "https://api.x.ai/v1",
+	})
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	responsesProvider, ok := provider.(*OpenAIResponsesProvider)
+	if !ok {
+		t.Fatalf("provider type = %T, want *OpenAIResponsesProvider", provider)
+	}
+	if responsesProvider.baseURL != "https://api.x.ai/v1/responses" {
+		t.Fatalf("responses baseURL = %q", responsesProvider.baseURL)
+	}
+}
+
+func TestNewProviderUsesOfficialZAIBaseURLs(t *testing.T) {
+	provider, err := NewProvider(ProviderConfig{Provider: "zhipu", Model: "glm-5.2", APIKey: "test"})
+	if err != nil {
+		t.Fatalf("NewProvider zhipu: %v", err)
+	}
+	openAIProvider, ok := provider.(*OpenAIProvider)
+	if !ok {
+		t.Fatalf("zhipu provider type = %T, want *OpenAIProvider", provider)
+	}
+	if openAIProvider.baseURL != "https://api.z.ai/api/paas/v4/chat/completions" {
+		t.Fatalf("zhipu baseURL = %q", openAIProvider.baseURL)
+	}
+
+	provider, err = NewProvider(ProviderConfig{Provider: "zhipu-coding", Model: "glm-5.2", APIKey: "test"})
+	if err != nil {
+		t.Fatalf("NewProvider zhipu-coding: %v", err)
+	}
+	openAIProvider, ok = provider.(*OpenAIProvider)
+	if !ok {
+		t.Fatalf("zhipu-coding provider type = %T, want *OpenAIProvider", provider)
+	}
+	if openAIProvider.baseURL != "https://api.z.ai/api/coding/paas/v4/chat/completions" {
+		t.Fatalf("zhipu-coding baseURL = %q", openAIProvider.baseURL)
+	}
+}
+
 func TestOpenAIResponsesBuildsFunctionToolRequest(t *testing.T) {
-	provider := NewOpenAIResponsesProvider("test", "gpt-5.5", "", "", 0)
+	provider := NewOpenAIResponsesProvider("test", "gpt-5.5", "", "", "", 0)
 	req := provider.buildRequest(&ChatRequest{
 		SystemPrompt: "system",
 		Messages: []protocol.Message{
@@ -53,7 +99,7 @@ func TestOpenAIResponsesBuildsFunctionToolRequest(t *testing.T) {
 }
 
 func TestOpenAIResponsesStreamParserEmitsTextToolAndUsage(t *testing.T) {
-	provider := NewOpenAIResponsesProvider("test", "gpt-5.5", "", "", 0)
+	provider := NewOpenAIResponsesProvider("test", "gpt-5.5", "", "", "", 0)
 	stream := strings.Join([]string{
 		`event: response.output_text.delta`,
 		`data: {"type":"response.output_text.delta","delta":"hi"}`,
@@ -89,10 +135,40 @@ func TestOpenAIResponsesStreamParserEmitsTextToolAndUsage(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesParserDoesNotDuplicateOutputText(t *testing.T) {
+	resp := parseResponsesResponse(&responsesResponse{
+		ID:         "resp_1",
+		Model:      "gpt-5.5",
+		Status:     "completed",
+		OutputText: "hello",
+		Output: []responsesOutputItem{{
+			Type: "message",
+			Role: "assistant",
+			Content: []responsesContentPart{{
+				Type: "output_text",
+				Text: "hello",
+			}},
+		}},
+	})
+	if resp.Content != "hello" {
+		t.Fatalf("content = %q, want single output_text", resp.Content)
+	}
+}
+
 func TestOpenAIResponsesEmbedDelegates(t *testing.T) {
-	provider := NewOpenAIResponsesProvider("test", "gpt-5.5", "", "", 0)
+	provider := NewOpenAIResponsesProvider("test", "gpt-5.5", "", "", "", 0)
 	_, err := provider.Embed(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("empty embed should not call network: %v", err)
+	}
+}
+
+func TestOpenAIResponsesProviderUsesCustomBaseURL(t *testing.T) {
+	provider := NewOpenAIResponsesProvider("test", "grok-4.3", "https://api.x.ai/v1", "", "", 0)
+	if provider.baseURL != "https://api.x.ai/v1/responses" {
+		t.Fatalf("baseURL = %q, want xAI responses endpoint", provider.baseURL)
+	}
+	if got := provider.Name(); got != "xai" {
+		t.Fatalf("Name() = %q, want xai", got)
 	}
 }

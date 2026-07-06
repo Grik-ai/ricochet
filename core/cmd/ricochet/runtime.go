@@ -54,6 +54,9 @@ func initRuntime(cwd string) (*config.ProvidersManager, error) {
 		if mode, ok := pm.ModelCredentialMode(cfg.Provider.Provider, cfg.Provider.Model); ok {
 			cfg.Provider.CredentialMode = mode
 		}
+		if apiType, ok := pm.ModelAPIType(cfg.Provider.Provider, cfg.Provider.Model); ok {
+			cfg.Provider.APIType = apiType
+		}
 		cfg.Provider.BaseURL = pm.GetBaseURL(cfg.Provider.Provider)
 	}
 	if cfg.Provider.CredentialMode == "none" {

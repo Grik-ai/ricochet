@@ -940,6 +940,7 @@ func runInteractiveMode(_ context.Context, cwd string) {
 	settings := settingsStore.Get()
 	pm, _ := config.NewProvidersManager(config.FindConfigFile())
 	credentialMode := ""
+	apiType := ""
 	baseURL := ""
 	if pm != nil {
 		for providerID, key := range settings.Provider.APIKeys {
@@ -947,6 +948,9 @@ func runInteractiveMode(_ context.Context, cwd string) {
 		}
 		if mode, ok := pm.ModelCredentialMode(settings.Provider.Provider, settings.Provider.Model); ok {
 			credentialMode = mode
+		}
+		if modelAPIType, ok := pm.ModelAPIType(settings.Provider.Provider, settings.Provider.Model); ok {
+			apiType = modelAPIType
 		}
 		baseURL = pm.GetBaseURL(settings.Provider.Provider)
 	}
@@ -960,6 +964,7 @@ func runInteractiveMode(_ context.Context, cwd string) {
 			Model:          settings.Provider.Model,
 			APIKey:         apiKey,
 			BaseURL:        baseURL,
+			APIType:        apiType,
 			CredentialMode: credentialMode,
 		},
 		SystemPrompt:  prompts.BuildSystemPrompt(cwd), // Updated to use prompts package

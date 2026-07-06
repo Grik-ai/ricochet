@@ -77,15 +77,16 @@ export function deriveProviderProbeUrl(provider?: string, baseURL?: string): str
         case 'anthropic':
             return 'https://api.anthropic.com/v1';
         case 'gemini':
-            return 'https://generativelanguage.googleapis.com';
+            return 'https://generativelanguage.googleapis.com/v1beta/openai';
         case 'deepseek':
-            return 'https://api.deepseek.com/v1';
+            return 'https://api.deepseek.com';
         case 'zhipu':
         case 'glm':
+            return 'https://api.z.ai/api/paas/v4';
         case 'zhipu-coding':
-            return 'https://open.bigmodel.cn/api/paas/v4';
+            return 'https://api.z.ai/api/coding/paas/v4';
         case 'minimax':
-            return 'https://api.minimax.chat/v1';
+            return 'https://api.minimaxi.com/v1';
         case 'xai':
             return 'https://api.x.ai/v1';
         case 'mistral':

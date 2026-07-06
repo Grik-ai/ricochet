@@ -63,8 +63,8 @@ func (h *StdioHost) ListDir(path string) ([]FileInfo, error) {
 	return infos, nil
 }
 
-func (h *StdioHost) ExecuteCommand(ctx context.Context, command string, background bool) (CommandResult, error) {
-	state, err := h.orchestrator.Execute(ctx, command, background)
+func (h *StdioHost) ExecuteCommand(ctx context.Context, command string, background bool, timeoutSeconds ...int) (CommandResult, error) {
+	state, err := h.orchestrator.Execute(ctx, command, background, timeoutSeconds...)
 	if err != nil {
 		return CommandResult{}, err
 	}
@@ -79,6 +79,11 @@ func (h *StdioHost) ExecuteCommand(ctx context.Context, command string, backgrou
 		ExitCode:    state.ExitCode,
 		DurationMs:  durationMs,
 		Cwd:         h.cwd,
+		Shell:       state.Shell,
+		LogFile:     state.LogFile,
+		ProcessID:   state.ProcessID,
+		Background:  state.Background,
+		ExitSignal:  state.ExitSignal,
 		StartedAt:   state.StartTime,
 		CompletedAt: state.EndTime,
 		Truncated:   state.Truncated,
@@ -91,11 +96,43 @@ func (h *StdioHost) GetCommandStatus(id string) (CommandStatus, bool) {
 		return CommandStatus{}, false
 	}
 	return CommandStatus{
-		ID:      state.ID,
-		Status:  string(state.Status),
-		Output:  state.Output,
-		Error:   state.Error,
-		LogFile: state.LogFile,
+		ID:          state.ID,
+		Status:      string(state.Status),
+		Output:      state.Output,
+		Error:       state.Error,
+		LogFile:     state.LogFile,
+		ExitCode:    state.ExitCode,
+		DurationMs:  durationMsBetween(state.StartTime, state.EndTime),
+		StartedAt:   unixMillis(state.StartTime),
+		CompletedAt: unixMillis(state.EndTime),
+		Truncated:   state.Truncated,
+		ProcessID:   state.ProcessID,
+		Background:  state.Background,
+		Shell:       state.Shell,
+		ExitSignal:  state.ExitSignal,
+	}, true
+}
+
+func (h *StdioHost) StopCommand(ctx context.Context, id string, force bool) (CommandStatus, bool) {
+	state, ok := h.orchestrator.StopCommand(ctx, id, force)
+	if !ok || state == nil {
+		return CommandStatus{}, false
+	}
+	return CommandStatus{
+		ID:          state.ID,
+		Status:      string(state.Status),
+		Output:      state.Output,
+		Error:       state.Error,
+		LogFile:     state.LogFile,
+		ExitCode:    state.ExitCode,
+		DurationMs:  durationMsBetween(state.StartTime, state.EndTime),
+		StartedAt:   unixMillis(state.StartTime),
+		CompletedAt: unixMillis(state.EndTime),
+		Truncated:   state.Truncated,
+		ProcessID:   state.ProcessID,
+		Background:  state.Background,
+		Shell:       state.Shell,
+		ExitSignal:  state.ExitSignal,
 	}, true
 }
 

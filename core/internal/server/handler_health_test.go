@@ -14,7 +14,7 @@ func TestHealthSnapshotIncludesCoreAndProviderState(t *testing.T) {
 			Provider: agent.ProviderConfig{
 				Provider: "zhipu",
 				Model:    "glm-4.5",
-				BaseURL:  "https://open.bigmodel.cn/api/paas/v4",
+				BaseURL:  "https://api.z.ai/api/paas/v4",
 			},
 		},
 		StartedAt: time.Now().Add(-time.Second),

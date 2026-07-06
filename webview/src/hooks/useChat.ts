@@ -106,6 +106,16 @@ export interface WorkEvent {
     durationMs?: number;
     cwd?: string;
     shell?: string;
+    stream?: 'stdout' | 'stderr' | 'pty' | 'system' | string;
+    sequence?: number;
+    source?: 'execute_command' | 'pty' | 'vscode_terminal' | string;
+    background?: boolean;
+    processId?: number;
+    terminalId?: string;
+    logFile?: string;
+    stdoutPreview?: string;
+    stderrPreview?: string;
+    exitSignal?: string;
     script?: string;
     startedAt?: number;
     completedAt?: number;
@@ -140,10 +150,20 @@ export interface CommandEvent {
     cwd?: string;
     shell?: string;
     status?: string;
+    stream?: 'stdout' | 'stderr' | 'pty' | 'system' | string;
+    sequence?: number;
+    source?: 'execute_command' | 'pty' | 'vscode_terminal' | string;
+    background?: boolean;
+    processId?: number;
+    terminalId?: string;
+    logFile?: string;
     outputChunk?: string;
     resultPreview?: string;
+    stdoutPreview?: string;
+    stderrPreview?: string;
     error?: string;
     exitCode?: number;
+    exitSignal?: string;
     durationMs?: number;
     startedAt?: number;
     completedAt?: number;
@@ -152,6 +172,7 @@ export interface CommandEvent {
 }
 
 const MAX_COMMAND_PREVIEW_CHARS = 120_000;
+const COMMAND_EVENT_COALESCE_MS = 80;
 
 export interface WorkSummary {
     turnId: string;
@@ -1864,17 +1885,27 @@ export function commandEventToWorkEvent(event: CommandEvent): WorkEvent | null {
     if (!command || isGenericProgressText(command)) return null;
 
     const lifecycle = (event.event || '').toLowerCase();
-    const status: WorkEvent['status'] = lifecycle === 'command_failed' || event.status === 'failed'
+    const rawStatus = (event.status || '').toLowerCase();
+    const status: WorkEvent['status'] = lifecycle === 'command_failed' || ['failed', 'killed', 'aborted', 'timeout'].includes(rawStatus)
         ? 'failed'
-        : lifecycle === 'command_succeeded' || event.status === 'completed'
+        : rawStatus === 'waiting_input'
+            ? 'waiting'
+            : lifecycle === 'command_succeeded' || rawStatus === 'completed'
             ? 'completed'
             : 'running';
-    const output = event.outputChunk || event.resultPreview || '';
+    const output = event.outputChunk || event.resultPreview || event.stdoutPreview || event.stderrPreview || '';
+    const label = status === 'running'
+        ? 'Running'
+        : status === 'waiting'
+            ? 'Waiting'
+            : status === 'failed'
+                ? 'Command failed'
+                : 'Ran';
 
     return {
         id: event.tool_use_id ? `tool-${event.tool_use_id}` : `command-${event.command_id || command}`,
         type: 'command',
-        label: status === 'running' ? 'Running' : 'Ran',
+        label,
         target: command,
         command,
         resultPreview: output ? capCommandPreview(output) : undefined,
@@ -1884,6 +1915,16 @@ export function commandEventToWorkEvent(event: CommandEvent): WorkEvent | null {
         durationMs: event.durationMs,
         cwd: event.cwd,
         shell: event.shell,
+        stream: event.stream,
+        sequence: event.sequence,
+        source: event.source,
+        background: event.background,
+        processId: event.processId,
+        terminalId: event.terminalId,
+        logFile: event.logFile,
+        stdoutPreview: event.stdoutPreview,
+        stderrPreview: event.stderrPreview,
+        exitSignal: event.exitSignal,
         startedAt: event.startedAt,
         completedAt: event.completedAt,
         timestamp: event.timestamp || event.startedAt || Date.now(),
@@ -2468,7 +2509,7 @@ function mergeWorkEvent(existing: WorkEvent, incoming: WorkEvent): WorkEvent {
         if (next.startsWith(current)) return capCommandPreview(next);
         if (current.includes(next) || current.endsWith(next)) return capCommandPreview(current);
         if (incoming.status === 'running') return capCommandPreview(`${current}${next}`);
-        return capCommandPreview(next);
+        return capCommandPreview(current);
     };
     const mergedId = existing.type === 'approval' && incoming.type === 'approval' && incoming.id.startsWith('approval-')
         ? incoming.id
@@ -2496,6 +2537,16 @@ function mergeWorkEvent(existing: WorkEvent, incoming: WorkEvent): WorkEvent {
         durationMs: incoming.durationMs ?? existing.durationMs,
         cwd: incoming.cwd || existing.cwd,
         shell: incoming.shell || existing.shell,
+        stream: incoming.stream || existing.stream,
+        sequence: incoming.sequence ?? existing.sequence,
+        source: incoming.source || existing.source,
+        background: incoming.background ?? existing.background,
+        processId: incoming.processId ?? existing.processId,
+        terminalId: incoming.terminalId || existing.terminalId,
+        logFile: incoming.logFile || existing.logFile,
+        stdoutPreview: incoming.stdoutPreview || existing.stdoutPreview,
+        stderrPreview: incoming.stderrPreview || existing.stderrPreview,
+        exitSignal: incoming.exitSignal || existing.exitSignal,
         startedAt: incoming.startedAt ?? existing.startedAt,
         completedAt: incoming.completedAt ?? existing.completedAt,
         status: mergedStatus,
@@ -2893,6 +2944,13 @@ export function useChat(sessionId: string | null = null) {
     // Debounce for streaming updates - max 5 updates per second
     const pendingUpdateRef = useRef<ChatMessage | null>(null);
     const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const pendingCommandEventsRef = useRef<Array<{
+        turnId: string;
+        sessionId?: string;
+        workEvent: WorkEvent;
+        status: WorkSummaryStatus;
+    }>>([]);
+    const commandEventTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const messagesRef = useRef<ChatMessage[]>([]);
     const activeRunIdRef = useRef<string | null>(null);
     const terminalRunStatesRef = useRef<Map<string, WorkSummaryStatus>>(new Map());
@@ -2995,6 +3053,29 @@ export function useChat(sessionId: string | null = null) {
             });
         }
     }, []);
+
+    const flushPendingCommandEvents = useCallback(() => {
+        commandEventTimerRef.current = null;
+        const pending = pendingCommandEventsRef.current;
+        if (!pending.length) return;
+        pendingCommandEventsRef.current = [];
+        setWorkSummariesByTurn(prev => pending.reduce(
+            (next, event) => upsertWorkEvents(next, event.turnId, event.sessionId, [event.workEvent], event.status),
+            prev,
+        ));
+    }, []);
+
+    const enqueueCommandWorkEvent = useCallback((
+        turnId: string,
+        payloadSessionId: string | undefined,
+        workEvent: WorkEvent,
+        status: WorkSummaryStatus,
+    ) => {
+        pendingCommandEventsRef.current.push({ turnId, sessionId: payloadSessionId, workEvent, status });
+        if (!commandEventTimerRef.current) {
+            commandEventTimerRef.current = setTimeout(flushPendingCommandEvents, COMMAND_EVENT_COALESCE_MS);
+        }
+    }, [flushPendingCommandEvents]);
 
     const respondToPermission = useCallback((id: string, answer: string) => {
         postMessage({ type: 'permission_response', payload: { id, answer } });
@@ -3374,6 +3455,31 @@ export function useChat(sessionId: string | null = null) {
                 case 'file_search_results':
                     setFileResults(message.payload as FileSearchResult[]);
                     break;
+                case 'command_events':
+                    {
+                        const payload = (message.payload || {}) as { events?: CommandEvent[] };
+                        const events = Array.isArray(payload.events) ? payload.events : [];
+                        if (!events.length) return;
+                        setWorkSummariesByTurn(prev => events.reduce((next, event) => {
+                            if (sessionId && event.session_id && event.session_id !== sessionId) return next;
+                            const workEvent = commandEventToWorkEvent(event);
+                            if (!workEvent) return next;
+                            const turnId = event.turn_id || event.run_id || `command-${event.command_id || event.timestamp || Date.now()}`;
+                            const summaryStatus: WorkSummaryStatus = workEvent.status === 'failed'
+                                ? 'failed'
+                                : workEvent.status === 'completed'
+                                    ? 'completed'
+                                    : 'running';
+                            return upsertWorkEvents(
+                                next,
+                                turnId,
+                                event.session_id || sessionId || undefined,
+                                [workEvent],
+                                summaryStatus
+                            );
+                        }, prev));
+                    }
+                    break;
                 case 'command_event':
                     {
                         const payload = (message.payload || {}) as CommandEvent;
@@ -3389,13 +3495,12 @@ export function useChat(sessionId: string | null = null) {
                             messages: messagesRef.current,
                             fallback: `command-${payload.command_id || payload.timestamp || Date.now()}`,
                         });
-                        setWorkSummariesByTurn(prev => upsertWorkEvents(
-                            prev,
+                        enqueueCommandWorkEvent(
                             turnId,
                             payload.session_id || sessionId || undefined,
-                            [workEvent],
+                            workEvent,
                             'running'
-                        ));
+                        );
                         if (workEvent.status === 'running') {
                             setIsLoading(true);
                         }
@@ -3648,7 +3753,8 @@ export function useChat(sessionId: string | null = null) {
         markQueuedRunStarted,
         clearQueuedRun,
         failQueuedRun,
-        completeRuntimeRun
+        completeRuntimeRun,
+        enqueueCommandWorkEvent
     ]);
 
     // Request state when sessionId changes (restores history when switching sessions)
@@ -3670,6 +3776,11 @@ export function useChat(sessionId: string | null = null) {
             clearTimeout(debounceTimerRef.current);
             debounceTimerRef.current = null;
         }
+        pendingCommandEventsRef.current = [];
+        if (commandEventTimerRef.current) {
+            clearTimeout(commandEventTimerRef.current);
+            commandEventTimerRef.current = null;
+        }
         setIsLoading(false);
         setIsStopping(false);
 
@@ -3681,6 +3792,7 @@ export function useChat(sessionId: string | null = null) {
         // This prevents the 'flicker' where old messages might persist if get_state returns quickly
         const t = setTimeout(() => {
             postMessage({ type: 'get_state', payload: { sessionId } });
+            postMessage({ type: 'get_command_events', payload: { session_id: sessionId, limit: 500 } });
         }, 10);
         return () => clearTimeout(t);
     }, [postMessage, sessionId]);

@@ -112,14 +112,16 @@ func TestLoadEnvLocalCanDisableProjectEnvButKeepUserEnv(t *testing.T) {
 	}
 }
 
-func TestCatalogCoversJune2026RequiredModels(t *testing.T) {
+func TestCatalogCoversJuly2026RequiredModels(t *testing.T) {
 	required := map[string][]string{
-		"openai":     {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini"},
-		"anthropic":  {"claude-fable-5", "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
+		"openai":     {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.6"},
+		"anthropic":  {"claude-fable-5", "claude-opus-4-8", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
 		"xai":        {"grok-4.3", "grok-build-0.1"},
 		"deepseek":   {"deepseek-v4-flash", "deepseek-v4-pro"},
-		"zhipu":      {"glm-5.1", "glm-5-turbo", "glm-4.7"},
-		"minimax":    {"MiniMax-M3"},
+		"gemini":     {"gemini-3.5-flash", "gemini-3-flash"},
+		"mistral":    {"mistral-medium-latest", "mistral-small-latest", "devstral-latest", "codestral-latest"},
+		"zhipu":      {"glm-5.2", "glm-5.1", "glm-5-turbo", "glm-4.7"},
+		"minimax":    {"MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5-highspeed"},
 		"openrouter": {"qwen/qwen3-coder:free", "openrouter/free", "minimax/minimax-m2.5:free", "minimax/minimax-m3"},
 		"grik": {
 			"qwen/qwen3-coder:free",
@@ -127,17 +129,22 @@ func TestCatalogCoversJune2026RequiredModels(t *testing.T) {
 			"openai/gpt-5.5",
 			"openai/gpt-5.4",
 			"openai/gpt-5.4-mini",
+			"openai/gpt-5.4-nano",
+			"openai/gpt-5.6",
 			"anthropic/claude-fable-5",
 			"anthropic/claude-opus-4-8",
+			"anthropic/claude-sonnet-5",
 			"anthropic/claude-sonnet-4-6",
 			"xai/grok-4.3",
 			"xai/grok-build-0.1",
 			"deepseek/deepseek-v4-flash",
 			"deepseek/deepseek-v4-pro",
+			"zhipu/glm-5.2",
 			"zhipu/glm-5.1",
 			"minimax/minimax-m3",
+			"minimax/MiniMax-M2.7",
 		},
-		"zhipu-coding": {"glm-5.1"},
+		"zhipu-coding": {"glm-5.2", "glm-5.1"},
 	}
 
 	checkCatalog := func(t *testing.T, pm *ProvidersManager) {
@@ -164,6 +171,59 @@ func TestCatalogCoversJune2026RequiredModels(t *testing.T) {
 		t.Fatalf("yaml providers: %v", err)
 	}
 	checkCatalog(t, yamlPM)
+}
+
+func TestModelAPITypeAndProviderEndpoints(t *testing.T) {
+	check := func(t *testing.T, pm *ProvidersManager) {
+		t.Helper()
+		if apiType, ok := pm.ModelAPIType("openai", "gpt-5.4-nano"); !ok || apiType != "responses" {
+			t.Fatalf("openai/gpt-5.4-nano api_type = %q/%v, want responses/true", apiType, ok)
+		}
+		if apiType, ok := pm.ModelAPIType("grik", "openai/gpt-5.6"); !ok || apiType != "responses" {
+			t.Fatalf("grik openai/gpt-5.6 api_type = %q/%v, want responses/true", apiType, ok)
+		}
+		if got := pm.GetBaseURL("gemini"); got != "https://generativelanguage.googleapis.com/v1beta/openai/" {
+			t.Fatalf("gemini baseURL = %q", got)
+		}
+		if got := pm.GetBaseURL("minimax"); got != "https://api.minimaxi.com/v1" {
+			t.Fatalf("minimax baseURL = %q", got)
+		}
+		if got := pm.GetBaseURL("zhipu"); got != "https://api.z.ai/api/paas/v4" {
+			t.Fatalf("zhipu baseURL = %q", got)
+		}
+		if got := pm.GetBaseURL("zhipu-coding"); got != "https://api.z.ai/api/coding/paas/v4" {
+			t.Fatalf("zhipu-coding baseURL = %q", got)
+		}
+		providers := providerModelSet(pm.GetAvailableProviders())
+		if !providers["openai"]["gpt-5.4-nano"] {
+			t.Fatal("openai gpt-5.4-nano missing")
+		}
+		for _, provider := range pm.GetAvailableProviders() {
+			for _, model := range provider.Models {
+				if provider.ID == "openai" && model.ID == "gpt-5.4-nano" && (model.InputPrice != 0.2 || model.OutputPrice != 1.25) {
+					t.Fatalf("gpt-5.4-nano pricing = %v/%v", model.InputPrice, model.OutputPrice)
+				}
+				if provider.ID == "gemini" && model.ID == "gemini-3.5-flash" && (model.InputPrice <= 0 || model.OutputPrice <= 0) {
+					t.Fatalf("gemini-3.5-flash must not be zero-priced: %v/%v", model.InputPrice, model.OutputPrice)
+				}
+				if provider.ID == "mistral" && model.ID == "mistral-medium-latest" && (model.InputPrice != 1.5 || model.OutputPrice != 7.5 || model.ContextWindow != 256000) {
+					t.Fatalf("mistral-medium-latest catalog mismatch: %#v", model)
+				}
+			}
+		}
+	}
+
+	fallbackPM, err := NewProvidersManager("")
+	if err != nil {
+		t.Fatalf("fallback providers: %v", err)
+	}
+	check(t, fallbackPM)
+
+	yamlPM, err := NewProvidersManager(filepath.Join("..", "..", "config", "providers.yaml"))
+	if err != nil {
+		t.Fatalf("yaml providers: %v", err)
+	}
+	check(t, yamlPM)
 }
 
 func TestGrikBillingModelsHaveExplicitRates(t *testing.T) {

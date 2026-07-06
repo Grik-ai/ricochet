@@ -464,10 +464,20 @@ export interface CommandEventPayload {
     cwd?: string;
     shell?: string;
     status?: string;
+    stream?: 'stdout' | 'stderr' | 'pty' | 'system' | string;
+    sequence?: number;
+    source?: 'execute_command' | 'pty' | 'vscode_terminal' | string;
+    background?: boolean;
+    processId?: number;
+    terminalId?: string;
+    logFile?: string;
     outputChunk?: string;
     resultPreview?: string;
+    stdoutPreview?: string;
+    stderrPreview?: string;
     error?: string;
     exitCode?: number;
+    exitSignal?: string;
     durationMs?: number;
     startedAt?: number;
     completedAt?: number;
@@ -537,6 +547,7 @@ export interface CoreNotificationPayloads {
     chat_update: ChatUpdatePayload;
     task_progress: TaskProgressPayload;
     command_event: CommandEventPayload;
+    command_events: { events?: CommandEventPayload[] };
     tool_lifecycle: ToolLifecycleEventPayload;
     context_compaction: ContextCompactionEventPayload;
     checkpoint_event: CheckpointEventPayload;

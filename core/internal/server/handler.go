@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -648,6 +649,9 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 			} else {
 				modelKnown = false
 			}
+			if apiType, ok := h.Providers.ModelAPIType(h.Config.Provider.Provider, h.Config.Provider.Model); ok {
+				h.Config.Provider.APIType = apiType
+			}
 		}
 		if credentialMode == "none" {
 			h.Config.Provider.APIKey = ""
@@ -936,6 +940,26 @@ func (h *Handler) HandleMessage(msg protocol.RPCMessage, writer ResponseWriter) 
 		writer.Send(protocol.RPCMessage{
 			ID:   msg.ID,
 			Type: "tool_lifecycle_events",
+			Payload: protocol.EncodeRPC(map[string]interface{}{
+				"events": events,
+			}),
+		})
+
+	case "get_command_events":
+		var payload struct {
+			Limit     int    `json:"limit,omitempty"`
+			SessionID string `json:"session_id,omitempty"`
+			RunID     string `json:"run_id,omitempty"`
+		}
+		_ = json.Unmarshal(msg.Payload, &payload)
+		events, err := h.replayCommandEvents(payload.Limit, payload.SessionID, payload.RunID)
+		if err != nil {
+			writer.Send(protocol.RPCMessage{ID: msg.ID, Error: err.Error()})
+			return
+		}
+		writer.Send(protocol.RPCMessage{
+			ID:   msg.ID,
+			Type: "command_events",
 			Payload: protocol.EncodeRPC(map[string]interface{}{
 				"events": events,
 			}),
@@ -2478,6 +2502,9 @@ func (h *Handler) handleSaveSettings(msg protocol.RPCMessage, writer ResponseWri
 				h.Config.Provider.CredentialMode = credentialMode
 				if h.Providers != nil {
 					h.Config.Provider.BaseURL = h.Providers.GetBaseURL(targetProvider)
+					if apiType, ok := h.Providers.ModelAPIType(targetProvider, targetModel); ok {
+						h.Config.Provider.APIType = apiType
+					}
 				}
 				h.Config.Provider.Temperature = s.Provider.Temperature
 				h.Config.Provider.TopP = s.Provider.TopP
@@ -2638,4 +2665,46 @@ func (h *Handler) handleSetLiveMode(msg protocol.RPCMessage, writer ResponseWrit
 		Type:    "live_mode_status",
 		Payload: protocol.EncodeRPC(status),
 	})
+}
+
+func (h *Handler) replayCommandEvents(limit int, sessionID string, runID string) ([]protocol.CommandEvent, error) {
+	if h.Host == nil {
+		return []protocol.CommandEvent{}, nil
+	}
+	file, err := os.Open(filepath.Join(paths.GetLogDir(h.Host.GetCWD()), "command_events.jsonl"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []protocol.CommandEvent{}, nil
+		}
+		return nil, err
+	}
+	defer file.Close()
+
+	events := []protocol.CommandEvent{}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var event protocol.CommandEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if sessionID != "" && event.SessionID != sessionID {
+			continue
+		}
+		if runID != "" && event.RunID != runID {
+			continue
+		}
+		events = append(events, event)
+		if limit > 0 && len(events) > limit {
+			events = events[len(events)-limit:]
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
 }

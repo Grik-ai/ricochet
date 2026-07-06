@@ -1065,6 +1065,54 @@ describe('chat timeline normalization', () => {
         expect(summaries['run-psql'].items[0].resultPreview).toBe(' id | status\n----+--------\n 1 | done\n');
     });
 
+    it('keeps command stream metadata and does not let final preview erase streamed output', () => {
+        const chunk = commandEventToWorkEvent({
+            event: 'command_output',
+            command_id: 'cmd-1',
+            command: 'npm test',
+            outputChunk: 'running tests\n',
+            status: 'running',
+            stream: 'stdout',
+            sequence: 2,
+            source: 'execute_command',
+            processId: 4242,
+            logFile: '/tmp/ricochet/cmd-1.log',
+            timestamp: 100,
+        }) as WorkEvent;
+        const final = commandEventToWorkEvent({
+            event: 'command_failed',
+            command_id: 'cmd-1',
+            command: 'npm test',
+            status: 'timeout',
+            stream: 'system',
+            source: 'execute_command',
+            resultPreview: 'last buffered line\n',
+            stdoutPreview: 'running tests\nlast buffered line\n',
+            stderrPreview: 'timeout\n',
+            exitSignal: 'timeout',
+            logFile: '/tmp/ricochet/cmd-1.log',
+            timestamp: 200,
+        }) as WorkEvent;
+
+        const summaries = upsertWorkEvents(
+            upsertWorkEvents({}, 'run-command', undefined, [chunk], 'running'),
+            'run-command',
+            undefined,
+            [final],
+            'failed',
+        );
+
+        const item = summaries['run-command'].items[0];
+        expect(item.resultPreview).toBe('running tests\n');
+        expect(item.status).toBe('failed');
+        expect(item.logFile).toBe('/tmp/ricochet/cmd-1.log');
+        expect(item.stdoutPreview).toBe('running tests\nlast buffered line\n');
+        expect(item.stderrPreview).toBe('timeout\n');
+        expect(item.exitSignal).toBe('timeout');
+        expect(item.processId).toBe(4242);
+        expect(item.source).toBe('execute_command');
+    });
+
     it('deduplicates task_progress, tool call, and activity for the same read', () => {
         const progress = parseProgressStatus({
             task_name: 'Agent activity',

@@ -19,9 +19,11 @@ import {
     LayoutGrid,
     Linkedin,
     Loader2,
+    Mail,
     Mic,
     RefreshCw,
     Search,
+    Send,
     Shield,
     ShieldAlert,
     ShieldCheck,
@@ -2540,6 +2542,40 @@ export function Settings({ onClose, initialTab, grikAccount }: SettingsProps) {
                                     </div>
                                 </div>
                                 <p className="text-sm leading-relaxed text-[#ccc]">Ricochet is a hybrid AI coding agent with local control, provider choice and transparent autonomy settings.</p>
+                            </section>
+                            <section className="space-y-3 border-t border-[#333] pt-4">
+                                <h3 className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-[#888]"><HelpCircle className="h-3 w-3 text-sky-300" /> Support & Feedback</h3>
+                                <p className="text-xs leading-relaxed text-[#888]">Questions, issues, or feature requests? Email support, or message the CEO on Telegram for urgent help.</p>
+                                <div className="grid gap-2 sm:grid-cols-2">
+                                    <a
+                                        href="mailto:support@grik.io"
+                                        className="flex min-w-0 items-center justify-between gap-3 rounded border border-white/10 bg-white/[0.03] px-3 py-2 text-left transition-colors hover:bg-white/[0.06]"
+                                    >
+                                        <span className="flex min-w-0 items-center gap-2">
+                                            <Mail className="h-3.5 w-3.5 shrink-0 text-[#888]" />
+                                            <span className="min-w-0">
+                                                <span className="block text-xs font-medium text-[#aaa]">Email Support</span>
+                                                <span className="block truncate text-[10px] text-[#666]">support@grik.io</span>
+                                            </span>
+                                        </span>
+                                        <ExternalLink className="h-3 w-3 shrink-0 text-[#666]" />
+                                    </a>
+                                    <a
+                                        href="https://t.me/igoryan_dao"
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="flex min-w-0 items-center justify-between gap-3 rounded border border-white/10 bg-white/[0.03] px-3 py-2 text-left transition-colors hover:bg-white/[0.06]"
+                                    >
+                                        <span className="flex min-w-0 items-center gap-2">
+                                            <Send className="h-3.5 w-3.5 shrink-0 text-[#888]" />
+                                            <span className="min-w-0">
+                                                <span className="block text-xs font-medium text-[#aaa]">Telegram CEO</span>
+                                                <span className="block truncate text-[10px] text-[#666]">@igoryan_dao</span>
+                                            </span>
+                                        </span>
+                                        <ExternalLink className="h-3 w-3 shrink-0 text-[#666]" />
+                                    </a>
+                                </div>
                             </section>
                             <section className="space-y-3 border-t border-[#333] pt-4">
                                 <h3 className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-[#888]"><Heart className="h-3 w-3 text-red-400" /> Support the Project</h3>

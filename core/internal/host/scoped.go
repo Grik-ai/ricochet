@@ -36,12 +36,16 @@ func (h *ScopedHost) ListDir(path string) ([]FileInfo, error) {
 	return h.local.ListDir(path)
 }
 
-func (h *ScopedHost) ExecuteCommand(ctx context.Context, command string, background bool) (CommandResult, error) {
-	return h.local.ExecuteCommand(ctx, command, background)
+func (h *ScopedHost) ExecuteCommand(ctx context.Context, command string, background bool, timeoutSeconds ...int) (CommandResult, error) {
+	return h.local.ExecuteCommand(ctx, command, background, timeoutSeconds...)
 }
 
 func (h *ScopedHost) GetCommandStatus(id string) (CommandStatus, bool) {
 	return h.local.GetCommandStatus(id)
+}
+
+func (h *ScopedHost) StopCommand(ctx context.Context, id string, force bool) (CommandStatus, bool) {
+	return h.local.StopCommand(ctx, id, force)
 }
 
 func (h *ScopedHost) ShowMessage(level string, text string) {

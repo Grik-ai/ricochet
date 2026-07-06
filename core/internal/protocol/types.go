@@ -514,10 +514,20 @@ type CommandEvent struct {
 	Cwd           string `json:"cwd,omitempty"`
 	Shell         string `json:"shell,omitempty"`
 	Status        string `json:"status,omitempty"` // running, completed, failed
+	Stream        string `json:"stream,omitempty"` // stdout, stderr, pty, system
+	Sequence      int64  `json:"sequence,omitempty"`
+	Source        string `json:"source,omitempty"` // execute_command, pty, vscode_terminal
+	Background    bool   `json:"background,omitempty"`
+	ProcessID     int    `json:"processId,omitempty"`
+	TerminalID    string `json:"terminalId,omitempty"`
+	LogFile       string `json:"logFile,omitempty"`
 	OutputChunk   string `json:"outputChunk,omitempty"`
 	ResultPreview string `json:"resultPreview,omitempty"`
+	StdoutPreview string `json:"stdoutPreview,omitempty"`
+	StderrPreview string `json:"stderrPreview,omitempty"`
 	Error         string `json:"error,omitempty"`
 	ExitCode      int    `json:"exitCode,omitempty"`
+	ExitSignal    string `json:"exitSignal,omitempty"`
 	DurationMs    int64  `json:"durationMs,omitempty"`
 	StartedAt     int64  `json:"startedAt,omitempty"`   // ms since epoch
 	CompletedAt   int64  `json:"completedAt,omitempty"` // ms since epoch

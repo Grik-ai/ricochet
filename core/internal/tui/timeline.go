@@ -25,6 +25,16 @@ func (m *Model) applyCommandEvent(event protocol.CommandEvent) {
 	item.Shell = firstNonEmpty(event.Shell, item.Shell)
 	item.Error = firstNonEmpty(event.Error, item.Error)
 	item.ExitCode = event.ExitCode
+	item.Stream = firstNonEmpty(event.Stream, item.Stream)
+	item.Sequence = firstNonZeroInt64(event.Sequence, item.Sequence)
+	item.Source = firstNonEmpty(event.Source, item.Source)
+	item.Background = item.Background || event.Background
+	item.ProcessID = firstNonZeroInt(event.ProcessID, item.ProcessID)
+	item.TerminalID = firstNonEmpty(event.TerminalID, item.TerminalID)
+	item.LogFile = firstNonEmpty(event.LogFile, item.LogFile)
+	item.StdoutPreview = firstNonEmpty(event.StdoutPreview, item.StdoutPreview)
+	item.StderrPreview = firstNonEmpty(event.StderrPreview, item.StderrPreview)
+	item.ExitSignal = firstNonEmpty(event.ExitSignal, item.ExitSignal)
 	item.DurationMs = firstNonZeroInt64(event.DurationMs, item.DurationMs)
 	item.StartedAt = firstNonZeroInt64(event.StartedAt, item.StartedAt)
 	item.CompletedAt = firstNonZeroInt64(event.CompletedAt, item.CompletedAt)
@@ -37,24 +47,38 @@ func (m *Model) applyCommandEvent(event protocol.CommandEvent) {
 		m.CurrentAction = "Running command"
 	case "command_output":
 		item.Status = firstNonEmpty(event.Status, item.Status, "running")
-		item.Output += event.OutputChunk
+		item.Output += formatCommandOutputChunk(event)
 		m.IsLoading = true
 		m.CurrentAction = "Streaming command output"
 	case "command_succeeded":
-		item.Status = "succeeded"
-		if event.ResultPreview != "" {
-			item.Output += event.ResultPreview
+		item.Status = firstNonEmpty(event.Status, "succeeded")
+		if item.Output == "" {
+			item.Output = firstNonEmpty(event.ResultPreview, event.StdoutPreview, event.StderrPreview)
 		}
 		m.CurrentAction = "Command succeeded"
 	case "command_failed":
-		item.Status = "failed"
-		if event.ResultPreview != "" {
-			item.Output += event.ResultPreview
+		item.Status = firstNonEmpty(event.Status, "failed")
+		if item.Output == "" {
+			item.Output = firstNonEmpty(event.ResultPreview, event.StdoutPreview, event.StderrPreview)
 		}
 		m.CurrentAction = "Command failed"
 	default:
 		item.Status = firstNonEmpty(event.Status, item.Status)
 	}
+}
+
+func formatCommandOutputChunk(event protocol.CommandEvent) string {
+	if event.Stream != "stderr" || event.OutputChunk == "" {
+		return event.OutputChunk
+	}
+	lines := strings.SplitAfter(event.OutputChunk, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lines[i] = "[stderr] " + line
+	}
+	return strings.Join(lines, "")
 }
 
 func (m *Model) applyTimelineNotice(msg TimelineNoticeMsg) {
@@ -203,7 +227,7 @@ func renderCommandTimelineItem(item *TimelineItem, width int) string {
 	case "succeeded", "completed":
 		statusStyle = style.SuccessStyle
 		icon = "✓"
-	case "failed":
+	case "failed", "killed", "timeout":
 		statusStyle = style.DangerStyle
 		icon = "x"
 	case "aborted":
@@ -226,11 +250,29 @@ func renderCommandTimelineItem(item *TimelineItem, width int) string {
 	if item.Shell != "" {
 		meta = append(meta, "shell="+item.Shell)
 	}
+	if item.Source != "" {
+		meta = append(meta, "source="+item.Source)
+	}
+	if item.Stream != "" && item.Stream != "stdout" {
+		meta = append(meta, "stream="+item.Stream)
+	}
+	if item.ProcessID > 0 {
+		meta = append(meta, fmt.Sprintf("pid=%d", item.ProcessID))
+	}
+	if item.TerminalID != "" {
+		meta = append(meta, "terminal="+truncateRunes(item.TerminalID, 12))
+	}
 	if item.DurationMs > 0 {
 		meta = append(meta, formatTimelineDuration(item.DurationMs))
 	}
 	if item.CompletedAt > 0 && item.ExitCode != 0 {
 		meta = append(meta, fmt.Sprintf("exit=%d", item.ExitCode))
+	}
+	if item.ExitSignal != "" {
+		meta = append(meta, "signal="+item.ExitSignal)
+	}
+	if item.LogFile != "" {
+		meta = append(meta, "log="+item.LogFile)
 	}
 
 	var sb strings.Builder
@@ -272,7 +314,7 @@ func renderTimelineOutput(item *TimelineItem) string {
 	var sb strings.Builder
 	border := style.BorderColor
 	outStyle := style.MutedStyle
-	if item.Status == "failed" {
+	if item.Status == "failed" || item.Status == "killed" || item.Status == "timeout" {
 		outStyle = lipgloss.NewStyle().Foreground(style.Danger)
 	}
 	sb.WriteString(border.Render("  ┌ output") + "\n")
@@ -300,6 +342,12 @@ func statusLabel(status string) string {
 		return "Failed"
 	case "aborted":
 		return "Aborted"
+	case "killed":
+		return "Killed"
+	case "timeout":
+		return "Timed out"
+	case "waiting_input":
+		return "Waiting"
 	default:
 		return status
 	}
@@ -313,6 +361,15 @@ func formatTimelineDuration(ms int64) string {
 }
 
 func firstNonZeroInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func firstNonZeroInt(values ...int) int {
 	for _, value := range values {
 		if value != 0 {
 			return value

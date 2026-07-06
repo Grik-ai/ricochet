@@ -531,6 +531,20 @@ func (pm *ProvidersManager) ModelCredentialMode(providerID, modelID string) (str
 	return "", false
 }
 
+// ModelAPIType returns the API surface required for a configured model.
+func (pm *ProvidersManager) ModelAPIType(providerID, modelID string) (string, bool) {
+	provider, ok := pm.config.Providers[providerID]
+	if !ok || !provider.Enabled {
+		return "", false
+	}
+	for _, model := range provider.Models {
+		if model.ID == modelID {
+			return model.APIType, true
+		}
+	}
+	return "", false
+}
+
 // ModelAllowsAnonymousUse reports whether a model explicitly requires no credentials.
 func (pm *ProvidersManager) ModelAllowsAnonymousUse(providerID, modelID string) bool {
 	mode, ok := pm.ModelCredentialMode(providerID, modelID)
@@ -811,7 +825,7 @@ func defaultProviderValidationBaseURL(providerID string) string {
 	case "mistral":
 		return "https://api.mistral.ai/v1"
 	case "minimax":
-		return "https://api.minimax.chat/v1"
+		return "https://api.minimaxi.com/v1"
 	case "xai":
 		return "https://api.x.ai/v1"
 	default:
@@ -896,15 +910,20 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 					{ID: "openai/gpt-5.5", Name: "GPT-5.5 (Subscription)", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 30.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses", Recommended: true},
 					{ID: "openai/gpt-5.4", Name: "GPT-5.4 (Subscription)", ContextWindow: 1000000, InputPrice: 2.5, OutputPrice: 15.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses"},
 					{ID: "openai/gpt-5.4-mini", Name: "GPT-5.4 Mini (Subscription)", ContextWindow: 400000, InputPrice: 0.75, OutputPrice: 4.5, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses"},
+					{ID: "openai/gpt-5.4-nano", Name: "GPT-5.4 Nano (Subscription)", ContextWindow: 400000, InputPrice: 0.2, OutputPrice: 1.25, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses"},
+					{ID: "openai/gpt-5.6", Name: "GPT-5.6 Preview (Limited)", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 30.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", APIType: "responses", Limited: true},
 					{ID: "anthropic/claude-fable-5", Name: "Claude Fable 5 (Subscription)", ContextWindow: 1000000, InputPrice: 10.0, OutputPrice: 50.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 					{ID: "anthropic/claude-opus-4-8", Name: "Claude Opus 4.8 (Subscription)", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 25.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", Recommended: true},
+					{ID: "anthropic/claude-sonnet-5", Name: "Claude Sonnet 5 (Subscription)", ContextWindow: 1000000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", Recommended: true},
 					{ID: "anthropic/claude-sonnet-4-6", Name: "Claude Sonnet 4.6 (Subscription)", ContextWindow: 1000000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 					{ID: "xai/grok-4.3", Name: "Grok 4.3 (Subscription)", ContextWindow: 1000000, InputPrice: 1.25, OutputPrice: 2.50, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 					{ID: "xai/grok-build-0.1", Name: "Grok Build 0.1 (Subscription)", ContextWindow: 256000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 					{ID: "deepseek/deepseek-v4-flash", Name: "DeepSeek V4 Flash (Subscription)", ContextWindow: 1000000, InputPrice: 0.14, OutputPrice: 0.28, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 					{ID: "deepseek/deepseek-v4-pro", Name: "DeepSeek V4 Pro (Subscription)", ContextWindow: 1000000, InputPrice: 0.435, OutputPrice: 0.87, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
+					{ID: "zhipu/glm-5.2", Name: "GLM-5.2 (Subscription)", ContextWindow: 1000000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code", Recommended: true},
 					{ID: "zhipu/glm-5.1", Name: "GLM-5.1 (Subscription)", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 					{ID: "minimax/minimax-m3", Name: "MiniMax M3 (Subscription)", ContextWindow: 1000000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
+					{ID: "minimax/MiniMax-M2.7", Name: "MiniMax M2.7 (Subscription)", ContextWindow: 204800, InputPrice: 0.5, OutputPrice: 1.0, SupportsTools: true, AccessMode: "subscription", RequiresSubscription: true, BillingSKU: "ricochet_code"},
 				},
 				AttemptTimeoutMs: 1000,
 			},
@@ -923,7 +942,9 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 			"gemini": {
 				Enabled: true,
 				Key:     os.Getenv("GEMINI_API_KEY"),
+				BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
 				Models: []ModelConfig{
+					{ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash", ContextWindow: 1000000, InputPrice: 1.5, OutputPrice: 9.0, SupportsTools: true, Recommended: true},
 					{ID: "gemini-3-flash", Name: "Gemini 3 Flash", ContextWindow: 1000000, IsFree: true, SupportsTools: true},
 					{ID: "gemini-3-pro", Name: "Gemini 3 Pro", ContextWindow: 1000000, InputPrice: 1.25, OutputPrice: 10.0, SupportsTools: true},
 					{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash", ContextWindow: 1000000, IsFree: true, SupportsTools: true},
@@ -937,6 +958,7 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				Models: []ModelConfig{
 					{ID: "claude-fable-5", Name: "Claude Fable 5", ContextWindow: 1000000, InputPrice: 10.0, OutputPrice: 50.0, SupportsTools: true, Recommended: true},
 					{ID: "claude-opus-4-8", Name: "Claude Opus 4.8", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 25.0, SupportsTools: true, Recommended: true},
+					{ID: "claude-sonnet-5", Name: "Claude Sonnet 5", ContextWindow: 1000000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true, Recommended: true},
 					{ID: "claude-sonnet-4-6", Name: "Claude Sonnet 4.6", ContextWindow: 1000000, InputPrice: 3.0, OutputPrice: 15.0, SupportsTools: true, Recommended: true},
 					{ID: "claude-haiku-4-5-20251001", Name: "Claude Haiku 4.5", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 5.0, SupportsTools: true},
 					{ID: "claude-mythos-5", Name: "Claude Mythos 5 (Limited)", ContextWindow: 1000000, InputPrice: 10.0, OutputPrice: 50.0, SupportsTools: true, Limited: true},
@@ -950,6 +972,8 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 					{ID: "gpt-5.5", Name: "GPT-5.5", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 30.0, SupportsTools: true, Recommended: true, APIType: "responses"},
 					{ID: "gpt-5.4", Name: "GPT-5.4", ContextWindow: 1000000, InputPrice: 2.5, OutputPrice: 15.0, SupportsTools: true, APIType: "responses"},
 					{ID: "gpt-5.4-mini", Name: "GPT-5.4 Mini", ContextWindow: 400000, InputPrice: 0.75, OutputPrice: 4.5, SupportsTools: true, APIType: "responses"},
+					{ID: "gpt-5.4-nano", Name: "GPT-5.4 Nano", ContextWindow: 400000, InputPrice: 0.2, OutputPrice: 1.25, SupportsTools: true, APIType: "responses"},
+					{ID: "gpt-5.6", Name: "GPT-5.6 Preview", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 30.0, SupportsTools: true, APIType: "responses", Limited: true},
 				},
 				AttemptTimeoutMs: 1000,
 			},
@@ -968,6 +992,9 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				Key:     os.Getenv("MISTRAL_API_KEY"),
 				BaseURL: "https://api.mistral.ai/v1",
 				Models: []ModelConfig{
+					{ID: "mistral-medium-latest", Name: "Mistral Medium 3.5", ContextWindow: 256000, InputPrice: 1.5, OutputPrice: 7.5, SupportsTools: true, Recommended: true},
+					{ID: "mistral-small-latest", Name: "Mistral Small 4", ContextWindow: 128000, SupportsTools: true},
+					{ID: "devstral-latest", Name: "Devstral Latest", ContextWindow: 128000, SupportsTools: true},
 					{ID: "codestral-latest", Name: "Codestral (Free)", ContextWindow: 32000, IsFree: true, SupportsTools: true},
 					{ID: "ministral-8b-latest", Name: "Ministral 8B (Free)", ContextWindow: 128000, IsFree: true, SupportsTools: true},
 				},
@@ -978,7 +1005,8 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				Key:     os.Getenv("ZHIPU_API_KEY"),
 				BaseURL: "https://api.z.ai/api/paas/v4",
 				Models: []ModelConfig{
-					{ID: "glm-5.1", Name: "GLM-5.1 (Flagship)", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, Recommended: true},
+					{ID: "glm-5.2", Name: "GLM-5.2 (Recommended)", ContextWindow: 1000000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, Recommended: true},
+					{ID: "glm-5.1", Name: "GLM-5.1 (Flagship)", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true},
 					{ID: "glm-5-turbo", Name: "GLM-5 Turbo", ContextWindow: 128000, InputPrice: 0.3, OutputPrice: 0.6, SupportsTools: true},
 					{ID: "glm-4.7", Name: "GLM-4.7", ContextWindow: 128000, InputPrice: 1.0, OutputPrice: 1.0, SupportsTools: true},
 					{ID: "glm-4.7-flash", Name: "GLM-4.7 Flash (Free)", ContextWindow: 128000, IsFree: true, SupportsTools: true, AccessMode: "free"},
@@ -991,7 +1019,8 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 				Key:     os.Getenv("ZHIPU_API_KEY"),
 				BaseURL: "https://api.z.ai/api/coding/paas/v4",
 				Models: []ModelConfig{
-					{ID: "glm-5.1", Name: "GLM-5.1 Coding", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, Recommended: true},
+					{ID: "glm-5.2", Name: "GLM-5.2 Coding", ContextWindow: 1000000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, Recommended: true},
+					{ID: "glm-5.1", Name: "GLM-5.1 Coding", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true},
 					{ID: "glm-4.7", Name: "GLM-4.7 Coding", ContextWindow: 128000, InputPrice: 1.0, OutputPrice: 1.0, SupportsTools: true},
 				},
 				AttemptTimeoutMs: 1000,
@@ -999,9 +1028,13 @@ func (pm *ProvidersManager) defaultConfig() *ProvidersConfig {
 			"minimax": {
 				Enabled: true,
 				Key:     os.Getenv("MINIMAX_API_KEY"),
+				BaseURL: "https://api.minimaxi.com/v1",
 				Models: []ModelConfig{
 					{ID: "MiniMax-M3", Name: "MiniMax M3", ContextWindow: 1000000, InputPrice: 1.0, OutputPrice: 2.0, SupportsTools: true, Source: "openrouter-verified"},
-					{ID: "MiniMax-M2.5", Name: "MiniMax M2.5", ContextWindow: 196608, InputPrice: 0.5, OutputPrice: 1.0, SupportsTools: true},
+					{ID: "MiniMax-M2.7", Name: "MiniMax M2.7", ContextWindow: 204800, InputPrice: 0.5, OutputPrice: 1.0, SupportsTools: true},
+					{ID: "MiniMax-M2.7-highspeed", Name: "MiniMax M2.7 Highspeed", ContextWindow: 204800, InputPrice: 0.5, OutputPrice: 1.0, SupportsTools: true},
+					{ID: "MiniMax-M2.5", Name: "MiniMax M2.5", ContextWindow: 204800, InputPrice: 0.5, OutputPrice: 1.0, SupportsTools: true},
+					{ID: "MiniMax-M2.5-highspeed", Name: "MiniMax M2.5 Highspeed", ContextWindow: 204800, InputPrice: 0.5, OutputPrice: 1.0, SupportsTools: true},
 				},
 				AttemptTimeoutMs: 1000,
 			},

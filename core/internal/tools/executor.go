@@ -7,11 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/igoryan-dao/ricochet/internal/browser"
 	"github.com/igoryan-dao/ricochet/internal/codegraph"
 	contextPkg "github.com/igoryan-dao/ricochet/internal/context"
 	"github.com/igoryan-dao/ricochet/internal/context/parser"
+	"github.com/igoryan-dao/ricochet/internal/format"
 	"github.com/igoryan-dao/ricochet/internal/host"
 	"github.com/igoryan-dao/ricochet/internal/index"
 	mcpHubPkg "github.com/igoryan-dao/ricochet/internal/mcp"
@@ -220,6 +223,8 @@ func (e *NativeExecutor) Execute(ctx context.Context, name string, args json.Raw
 		return e.CodebaseSearch(ctx, args)
 	case "command_status":
 		return e.GetCommandStatus(ctx, args)
+	case "command_stop", "terminal_close":
+		return e.StopCommand(ctx, args)
 	case "restore_checkpoint":
 		return e.RestoreCheckpoint(ctx, args)
 	case "read_definitions":
@@ -419,6 +424,10 @@ func (e *NativeExecutor) GetDefinitions() []ToolDefinition {
 						"type":        "boolean",
 						"description": "Whether to run the command in the background",
 					},
+					"timeout_seconds": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional timeout in seconds. Omit or use 0 for no timeout.",
+					},
 				},
 				"required": []string{"command"},
 			},
@@ -432,6 +441,24 @@ func (e *NativeExecutor) GetDefinitions() []ToolDefinition {
 					"id": map[string]interface{}{
 						"type":        "string",
 						"description": "Command ID returned by execute_command, or subagent worker ID with or without the agent- prefix",
+					},
+				},
+				"required": []string{"id"},
+			},
+		},
+		{
+			Name:        "command_stop",
+			Description: "Stop a running background command or persistent terminal session.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Command ID returned by execute_command or terminal ID returned by start_terminal",
+					},
+					"force": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Force kill immediately instead of graceful stop",
 					},
 				},
 				"required": []string{"id"},
@@ -965,14 +992,91 @@ func (e *NativeExecutor) StartTerminal(ctx context.Context, args json.RawMessage
 	cwd := payload.Cwd
 	if cwd == "" {
 		cwd = e.host.GetCWD()
-	} else {
+	} else if !filepath.IsAbs(cwd) {
 		cwd = filepath.Join(e.host.GetCWD(), cwd) // Resolve relative
 	}
 
-	session, err := e.ptyManager.Start(cmd, nil, cwd, nil)
+	if e.ignoreMatcher != nil {
+		if err := e.ignoreMatcher.CheckCommand(cmd); err != nil {
+			return "", fmt.Errorf("ricochetignore: %w", err)
+		}
+	}
+	if e.safeguard != nil && e.safeguard.Permissions != nil {
+		if err := e.safeguard.CheckCommand(cmd); err != nil {
+			return "", fmt.Errorf("safeguard: %w", err)
+		}
+	}
+	if err := e.ensureConsent(ctx, "start_terminal", cmd, fmt.Sprintf("Start interactive terminal: %s", cmd)); err != nil {
+		return "", err
+	}
+
+	startedAt := time.Now()
+	var sequence atomic.Int64
+	session, err := e.ptyManager.StartWithCallbacks(cmd, nil, cwd, nil, host.PTYCallbacks{
+		OnOutput: func(session *host.PTYSession, chunk []byte) {
+			e.emitCommandLifecycleEvent(ctx, protocol.CommandEvent{
+				CommandID:   session.ID,
+				TerminalID:  session.ID,
+				Event:       "command_output",
+				Command:     cmd,
+				Cwd:         cwd,
+				Shell:       cmd,
+				Status:      "running",
+				Stream:      "pty",
+				Sequence:    sequence.Add(1),
+				Source:      "pty",
+				Background:  true,
+				ProcessID:   processID(session),
+				OutputChunk: format.ProcessTerminalOutput(string(chunk)),
+				StartedAt:   startedAt.UnixMilli(),
+			})
+		},
+		OnExit: func(session *host.PTYSession, err error) {
+			completedAt := time.Now()
+			status := "completed"
+			eventName := "command_succeeded"
+			exitCode := processExitCode(session, err)
+			if err != nil || exitCode != 0 {
+				status = "failed"
+				eventName = "command_failed"
+			}
+			e.emitCommandLifecycleEvent(ctx, protocol.CommandEvent{
+				CommandID:   session.ID,
+				TerminalID:  session.ID,
+				Event:       eventName,
+				Command:     cmd,
+				Cwd:         cwd,
+				Shell:       cmd,
+				Status:      status,
+				Stream:      "system",
+				Source:      "pty",
+				Background:  true,
+				ProcessID:   processID(session),
+				Error:       ptyExitError(session, err),
+				ExitCode:    exitCode,
+				DurationMs:  completedAt.Sub(startedAt).Milliseconds(),
+				StartedAt:   startedAt.UnixMilli(),
+				CompletedAt: completedAt.UnixMilli(),
+			})
+		},
+	})
 	if err != nil {
 		return "", fmt.Errorf("failed to start terminal: %w", err)
 	}
+	e.emitCommandLifecycleEvent(ctx, protocol.CommandEvent{
+		CommandID:  session.ID,
+		TerminalID: session.ID,
+		Event:      "command_started",
+		Command:    cmd,
+		Cwd:        cwd,
+		Shell:      cmd,
+		Status:     "running",
+		Stream:     "system",
+		Source:     "pty",
+		Background: true,
+		ProcessID:  processID(session),
+		StartedAt:  startedAt.UnixMilli(),
+	})
 
 	return fmt.Sprintf("Terminal started. ID: %s. Use send_input/read_terminal to interact.", session.ID), nil
 }
@@ -984,6 +1088,15 @@ func (e *NativeExecutor) SendTerminalInput(ctx context.Context, args json.RawMes
 	}
 	if err := json.Unmarshal(args, &payload); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	if e.safeguard != nil && e.safeguard.Permissions != nil {
+		if err := e.safeguard.CheckCommand(payload.Text); err != nil {
+			return "", fmt.Errorf("safeguard: %w", err)
+		}
+	}
+	if err := e.ensureConsent(ctx, "send_input", payload.ID, fmt.Sprintf("Send input to terminal %s", payload.ID)); err != nil {
+		return "", err
 	}
 
 	err := e.ptyManager.WriteInput(payload.ID, payload.Text)
@@ -1014,6 +1127,33 @@ func (e *NativeExecutor) ReadTerminalOutput(ctx context.Context, args json.RawMe
 		return "(No new output)", nil
 	}
 	return output, nil
+}
+
+func processID(session *host.PTYSession) int {
+	if session == nil || session.Cmd == nil || session.Cmd.Process == nil {
+		return 0
+	}
+	return session.Cmd.Process.Pid
+}
+
+func processExitCode(session *host.PTYSession, err error) int {
+	if session != nil && session.Cmd != nil && session.Cmd.ProcessState != nil {
+		return session.Cmd.ProcessState.ExitCode()
+	}
+	if err != nil {
+		return -1
+	}
+	return 0
+}
+
+func ptyExitError(session *host.PTYSession, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	if session != nil {
+		return session.ExitErr
+	}
+	return ""
 }
 
 func (e *NativeExecutor) ExecutePythonTool(ctx context.Context, args json.RawMessage) (string, error) {

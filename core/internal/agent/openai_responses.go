@@ -20,6 +20,7 @@ const defaultOpenAIResponsesURL = "https://api.openai.com/v1/responses"
 type OpenAIResponsesProvider struct {
 	apiKey         string
 	model          string
+	baseURL        string
 	organization   string
 	project        string
 	attemptTimeout time.Duration
@@ -30,13 +31,16 @@ func shouldUseOpenAIResponsesAPI(model, baseURL string) bool {
 		return false
 	}
 	model = strings.ToLower(strings.TrimSpace(model))
-	return strings.HasPrefix(model, "gpt-5.5") || strings.HasPrefix(model, "gpt-5.4")
+	return strings.HasPrefix(model, "gpt-5.6") ||
+		strings.HasPrefix(model, "gpt-5.5") ||
+		strings.HasPrefix(model, "gpt-5.4")
 }
 
-func NewOpenAIResponsesProvider(apiKey, model, organization, project string, timeoutMs int) *OpenAIResponsesProvider {
+func NewOpenAIResponsesProvider(apiKey, model, baseURL, organization, project string, timeoutMs int) *OpenAIResponsesProvider {
 	if model == "" {
 		model = "gpt-5.5"
 	}
+	baseURL = normalizeResponsesBaseURL(baseURL)
 	timeout := time.Duration(timeoutMs) * time.Millisecond
 	if timeout == 0 {
 		timeout = defaultRequestTimeout
@@ -46,6 +50,7 @@ func NewOpenAIResponsesProvider(apiKey, model, organization, project string, tim
 	return &OpenAIResponsesProvider{
 		apiKey:         apiKey,
 		model:          model,
+		baseURL:        baseURL,
 		organization:   organization,
 		project:        project,
 		attemptTimeout: timeout,
@@ -53,7 +58,29 @@ func NewOpenAIResponsesProvider(apiKey, model, organization, project string, tim
 }
 
 func (p *OpenAIResponsesProvider) Name() string {
+	baseURL := strings.ToLower(p.baseURL)
+	switch {
+	case strings.Contains(baseURL, "api.x.ai"):
+		return "xai"
+	case strings.Contains(baseURL, "grik"):
+		return "grik"
+	}
 	return "openai"
+}
+
+func normalizeResponsesBaseURL(baseURL string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return defaultOpenAIResponsesURL
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(strings.ToLower(baseURL), "/responses") {
+		return baseURL
+	}
+	if strings.HasSuffix(strings.ToLower(baseURL), "/chat/completions") {
+		baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
+	}
+	return baseURL + "/responses"
 }
 
 type responsesRequest struct {
@@ -135,7 +162,7 @@ func (p *OpenAIResponsesProvider) Chat(ctx context.Context, req *ChatRequest) (*
 
 	headers := p.headers()
 	headers["X-Client-Request-Id"] = uuid.New().String()
-	resp, cancel, err := DoRequestWithTimeout(ctx, http.MethodPost, defaultOpenAIResponsesURL, headers, bytes.NewReader(body), p.attemptTimeout)
+	resp, cancel, err := DoRequestWithTimeout(ctx, http.MethodPost, p.baseURL, headers, bytes.NewReader(body), p.attemptTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -170,7 +197,7 @@ func (p *OpenAIResponsesProvider) ChatStream(ctx context.Context, req *ChatReque
 
 	headers := p.headers()
 	headers["X-Client-Request-Id"] = uuid.New().String()
-	resp, cancel, err := DoRequestWithTimeout(ctx, http.MethodPost, defaultOpenAIResponsesURL, headers, bytes.NewReader(body), 0)
+	resp, cancel, err := DoRequestWithTimeout(ctx, http.MethodPost, p.baseURL, headers, bytes.NewReader(body), 0)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -187,7 +214,8 @@ func (p *OpenAIResponsesProvider) ChatStream(ctx context.Context, req *ChatReque
 }
 
 func (p *OpenAIResponsesProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	return NewOpenAIProvider(p.apiKey, p.model, "", p.organization, p.project, int(p.attemptTimeout/time.Millisecond)).Embed(ctx, texts)
+	baseURL := strings.TrimSuffix(p.baseURL, "/responses")
+	return NewOpenAIProvider(p.apiKey, p.model, baseURL, p.organization, p.project, int(p.attemptTimeout/time.Millisecond)).Embed(ctx, texts)
 }
 
 func (p *OpenAIResponsesProvider) headers() map[string]string {
@@ -280,15 +308,19 @@ func parseResponsesResponse(resp *responsesResponse) *ChatResponse {
 	var content strings.Builder
 	var toolCalls []protocol.ToolUseBlock
 
+	hasOutputText := false
 	if resp.OutputText != "" {
 		content.WriteString(resp.OutputText)
+		hasOutputText = true
 	}
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
-			for _, part := range item.Content {
-				if part.Type == "output_text" {
-					content.WriteString(part.Text)
+			if !hasOutputText {
+				for _, part := range item.Content {
+					if part.Type == "output_text" {
+						content.WriteString(part.Text)
+					}
 				}
 			}
 		case "function_call":

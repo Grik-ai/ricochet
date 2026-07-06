@@ -91,6 +91,7 @@ type ProviderConfig struct {
 	APIKey           string  `json:"api_key"`
 	Model            string  `json:"model"`
 	BaseURL          string  `json:"base_url,omitempty"` // For custom endpoints
+	APIType          string  `json:"api_type,omitempty"`
 	CredentialMode   string  `json:"credential_mode,omitempty"`
 	Organization     string  `json:"organization,omitempty"`
 	Project          string  `json:"project,omitempty"`
@@ -211,12 +212,14 @@ func providerNetworkCategoryFromStatus(statusCode int) string {
 
 // NewProvider creates a provider based on config
 func NewProvider(cfg ProviderConfig) (Provider, error) {
-	switch strings.ToLower(cfg.Provider) {
+	providerID := strings.ToLower(cfg.Provider)
+	useResponses := strings.EqualFold(cfg.APIType, "responses")
+	switch providerID {
 	case "anthropic":
 		return NewAnthropicProvider(cfg.APIKey, cfg.Model), nil
 	case "openai":
-		if shouldUseOpenAIResponsesAPI(cfg.Model, cfg.BaseURL) {
-			return NewOpenAIResponsesProvider(cfg.APIKey, cfg.Model, cfg.Organization, cfg.Project, cfg.AttemptTimeoutMs), nil
+		if useResponses || shouldUseOpenAIResponsesAPI(cfg.Model, cfg.BaseURL) {
+			return NewOpenAIResponsesProvider(cfg.APIKey, cfg.Model, cfg.BaseURL, cfg.Organization, cfg.Project, cfg.AttemptTimeoutMs), nil
 		}
 		return NewOpenAIProvider(cfg.APIKey, cfg.Model, cfg.BaseURL, cfg.Organization, cfg.Project, cfg.AttemptTimeoutMs), nil
 	case "openrouter":
@@ -226,11 +229,25 @@ func NewProvider(cfg ProviderConfig) (Provider, error) {
 		}
 		return NewOpenAIProvider(cfg.APIKey, cfg.Model, baseURL, "", "", cfg.AttemptTimeoutMs), nil // OpenRouter doesn't use standard Org/Project headers
 	case "xai":
-		return NewXAIProvider(cfg.APIKey, cfg.Model, cfg.AttemptTimeoutMs), nil
+		baseURL := "https://api.x.ai/v1"
+		if cfg.BaseURL != "" {
+			baseURL = cfg.BaseURL
+		}
+		if useResponses {
+			return NewOpenAIResponsesProvider(cfg.APIKey, cfg.Model, baseURL, "", "", cfg.AttemptTimeoutMs), nil
+		}
+		return NewOpenAIProvider(cfg.APIKey, cfg.Model, baseURL, "", "", cfg.AttemptTimeoutMs), nil
 	case "gemini":
+		if cfg.BaseURL != "" {
+			return NewOpenAIProvider(cfg.APIKey, cfg.Model, cfg.BaseURL, "", "", cfg.AttemptTimeoutMs), nil
+		}
 		return NewGeminiProvider(cfg.APIKey, cfg.Model), nil
 	case "minimax":
-		return NewMinimaxProvider(cfg.APIKey, cfg.Model, cfg.AttemptTimeoutMs), nil
+		baseURL := "https://api.minimaxi.com/v1"
+		if cfg.BaseURL != "" {
+			baseURL = cfg.BaseURL
+		}
+		return NewOpenAIProvider(cfg.APIKey, cfg.Model, baseURL, "", "", cfg.AttemptTimeoutMs), nil
 	case "deepseek":
 		baseURL := "https://api.deepseek.com"
 		if cfg.BaseURL != "" {
@@ -255,15 +272,18 @@ func NewProvider(cfg ProviderConfig) (Provider, error) {
 		if apiKey == "" && cfg.CredentialMode != "none" {
 			apiKey = os.Getenv("GRIKAI_ACCESS_TOKEN")
 		}
+		if useResponses {
+			return NewOpenAIResponsesProvider(apiKey, cfg.Model, baseURL, "", "", cfg.AttemptTimeoutMs), nil
+		}
 		return NewOpenAIProvider(apiKey, cfg.Model, baseURL, "", "", cfg.AttemptTimeoutMs), nil
 	case "zhipu", "glm":
-		baseURL := "https://open.bigmodel.cn/api/paas/v4"
+		baseURL := "https://api.z.ai/api/paas/v4"
 		if cfg.BaseURL != "" {
 			baseURL = cfg.BaseURL
 		}
 		return NewOpenAIProvider(cfg.APIKey, cfg.Model, baseURL, "", "", cfg.AttemptTimeoutMs), nil
 	case "zhipu-coding":
-		baseURL := "https://open.bigmodel.cn/api/paas/v4" // Official bigmodel API uses same for coding
+		baseURL := "https://api.z.ai/api/coding/paas/v4"
 		if cfg.BaseURL != "" {
 			baseURL = cfg.BaseURL
 		}

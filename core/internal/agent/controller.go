@@ -1481,6 +1481,9 @@ func (c *Controller) resolveProviderForRequest(planMode bool) (Provider, Provide
 	modeConfig.APIKey = apiKey
 	modeConfig.BaseURL = c.providersManager.GetBaseURL(modeModel.Provider)
 	modeConfig.CredentialMode = credentialMode
+	if apiType, ok := c.providersManager.ModelAPIType(modeModel.Provider, modeModel.Model); ok {
+		modeConfig.APIType = apiType
+	}
 
 	modeProvider, err := NewProvider(modeConfig)
 	if err != nil {
@@ -2098,6 +2101,9 @@ func (c *Controller) Chat(ctx context.Context, input ChatRequestInput, callback 
 					APIKey:         apiKey,
 					BaseURL:        c.providersManager.GetBaseURL(providerID),
 					CredentialMode: credentialMode,
+				}
+				if apiType, ok := c.providersManager.ModelAPIType(providerID, modelID); ok {
+					newConfig.APIType = apiType
 				}
 
 				newProvider, err := NewProvider(newConfig)

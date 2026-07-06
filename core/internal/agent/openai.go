@@ -73,6 +73,12 @@ func (p *OpenAIProvider) Name() string {
 		return "mistral"
 	case strings.Contains(baseURL, "bigmodel") || strings.Contains(baseURL, "z.ai"):
 		return "zhipu"
+	case strings.Contains(baseURL, "minimaxi") || strings.Contains(baseURL, "minimax"):
+		return "minimax"
+	case strings.Contains(baseURL, "generativelanguage"):
+		return "gemini"
+	case strings.Contains(baseURL, "api.x.ai"):
+		return "xai"
 	}
 	return "openai"
 }
@@ -505,7 +511,7 @@ func (p *OpenAIProvider) buildRequest(req *ChatRequest, stream bool) *openaiRequ
 	var streamOptions *openaiStreamOptions
 	if stream {
 		switch p.Name() {
-		case "openai", "openrouter", "deepseek", "xai":
+		case "openai", "openrouter", "deepseek", "xai", "minimax", "gemini":
 			streamOptions = &openaiStreamOptions{IncludeUsage: true}
 		}
 	}

@@ -36,15 +36,40 @@ func (b *SimpleBuffer) String() string {
 	return string(b.buffer)
 }
 
+func (b *SimpleBuffer) SnapshotSince(offset int) (string, int) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if offset < 0 || offset > len(b.buffer) {
+		offset = 0
+	}
+	return string(b.buffer[offset:]), len(b.buffer)
+}
+
+type PTYCallbacks struct {
+	OnOutput func(session *PTYSession, chunk []byte)
+	OnExit   func(session *PTYSession, err error)
+}
+
 // PTYSession represents an active pseudo-terminal
 type PTYSession struct {
-	ID        string
-	Cmd       *exec.Cmd
-	PTY       *os.File // The pseudo-terminal file
-	Output    *SimpleBuffer
-	CreatedAt time.Time
-	Running   bool
-	mu        sync.Mutex
+	ID           string
+	Command      string
+	Cwd          string
+	Cmd          *exec.Cmd
+	PTY          *os.File // The pseudo-terminal file
+	Output       *SimpleBuffer
+	CreatedAt    time.Time
+	Running      bool
+	ReadOffset   int
+	ExitErr      string
+	ClosedByUser bool
+	mu           sync.Mutex
+}
+
+func (s *PTYSession) SnapshotStatus() (bool, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Running, s.ExitErr
 }
 
 // PTYManager manages multiple PTY sessions
@@ -60,6 +85,10 @@ func NewPTYManager() *PTYManager {
 }
 
 func (m *PTYManager) Start(command string, args []string, cwd string, env []string) (*PTYSession, error) {
+	return m.StartWithCallbacks(command, args, cwd, env, PTYCallbacks{})
+}
+
+func (m *PTYManager) StartWithCallbacks(command string, args []string, cwd string, env []string, callbacks PTYCallbacks) (*PTYSession, error) {
 	// Create command
 	c := exec.Command(command, args...)
 	c.Dir = cwd
@@ -78,6 +107,8 @@ func (m *PTYManager) Start(command string, args []string, cwd string, env []stri
 
 	session := &PTYSession{
 		ID:        id,
+		Command:   command,
+		Cwd:       cwd,
 		Cmd:       c,
 		PTY:       ptmx,
 		Output:    outputBuf,
@@ -87,13 +118,22 @@ func (m *PTYManager) Start(command string, args []string, cwd string, env []stri
 
 	// Copy PTY output to buffer
 	go func() {
-		defer func() {
-			session.mu.Lock()
-			session.Running = false
-			session.mu.Unlock()
-			// Notify exit?
-		}()
-		_, _ = io.Copy(outputBuf, ptmx)
+		_, copyErr := io.Copy(&ptyOutputWriter{session: session, callbacks: callbacks}, ptmx)
+		waitErr := c.Wait()
+		exitErr := waitErr
+		if exitErr == nil {
+			exitErr = copyErr
+		}
+		session.mu.Lock()
+		session.Running = false
+		closedByUser := session.ClosedByUser
+		if exitErr != nil {
+			session.ExitErr = exitErr.Error()
+		}
+		session.mu.Unlock()
+		if callbacks.OnExit != nil && !closedByUser {
+			callbacks.OnExit(session, exitErr)
+		}
 	}()
 
 	m.mu.Lock()
@@ -101,6 +141,21 @@ func (m *PTYManager) Start(command string, args []string, cwd string, env []stri
 	m.mu.Unlock()
 
 	return session, nil
+}
+
+type ptyOutputWriter struct {
+	session   *PTYSession
+	callbacks PTYCallbacks
+}
+
+func (w *ptyOutputWriter) Write(p []byte) (int, error) {
+	n, err := w.session.Output.Write(p)
+	if w.callbacks.OnOutput != nil && n > 0 {
+		chunk := make([]byte, n)
+		copy(chunk, p[:n])
+		w.callbacks.OnOutput(w.session, chunk)
+	}
+	return n, err
 }
 
 // GetSession retrieves a running session
@@ -128,13 +183,17 @@ func (m *PTYManager) WriteInput(id string, data string) error {
 	return err
 }
 
-// ReadOutput retrieves buffer content (full buffer for now)
+// ReadOutput retrieves new buffer content since the previous read.
 func (m *PTYManager) ReadOutput(id string) (string, error) {
 	session := m.GetSession(id)
 	if session == nil {
 		return "", fmt.Errorf("session not found: %s", id)
 	}
-	return session.Output.String(), nil
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	output, nextOffset := session.Output.SnapshotSince(session.ReadOffset)
+	session.ReadOffset = nextOffset
+	return output, nil
 }
 
 // Close terminates the PTY session
@@ -148,6 +207,7 @@ func (m *PTYManager) Close(id string) error {
 	defer session.mu.Unlock()
 
 	if session.Running {
+		session.ClosedByUser = true
 		// Kill process
 		if session.Cmd.Process != nil {
 			_ = session.Cmd.Process.Kill()

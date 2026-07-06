@@ -28,6 +28,7 @@ var Registry = map[string]ProviderInfo{
 		ID:   "gemini",
 		Name: "Google Gemini",
 		Models: []ModelInfo{
+			{ID: "gemini-3.5-flash", Name: "Gemini 3.5 Flash", Provider: "gemini", ContextWindow: 1000000, InputPrice: 1.5, OutputPrice: 9.0, IsFree: false, SupportsTools: true, Description: "Current OpenAI-compatible Gemini route"},
 			{ID: "gemini-3-flash", Name: "Gemini 3 Flash", Provider: "gemini", ContextWindow: 1000000, InputPrice: 0, OutputPrice: 0, IsFree: true, SupportsTools: true, Description: "Fast, free tier"},
 			{ID: "gemini-3-pro", Name: "Gemini 3 Pro", Provider: "gemini", ContextWindow: 1000000, InputPrice: 1.25, OutputPrice: 5.0, IsFree: false, SupportsTools: true, Description: "Flagship model"},
 			{ID: "gemini-2.0-flash", Name: "Gemini 2.0 Flash", Provider: "gemini", ContextWindow: 1000000, InputPrice: 0.075, OutputPrice: 0.30, IsFree: false, SupportsTools: true},
@@ -39,6 +40,7 @@ var Registry = map[string]ProviderInfo{
 		Models: []ModelInfo{
 			{ID: "claude-fable-5", Name: "Claude Fable 5", Provider: "anthropic", ContextWindow: 1000000, InputPrice: 10.0, OutputPrice: 50.0, IsFree: false, SupportsTools: true, Description: "Most capable widely released Claude"},
 			{ID: "claude-opus-4-8", Name: "Claude Opus 4.8", Provider: "anthropic", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 25.0, IsFree: false, SupportsTools: true, Description: "Opus-tier agentic coding"},
+			{ID: "claude-sonnet-5", Name: "Claude Sonnet 5", Provider: "anthropic", ContextWindow: 1000000, InputPrice: 3.0, OutputPrice: 15.0, IsFree: false, SupportsTools: true, Description: "Current Sonnet-tier Claude"},
 			{ID: "claude-sonnet-4-6", Name: "Claude Sonnet 4.6", Provider: "anthropic", ContextWindow: 1000000, InputPrice: 3.0, OutputPrice: 15.0, IsFree: false, SupportsTools: true, Description: "Best speed/intelligence balance"},
 			{ID: "claude-haiku-4-5-20251001", Name: "Claude Haiku 4.5", Provider: "anthropic", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 5.0, IsFree: false, SupportsTools: true},
 		},
@@ -50,6 +52,8 @@ var Registry = map[string]ProviderInfo{
 			{ID: "gpt-5.5", Name: "GPT-5.5", Provider: "openai", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 30.0, IsFree: false, SupportsTools: true, Description: "Flagship Responses API model"},
 			{ID: "gpt-5.4", Name: "GPT-5.4", Provider: "openai", ContextWindow: 1000000, InputPrice: 2.5, OutputPrice: 15.0, IsFree: false, SupportsTools: true},
 			{ID: "gpt-5.4-mini", Name: "GPT-5.4 Mini", Provider: "openai", ContextWindow: 400000, InputPrice: 0.75, OutputPrice: 4.5, IsFree: false, SupportsTools: true},
+			{ID: "gpt-5.4-nano", Name: "GPT-5.4 Nano", Provider: "openai", ContextWindow: 400000, InputPrice: 0.2, OutputPrice: 1.25, IsFree: false, SupportsTools: true},
+			{ID: "gpt-5.6", Name: "GPT-5.6 Preview", Provider: "openai", ContextWindow: 1000000, InputPrice: 5.0, OutputPrice: 30.0, IsFree: false, SupportsTools: true},
 		},
 	},
 	"xai": {
@@ -76,7 +80,10 @@ var Registry = map[string]ProviderInfo{
 		Name: "MiniMax",
 		Models: []ModelInfo{
 			{ID: "MiniMax-M3", Name: "MiniMax M3", Provider: "minimax", ContextWindow: 1000000, InputPrice: 1.0, OutputPrice: 2.0, IsFree: false, SupportsTools: true, Description: "Current verified MiniMax route"},
-			{ID: "MiniMax-M2.5", Name: "MiniMax M2.5", Provider: "minimax", ContextWindow: 196608, InputPrice: 0.5, OutputPrice: 1.0, IsFree: false, SupportsTools: true},
+			{ID: "MiniMax-M2.7", Name: "MiniMax M2.7", Provider: "minimax", ContextWindow: 204800, InputPrice: 0.5, OutputPrice: 1.0, IsFree: false, SupportsTools: true},
+			{ID: "MiniMax-M2.7-highspeed", Name: "MiniMax M2.7 Highspeed", Provider: "minimax", ContextWindow: 204800, InputPrice: 0.5, OutputPrice: 1.0, IsFree: false, SupportsTools: true},
+			{ID: "MiniMax-M2.5", Name: "MiniMax M2.5", Provider: "minimax", ContextWindow: 204800, InputPrice: 0.5, OutputPrice: 1.0, IsFree: false, SupportsTools: true},
+			{ID: "MiniMax-M2.5-highspeed", Name: "MiniMax M2.5 Highspeed", Provider: "minimax", ContextWindow: 204800, InputPrice: 0.5, OutputPrice: 1.0, IsFree: false, SupportsTools: true},
 		},
 	},
 	"moonshot": {
@@ -92,10 +99,21 @@ var Registry = map[string]ProviderInfo{
 		ID:   "zhipu",
 		Name: "Zhipu AI (GLM)",
 		Models: []ModelInfo{
-			{ID: "glm-5.1", Name: "GLM-5.1", Provider: "zhipu", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 2.0, IsFree: false, SupportsTools: true, Description: "Latest GLM flagship"},
+			{ID: "glm-5.2", Name: "GLM-5.2", Provider: "zhipu", ContextWindow: 1000000, InputPrice: 1.0, OutputPrice: 2.0, IsFree: false, SupportsTools: true, Description: "Latest GLM flagship"},
+			{ID: "glm-5.1", Name: "GLM-5.1", Provider: "zhipu", ContextWindow: 200000, InputPrice: 1.0, OutputPrice: 2.0, IsFree: false, SupportsTools: true},
 			{ID: "glm-5-turbo", Name: "GLM-5 Turbo", Provider: "zhipu", ContextWindow: 128000, InputPrice: 0.3, OutputPrice: 0.6, IsFree: false, SupportsTools: true},
 			{ID: "glm-4.7", Name: "GLM-4.7", Provider: "zhipu", ContextWindow: 128000, InputPrice: 1.0, OutputPrice: 1.0, IsFree: false, SupportsTools: true},
 			{ID: "glm-4.7-flash", Name: "GLM-4.7 Flash", Provider: "zhipu", ContextWindow: 128000, InputPrice: 0, OutputPrice: 0, IsFree: true, SupportsTools: true},
+		},
+	},
+	"mistral": {
+		ID:   "mistral",
+		Name: "Mistral AI",
+		Models: []ModelInfo{
+			{ID: "mistral-medium-latest", Name: "Mistral Medium 3.5", Provider: "mistral", ContextWindow: 256000, InputPrice: 1.5, OutputPrice: 7.5, IsFree: false, SupportsTools: true},
+			{ID: "mistral-small-latest", Name: "Mistral Small 4", Provider: "mistral", ContextWindow: 128000, InputPrice: 0, OutputPrice: 0, IsFree: false, SupportsTools: true},
+			{ID: "devstral-latest", Name: "Devstral Latest", Provider: "mistral", ContextWindow: 128000, InputPrice: 0, OutputPrice: 0, IsFree: false, SupportsTools: true},
+			{ID: "codestral-latest", Name: "Codestral", Provider: "mistral", ContextWindow: 32000, InputPrice: 0, OutputPrice: 0, IsFree: true, SupportsTools: true},
 		},
 	},
 	"openrouter": {

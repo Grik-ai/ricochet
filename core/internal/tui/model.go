@@ -130,6 +130,16 @@ type TimelineItem struct {
 	Output        string
 	Error         string
 	ExitCode      int
+	Stream        string
+	Sequence      int64
+	Source        string
+	Background    bool
+	ProcessID     int
+	TerminalID    string
+	LogFile       string
+	StdoutPreview string
+	StderrPreview string
+	ExitSignal    string
 	DurationMs    int64
 	StartedAt     int64
 	CompletedAt   int64

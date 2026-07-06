@@ -20,8 +20,9 @@ type Host interface {
 	ListDir(path string) ([]FileInfo, error)
 
 	// Terminal operations
-	ExecuteCommand(ctx context.Context, command string, background bool) (CommandResult, error)
+	ExecuteCommand(ctx context.Context, command string, background bool, timeoutSeconds ...int) (CommandResult, error)
 	GetCommandStatus(id string) (CommandStatus, bool)
+	StopCommand(ctx context.Context, id string, force bool) (CommandStatus, bool)
 
 	// UI / Interaction
 	ShowMessage(level string, text string)
@@ -33,11 +34,20 @@ type Host interface {
 
 // CommandStatus represents the current state of a command
 type CommandStatus struct {
-	ID      string `json:"id"`
-	Status  string `json:"status"`
-	Output  string `json:"output,omitempty"`
-	Error   string `json:"error,omitempty"`
-	LogFile string `json:"log_file,omitempty"`
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	Output      string `json:"output,omitempty"`
+	Error       string `json:"error,omitempty"`
+	LogFile     string `json:"log_file,omitempty"`
+	ExitCode    int    `json:"exit_code,omitempty"`
+	DurationMs  int64  `json:"duration_ms,omitempty"`
+	StartedAt   int64  `json:"started_at,omitempty"`
+	CompletedAt int64  `json:"completed_at,omitempty"`
+	Truncated   bool   `json:"truncated,omitempty"`
+	ProcessID   int    `json:"process_id,omitempty"`
+	Background  bool   `json:"background,omitempty"`
+	Shell       string `json:"shell,omitempty"`
+	ExitSignal  string `json:"exit_signal,omitempty"`
 }
 
 // FileInfo represents basic file metadata
@@ -56,6 +66,11 @@ type CommandResult struct {
 	ExitCode    int
 	DurationMs  int64
 	Cwd         string
+	Shell       string
+	LogFile     string
+	ProcessID   int
+	Background  bool
+	ExitSignal  string
 	StartedAt   time.Time
 	CompletedAt time.Time
 	Truncated   bool
@@ -63,16 +78,29 @@ type CommandResult struct {
 
 // CommandOutputEvent is emitted by the command runner while stdout/stderr is streaming.
 type CommandOutputEvent struct {
-	ID        string
-	Command   string
-	Cwd       string
-	Output    string
-	Status    CommandLabel
-	Error     string
-	ExitCode  int
-	StartTime time.Time
-	EndTime   time.Time
-	Truncated bool
+	ID            string
+	Command       string
+	Cwd           string
+	Shell         string
+	Stream        string
+	Sequence      int64
+	Source        string
+	Background    bool
+	ProcessID     int
+	TerminalID    string
+	LogFile       string
+	Output        string
+	ResultPreview string
+	StdoutPreview string
+	StderrPreview string
+	Status        CommandLabel
+	Error         string
+	ExitCode      int
+	ExitSignal    string
+	StartTime     time.Time
+	EndTime       time.Time
+	Truncated     bool
+	Started       bool
 }
 
 type CommandEventSink func(CommandOutputEvent)
@@ -86,4 +114,18 @@ func CommandEventSinkFromContext(ctx context.Context) CommandEventSink {
 		return sink
 	}
 	return nil
+}
+
+func unixMillis(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
+}
+
+func durationMsBetween(start, end time.Time) int64 {
+	if start.IsZero() || end.IsZero() {
+		return 0
+	}
+	return end.Sub(start).Milliseconds()
 }
