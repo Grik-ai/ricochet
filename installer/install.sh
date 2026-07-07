@@ -16,27 +16,45 @@ Usage:
   sh install.sh [--editor code|cursor|windsurf|all] [--version x.y.z] [--dry-run] [--yes]
 
 Examples:
-  curl -fsSL https://grik.io/ricochet/install | sh
-  curl -fsSL https://grik.io/ricochet/install | sh -s -- --editor cursor
+  INSTALLER="$(mktemp)" && curl -fsSL https://grik.io/ricochet/install -o "$INSTALLER" && sh "$INSTALLER"
+  INSTALLER="$(mktemp)" && curl -fsSL https://grik.io/ricochet/install -o "$INSTALLER" && sh "$INSTALLER" --editor cursor
 USAGE
+}
+
+require_value() {
+  flag="$1"
+  value="${2:-}"
+  if [ -z "$value" ] || [ "${value#--}" != "$value" ]; then
+    echo "Ricochet install failed: $flag requires a value." >&2
+    exit 1
+  fi
+  printf '%s\n' "$value"
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --editor)
-      EDITOR_TARGET="${2:-}"
+      EDITOR_TARGET="$(require_value "$1" "${2:-}")"
       shift 2
       ;;
     --editor=*)
       EDITOR_TARGET="${1#--editor=}"
+      if [ -z "$EDITOR_TARGET" ]; then
+        echo "Ricochet install failed: --editor requires a value." >&2
+        exit 1
+      fi
       shift
       ;;
     --version)
-      VERSION="${2:-}"
+      VERSION="$(require_value "$1" "${2:-}")"
       shift 2
       ;;
     --version=*)
       VERSION="${1#--version=}"
+      if [ -z "$VERSION" ]; then
+        echo "Ricochet install failed: --version requires a value." >&2
+        exit 1
+      fi
       shift
       ;;
     --dry-run)

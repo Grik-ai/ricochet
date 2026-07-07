@@ -1,12 +1,12 @@
 # Homebrew Tap
 
 The release workflow copies `Formula/ricochet.rb` into the `grik-ai/homebrew-tap`
-repository as `Formula/ricochet.rb`, rewrites the `tag:` value to the pushed
-release tag, and opens a pull request.
+repository as `Formula/ricochet.rb`, rewrites the release `install.sh` URL and
+checksum to the pushed release, and opens a pull request.
 
-The formula intentionally installs only the `ricochet-install` wrapper. It does
-not mutate VS Code, Cursor, or Windsurf in `post_install`; users run the wrapper
-explicitly:
+The formula intentionally installs only the `ricochet-install` shell wrapper
+from the GitHub Release. It does not mutate VS Code, Cursor, or Windsurf in
+`post_install`; users run the wrapper explicitly:
 
 ```bash
 brew install grik-ai/tap/ricochet

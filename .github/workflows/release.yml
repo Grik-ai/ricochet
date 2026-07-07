@@ -392,13 +392,15 @@ jobs:
 
           TAP_DIR="$(mktemp -d)"
           BRANCH="ricochet-${TAG}"
+          INSTALL_SH_SHA256="$(sha256sum extension-vscode/install.sh | awk '{print $1}')"
 
           git clone "https://github.com/${HOMEBREW_TAP_REPO}.git" "${TAP_DIR}"
           mkdir -p "${TAP_DIR}/Formula"
           cp packaging/homebrew/Formula/ricochet.rb "${TAP_DIR}/Formula/ricochet.rb"
 
           cd "${TAP_DIR}"
-          perl -0pi -e "s/tag: \"v[^\"]+\"/tag: \"${TAG}\"/" Formula/ricochet.rb
+          perl -0pi -e "s#url \"https://github.com/Grik-ai/ricochet/releases/download/v[^\"]+/install\\.sh\",\\n      using: :nounzip#url \"https://github.com/Grik-ai/ricochet/releases/download/${TAG}/install.sh\",\\n      using: :nounzip#" Formula/ricochet.rb
+          perl -0pi -e "s/sha256 \"[a-f0-9]{64}\"/sha256 \"${INSTALL_SH_SHA256}\"/" Formula/ricochet.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

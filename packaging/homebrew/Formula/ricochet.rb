@@ -1,20 +1,16 @@
 class Ricochet < Formula
   desc "Installer for the Ricochet VS Code-compatible extension"
   homepage "https://grik.io/ricochet"
-  url "https://github.com/Grik-ai/ricochet.git",
-      tag: "v0.1.0"
+  url "https://github.com/Grik-ai/ricochet/releases/download/v0.2.12/install.sh",
+      using: :nounzip
+  sha256 "a66c197784d0b6bb2ddaacfb5dd750629fa55936ead3c3aae650f94051789f93"
   license "Apache-2.0"
   head "https://github.com/Grik-ai/ricochet.git", branch: "main"
 
-  depends_on "node"
-
   def install
-    bin.install "installer/bin/ricochet-install.js" => "ricochet-install"
-    libexec.install "installer/lib"
-
-    inreplace bin/"ricochet-install",
-      "require('../lib/installer')",
-      "require('#{libexec}/lib/installer')"
+    installer = build.head? ? "installer/install.sh" : "install.sh"
+    chmod 0755, installer
+    bin.install installer => "ricochet-install"
   end
 
   def caveats

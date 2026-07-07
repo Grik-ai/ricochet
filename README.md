@@ -55,7 +55,7 @@ ext install grik.ricochet
 Or use the installer for VS Code-compatible editors:
 
 ```bash
-curl -fsSL https://grik.io/ricochet/install | sh
+INSTALLER="$(mktemp)" && curl -fsSL https://grik.io/ricochet/install -o "$INSTALLER" && sh "$INSTALLER"
 ```
 
 Package-manager entrypoints run the same installer:
@@ -70,7 +70,7 @@ brew install grik-ai/tap/ricochet && ricochet-install
 Target a specific editor:
 
 ```bash
-curl -fsSL https://grik.io/ricochet/install | sh -s -- --editor cursor
+INSTALLER="$(mktemp)" && curl -fsSL https://grik.io/ricochet/install -o "$INSTALLER" && sh "$INSTALLER" --editor cursor
 ```
 
 ## Quick Start

@@ -47,7 +47,7 @@ ext install grik.ricochet
 Or use the installer:
 
 ```bash
-curl -fsSL https://grik.io/ricochet/install | sh
+INSTALLER="$(mktemp)" && curl -fsSL https://grik.io/ricochet/install -o "$INSTALLER" && sh "$INSTALLER"
 ```
 
 Package-manager entrypoints:
