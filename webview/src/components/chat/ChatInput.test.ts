@@ -252,6 +252,10 @@ describe('ChatInput layout helpers', () => {
     });
 
     it('positions the Ether menu as a fixed viewport-clamped popover', () => {
+        const belowStyle = computeEtherMenuPosition(
+            { top: 80, right: 780, bottom: 112 },
+            { width: 800, height: 720 },
+        );
         const compactStyle = computeEtherMenuPosition(
             { top: 640, right: 780, bottom: 672 },
             { width: 800, height: 720 },
@@ -262,12 +266,13 @@ describe('ChatInput layout helpers', () => {
             { width: 274, height: 56 },
         );
 
+        expect(Number(belowStyle.top)).toBeGreaterThan(112);
         expect(Number(compactStyle.width)).toBeLessThanOrEqual(226);
-        expect(Number(compactStyle.top)).toBeGreaterThan(672);
+        expect(Number(compactStyle.top)).toBeLessThan(640);
         expect(style.position).toBe('fixed');
-        expect(Number(style.top)).toBeGreaterThan(692);
-        expect(Number(style.maxHeight)).toBeGreaterThan(0);
-        expect(Number(style.top) + Number(style.maxHeight)).toBeLessThanOrEqual(720 - 12);
+        expect(Number(style.top)).toBeLessThan(660);
+        expect(Number(style.top)).toBeGreaterThanOrEqual(12);
+        expect(Number(style.maxHeight)).toBeGreaterThanOrEqual(56);
         expect(Number(style.left)).toBeGreaterThanOrEqual(12);
         expect(Number(style.left)).toBeLessThanOrEqual(800 - 274 - 12);
     });
@@ -315,6 +320,22 @@ describe('ChatInput layout helpers', () => {
         expect(source).toContain('border border-transparent bg-transparent text-vscode-fg/55');
     });
 
+    it('routes the context plus New chat action through session creation only', () => {
+        const source = readFileSync(new URL('./ChatInput.tsx', import.meta.url), 'utf8');
+        const start = source.indexOf('onCreateSession &&');
+        const end = source.indexOf('onClick={handleRequestContext}', start);
+        const newChatBlock = source.slice(start, end);
+
+        expect(newChatBlock).toContain('MessageSquarePlus');
+        expect(newChatBlock).toContain('New chat');
+        expect(newChatBlock).toContain('Start a blank session.');
+        expect(newChatBlock).toContain('setShowContextMenu(false);');
+        expect(newChatBlock).toContain('onCreateSession();');
+        expect(newChatBlock).not.toContain('onStartAgent');
+        expect(newChatBlock).not.toContain('handlePrepareAgent');
+        expect(newChatBlock).not.toContain('onSend');
+    });
+
     it('uses a hover Ether details popover without arrow, separator, or channel overlay badges', () => {
         const source = readFileSync(new URL('./ChatInput.tsx', import.meta.url), 'utf8');
 
@@ -322,8 +343,9 @@ describe('ChatInput layout helpers', () => {
         expect(source).toContain('onMouseEnter={openEtherDetails}');
         expect(source).toContain('onMouseLeave={scheduleEtherDetailsClose}');
         expect(source).toContain('etherMainStatusDotClass');
+        expect(source).toContain('createPortal(etherMenu, document.body)');
+        expect(source).toContain('fixed z-[2147483647] flex w-max items-center gap-1 overflow-y-auto');
         expect(source).toContain('w-max items-center gap-1 overflow-y-auto');
-        expect(source).toContain("placement: 'below'");
         expect(source).not.toContain('Show Ether channels');
         expect(source).not.toContain('border-l border-current/15');
         expect(source).not.toContain('h-6 w-px');

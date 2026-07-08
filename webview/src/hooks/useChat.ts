@@ -2957,6 +2957,34 @@ export function useChat(sessionId: string | null = null) {
     const suppressUnscopedEventsUntilRef = useRef(0);
     const DEBOUNCE_MS = 400; // Aggressive debounce to prevent crash during heavy streaming
 
+    const resetChatRuntimeState = useCallback(() => {
+        setMessages([]);
+        setTodos([]);
+        setHubTasks([]);
+        setWorkSummariesByTurn({});
+        setQueuedTurnsByRunId({});
+        setTaskProgress(null);
+        setPendingPermissions({});
+        setPendingEdits([]);
+        setIsLoading(false);
+        setIsStopping(false);
+
+        messagesRef.current = [];
+        activeRunIdRef.current = null;
+        terminalRunStatesRef.current.clear();
+        suppressUnscopedEventsUntilRef.current = 0;
+        pendingUpdateRef.current = null;
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = null;
+        }
+        pendingCommandEventsRef.current = [];
+        if (commandEventTimerRef.current) {
+            clearTimeout(commandEventTimerRef.current);
+            commandEventTimerRef.current = null;
+        }
+    }, []);
+
     const markRunTerminal = useCallback((runId?: string | null, status: WorkSummaryStatus = 'completed') => {
         const id = runId || activeRunIdRef.current;
         if (id) terminalRunStatesRef.current.set(id, status);
@@ -3401,6 +3429,15 @@ export function useChat(sessionId: string | null = null) {
                     setQueuedTurnsByRunId({});
                     setHubTasks([]);
                     break;
+                case 'session_created':
+                    {
+                        const created = message.payload as { id?: string; session_id?: string; sessionId?: string };
+                        const createdSessionId = created?.id || created?.session_id || created?.sessionId;
+                        if (createdSessionId) {
+                            resetChatRuntimeState();
+                        }
+                    }
+                    break;
                 case 'state':
                     // ... existing
                     const state = message.payload as { messages?: ChatMessage[]; mode?: string; todos?: Todo[]; session_id?: string };
@@ -3423,20 +3460,13 @@ export function useChat(sessionId: string | null = null) {
                     const loaded = message.payload as { id?: string; session_id?: string; sessionId?: string; messages?: ChatMessage[]; todos?: Todo[] };
                     const loadedSessionId = loaded.id || loaded.session_id || loaded.sessionId;
                     if (sessionId && loadedSessionId && loadedSessionId !== sessionId) return;
+                    resetChatRuntimeState();
                     {
                         const nextMessages = promoteCompletedIntermediateDrafts(filterRenderableMessages((loaded.messages || []).map(withInferredRunPhase)));
                         setMessages(nextMessages);
                         setWorkSummariesByTurn(rebuildWorkSummariesFromMessages(nextMessages, loadedSessionId || sessionId || undefined));
                     }
-                    setQueuedTurnsByRunId({});
-                    if (!activeRunIdRef.current) {
-                        setTaskProgress(null);
-                    }
-                    activeRunIdRef.current = null;
                     setTodos(loaded.todos || []);
-                    setHubTasks([]);
-                    setIsLoading(false);
-                    setIsStopping(false);
                     break;
                 case 'mode_changed':
                     // ... existing
@@ -3754,35 +3784,14 @@ export function useChat(sessionId: string | null = null) {
         clearQueuedRun,
         failQueuedRun,
         completeRuntimeRun,
-        enqueueCommandWorkEvent
+        enqueueCommandWorkEvent,
+        resetChatRuntimeState
     ]);
 
     // Request state when sessionId changes (restores history when switching sessions)
     useEffect(() => {
         // Clear messages first to prevent showing old session's messages
-        setMessages([]);
-        setTodos([]);
-        setHubTasks([]);
-        setWorkSummariesByTurn({});
-        setQueuedTurnsByRunId({});
-        setTaskProgress(null);
-        setPendingPermissions({});
-        setPendingEdits([]);
-        activeRunIdRef.current = null;
-        terminalRunStatesRef.current.clear();
-        suppressUnscopedEventsUntilRef.current = 0;
-        pendingUpdateRef.current = null;
-        if (debounceTimerRef.current) {
-            clearTimeout(debounceTimerRef.current);
-            debounceTimerRef.current = null;
-        }
-        pendingCommandEventsRef.current = [];
-        if (commandEventTimerRef.current) {
-            clearTimeout(commandEventTimerRef.current);
-            commandEventTimerRef.current = null;
-        }
-        setIsLoading(false);
-        setIsStopping(false);
+        resetChatRuntimeState();
 
         if (!sessionId) {
             return;
@@ -3795,7 +3804,7 @@ export function useChat(sessionId: string | null = null) {
             postMessage({ type: 'get_command_events', payload: { session_id: sessionId, limit: 500 } });
         }, 10);
         return () => clearTimeout(t);
-    }, [postMessage, sessionId]);
+    }, [postMessage, resetChatRuntimeState, sessionId]);
 
     // ... existing initialization
 

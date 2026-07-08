@@ -14,8 +14,8 @@ export function useSessions() {
                     setSessions((message.payload as { sessions: SessionMetadata[] }).sessions || []);
                     break;
                 case 'session_created':
-                    const createdPayload = (message.payload || {}) as { id?: string; sessionId?: string };
-                    const createdId = createdPayload.id || createdPayload.sessionId || null;
+                    const createdPayload = (message.payload || {}) as { id?: string; session_id?: string; sessionId?: string };
+                    const createdId = createdPayload.id || createdPayload.session_id || createdPayload.sessionId || null;
                     if (createdId) {
                         setCurrentSessionId(createdId);
                     }
@@ -24,7 +24,11 @@ export function useSessions() {
                     break;
                 case 'session_loaded':
                     // Handled by useChat mostly, but we update current ID here
-                    setCurrentSessionId((message.payload as { id: string }).id);
+                    const loadedPayload = (message.payload || {}) as { id?: string; session_id?: string; sessionId?: string };
+                    const loadedId = loadedPayload.id || loadedPayload.session_id || loadedPayload.sessionId || null;
+                    if (loadedId) {
+                        setCurrentSessionId(loadedId);
+                    }
                     break;
                 case 'session_metadata_updated':
                     const metadata = message.payload as SessionMetadata;

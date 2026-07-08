@@ -186,7 +186,7 @@ export function ChatView({
     model,
     onModelChange
 }: ChatViewProps) {
-    const { sessions, currentSessionId, loadSession } = useSessions();
+    const { sessions, currentSessionId, createSession, loadSession } = useSessions();
     const {
         messages,
         todos,
@@ -435,6 +435,7 @@ export function ChatView({
             onChange={setInputValue}
             onSend={handleSend}
             onStartAgent={handleStartAgent}
+            onCreateSession={createSession}
             onCancel={handleCancelRuntime}
             isLoading={runtimeActive}
             isStopping={isStopping}

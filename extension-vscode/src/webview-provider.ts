@@ -1652,7 +1652,16 @@ export class WebviewProvider implements vscode.WebviewViewProvider {
                 console.error('Failed to hydrate new session:', e);
             }
 
-            this.postMessage({ type: 'session_created', payload: { id: newId } });
+            const sessionPayload = { id: newId, session_id: newId, sessionId: newId };
+            this.postMessage({ type: 'session_created', payload: sessionPayload });
+            this.postMessage({
+                type: 'session_loaded',
+                payload: {
+                    ...sessionPayload,
+                    messages: [],
+                    todos: []
+                }
+            });
         }
     }
 

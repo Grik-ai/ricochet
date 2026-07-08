@@ -2,7 +2,7 @@
   "name": "ricochet",
   "displayName": "Ricochet",
   "description": "Ricochet is the first hybrid coding agent that lives in your IDE and your pocket. Code autonomously with a powerful VS Code assistant, then switch to Ether Mode to control your development environment remotely via messenger. Build, debug, and deploy from anywhere.",
-  "version": "0.1.0",
+  "version": "0.2.14",
   "publisher": "grik",
   "icon": "assets/ricochet.png",
   "repository": {

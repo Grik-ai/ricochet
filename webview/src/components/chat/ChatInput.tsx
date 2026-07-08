@@ -1,6 +1,6 @@
 import { useRef, useEffect, KeyboardEvent, useState, useCallback, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { Send, Mic, Square, ChevronDown, FileCode, StopCircle, X, Plus, Bot, Hand, ShieldCheck, ShieldAlert, CheckCircle2, Play, Info, RotateCcw, Gauge, Paperclip, Image as ImageIcon, Settings, FileText, type LucideIcon } from 'lucide-react';
+import { Send, Mic, Square, ChevronDown, FileCode, StopCircle, X, Plus, Bot, Hand, ShieldCheck, ShieldAlert, CheckCircle2, Play, Info, RotateCcw, Gauge, Paperclip, Image as ImageIcon, Settings, FileText, MessageSquarePlus, type LucideIcon } from 'lucide-react';
 import { AffectedFilesList } from './AffectedFilesList';
 import { useAudioRecorder } from '../../hooks/useAudioRecorder';
 import { useVSCodeApi } from '../../hooks/useVSCodeApi';
@@ -36,6 +36,7 @@ interface ChatInputProps {
     onChange: (value: string) => void;
     onSend: (value?: string, contextFiles?: ContextFilePayload[]) => void;
     onStartAgent?: (value?: string, contextFiles?: ContextFilePayload[]) => void;
+    onCreateSession?: () => void;
     onCancel?: () => void;
     isLoading?: boolean;
     isStopping?: boolean;
@@ -169,7 +170,6 @@ export function computeEtherMenuPosition(
         height: menuSize.height,
         minWidth: Math.min(212, menuSize.width),
         align: 'end',
-        placement: 'below',
         gap: 6,
     });
 }
@@ -840,6 +840,7 @@ export function ChatInput(props: ChatInputProps) {
         onChange,
         onSend,
         onStartAgent,
+        onCreateSession,
         onCancel,
         isLoading = false,
         isStopping = false,
@@ -1651,6 +1652,24 @@ export function ChatInput(props: ChatInputProps) {
             role="dialog"
             aria-label="Insert context"
         >
+            {onCreateSession && (
+                <>
+                    <button
+                        onClick={() => {
+                            setShowContextMenu(false);
+                            onCreateSession();
+                        }}
+                        className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"
+                    >
+                        <MessageSquarePlus className="mt-0.5 h-4 w-4 text-vscode-fg/55" />
+                        <span className="min-w-0">
+                            <span className="block text-[12px] font-medium text-vscode-fg/85">New chat</span>
+                            <span className="block text-[10px] text-vscode-fg/45">Start a blank session.</span>
+                        </span>
+                    </button>
+                    <div className="mx-3 border-t border-vscode-border/70" />
+                </>
+            )}
             <button
                 onClick={handleRequestContext}
                 className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-vscode-list-hoverBackground transition-colors"

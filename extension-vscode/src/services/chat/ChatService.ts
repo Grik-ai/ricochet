@@ -129,7 +129,7 @@ export class ChatService {
                         message.payload.session_id = this.activeSessionId;
                         this.postMessage({
                             type: 'session_created',
-                            payload: { id: this.activeSessionId, sessionId: this.activeSessionId }
+                            payload: { id: this.activeSessionId, session_id: this.activeSessionId, sessionId: this.activeSessionId }
                         });
                         await this.notifySessionMetadata(this.activeSessionId);
                     }

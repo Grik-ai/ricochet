@@ -1,6 +1,6 @@
 {
   "name": "@grik-ai/ricochet-installer",
-  "version": "0.1.0",
+  "version": "0.2.14",
   "description": "Installer for the Ricochet VS Code-compatible extension.",
   "license": "Apache-2.0",
   "repository": {

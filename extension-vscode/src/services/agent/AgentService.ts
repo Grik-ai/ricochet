@@ -94,7 +94,7 @@ export class AgentService {
         } else {
             this.postMessage({
                 type: 'session_created',
-                payload: { id: this.activeSessionId, sessionId: this.activeSessionId }
+                payload: { id: this.activeSessionId, session_id: this.activeSessionId, sessionId: this.activeSessionId }
             });
             await this.notifyActiveSessionMetadata();
 
